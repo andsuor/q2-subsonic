@@ -139,6 +139,7 @@ type daemon struct {
 	lib                *libJob
 	libTaken           int64                      // the library request whose answer was taken last (libPoll)
 	libAgain           bool                       // a request was wanted while one awaited its answer: sent once that comes
+	libRest            [2][]string                // the import and add paths the request on file had no room for (I20)
 	resolved           map[string][]subsonic.Song // selection key -> its songs, as last fetched
 	libCount           [2]int                     // albums, playlists of the Entire Library, as last resolved
 	playSeq            int                        // the latest play request; an older one still waiting is dropped
@@ -328,11 +329,14 @@ func (d *daemon) tick() {
 	}
 }
 
+// idle is whether the app may exit: no request for idleAfter (the end of a sync counts as one), no
+// sync or stream, and no library request awaiting its answer, as the firmware works on that only
+// while the app runs (I15).
 func (d *daemon) idle(now time.Time) bool {
 	d.mu.Lock()
-	last := d.lastReq
+	last, lib := d.lastReq, d.lib != nil && !d.lib.done
 	d.mu.Unlock()
-	return now.Sub(last) >= idleAfter && !d.runner.Busy() && !d.stream.active()
+	return now.Sub(last) >= idleAfter && !lib && !d.runner.Busy() && !d.stream.active()
 }
 
 // close ends what the app runs before it exits; a sync paused here resumes at the next Sync.

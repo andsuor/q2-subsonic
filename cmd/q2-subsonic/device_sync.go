@@ -416,13 +416,33 @@ func (d *daemon) sendLibrary() (*libJob, error) {
 	return d.writeLibrary(true, imports, adds)
 }
 
-// writeLibrary writes a request, the one the Sync page follows from now. d.mu is held.
+// libMax is the most a library request may hold: the firmware (F3) reads 32 KiB (LIB_MAX) and
+// answers "Request too long" to more.
+const libMax = 30 << 10
+
+// writeLibrary writes a request, the one the Sync page follows from now: scan when asked, and the
+// import and add lines that fit in libMax. The rest wait in d.libRest for a follow-up, sent once
+// this one is answered (libPoll), so any number of playlists is imported (I20). d.mu is held.
 func (d *daemon) writeLibrary(scan bool, imports, adds []string) (*libJob, error) {
 	seq := time.Now().UnixNano()
+	room := libMax - len(strconv.FormatInt(seq, 10)) - 1
+	if scan {
+		room -= len("scan\n")
+	}
+	fit := func(paths []string, word string) (now, rest []string) {
+		for i, p := range paths {
+			if room -= len(word) + len(p) + 2; room < 0 {
+				return paths[:i], paths[i:]
+			}
+		}
+		return paths, nil
+	}
+	imports, restImports := fit(imports, "import")
+	adds, restAdds := fit(adds, "add")
 	if err := fw.RequestLibrary(d.libReq(), seq, scan, imports, adds); err != nil {
 		return nil, err
 	}
-	d.lib = &libJob{seq: seq}
+	d.lib, d.libRest = &libJob{seq: seq}, [2][]string{restImports, restAdds}
 	return d.lib, nil
 }
 
@@ -452,6 +472,7 @@ func (d *daemon) libPoll() {
 	}
 	if ok {
 		again, clash, err := d.runner.Imported(sent, exists)
+		rest := d.libRest
 		switch {
 		case errors.Is(err, syncer.ErrBusy):
 			return // a sync holds the manifest: taken once it ends
@@ -461,9 +482,9 @@ func (d *daemon) libPoll() {
 		case len(clash) > 0:
 			ok, msg = false, "Couldn't import "+strings.TrimSuffix(filepath.Base(clash[0]), ".m3u")+
 				": a playlist with that name is already on the Q2"
-		case len(again) > 0:
+		case !d.libAgain && len(again)+len(rest[0])+len(rest[1]) > 0: // libAgain's request names them all
 			d.libTaken = seq
-			_, err := d.writeLibrary(false, nil, again)
+			_, err := d.writeLibrary(false, there(rest[0]), there(append(rest[1], again...)))
 			if err == nil {
 				return // the follow-up is the request followed now
 			}
@@ -471,6 +492,7 @@ func (d *daemon) libPoll() {
 			ok, msg = false, "Couldn't ask for a library update"
 		}
 	}
+	d.libRest = [2][]string{}
 	d.libTaken = seq
 	if j := d.lib; j != nil && j.seq == seq {
 		j.done, j.ok, j.msg, j.doneAt = true, ok, msg, time.Now()
@@ -483,9 +505,24 @@ func (d *daemon) libPoll() {
 	}
 }
 
+// there is paths but those gone since (a sync deleted the playlist): the firmware fails a whole
+// request over one it can't find.
+func there(paths []string) []string {
+	var out []string
+	for _, p := range paths {
+		if exists(p) {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // syncDone is the runner's OnDone: with cap library, a sync that changed anything asks the firmware
 // to scan and import, whether or not the Sync page is open.
 func (d *daemon) syncDone(p plan.Plan) {
+	d.mu.Lock()
+	d.lastReq = time.Now() // the summary and Failed Songs stay as long as after a press (I15)
+	d.mu.Unlock()
 	if !d.caps.Library || len(p.Add)+len(p.Replace)+len(p.Rename)+len(p.Remove) == 0 && !p.PlaylistsStale {
 		return
 	}

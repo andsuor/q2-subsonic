@@ -1153,3 +1153,82 @@ func TestNoHoldWhileStreamWaits(t *testing.T) {
 		t.Fatal("the stream ended")
 	}
 }
+
+// The end of a sync counts as activity, and the app stays up while its library request awaits
+// the firmware's answer, which the firmware works on only while the app runs (I15).
+func TestStaysUpAfterSync(t *testing.T) {
+	n := &nav{albums: 1, songsPer: 2, block: make(chan struct{})}
+	d := newTestDaemon(t, n, "library", true)
+	d.do("toggle", "album:al0")
+	d.preview(t)
+	d.do("start")
+	eventually(t, "the sync to run", d.runner.Busy)
+	d.mu.Lock()
+	d.lastReq = time.Now().Add(-time.Hour) // an unattended sync: no request for an hour
+	d.mu.Unlock()
+	close(n.block)
+	eventually(t, "the sync to finish", func() bool { return d.runner.Snapshot().State == "done" })
+	if d.idle(time.Now()) {
+		t.Fatal("exits the moment the sync ends")
+	}
+	seq := d.libReqSeq(t)
+	if d.idle(time.Now().Add(2 * idleAfter)) {
+		t.Fatal("exits before the library request is answered")
+	}
+	d.answer(seq + " ok")
+	d.tick()
+	if !d.idle(time.Now().Add(2 * idleAfter)) {
+		t.Fatal("never idles once answered")
+	}
+}
+
+// More playlists than one request holds (the firmware takes 32 KiB) go in several: scan and the
+// first in one, the rest in follow-ups, each sent once the one before is answered (I20).
+func TestLibraryRequestSplit(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "library", true)
+	m := &library.Manifest{Playlists: map[string]string{}, Imported: map[string]bool{}}
+	want := map[string]bool{}
+	for i := 0; i < 400; i++ {
+		name := fmt.Sprintf("%03d %s", i, strings.Repeat("x", 100))
+		f := filepath.Join(d.card, "_explaylist_data", name+".m3u")
+		os.MkdirAll(filepath.Dir(f), 0o755)
+		os.WriteFile(f, []byte("#EXTM3U\n"), 0o644)
+		m.Playlists[name], m.Imported[f] = f, i%2 == 0
+		want[f] = true
+	}
+	if err := m.Save(d.card, filepath.Join(d.card, ".subsonic", "manifest.json")); err != nil {
+		t.Fatal(err)
+	}
+	d.syncDone(plan.Plan{PlaylistsStale: true})
+	sent := map[string]bool{}
+	for k := 0; ; k++ {
+		b, _ := os.ReadFile(filepath.Join(d.tmp, "q2-subsonic.library"))
+		if len(b) >= 32<<10-2 {
+			t.Fatalf("request %d: %d bytes, the firmware's limit is 32 KiB", k, len(b))
+		}
+		seq, lines := d.libReq(t)
+		if scan := len(lines) > 0 && lines[0] == "scan"; scan != (k == 0) {
+			t.Fatalf("request %d: scan %v", k, scan)
+		} else if scan {
+			lines = lines[1:]
+		}
+		for _, l := range lines {
+			_, p, _ := strings.Cut(l, " ")
+			if sent[p] || !want[p] {
+				t.Fatalf("request %d: %q", k, l)
+			}
+			sent[p] = true
+		}
+		d.answer(seq + " ok")
+		d.tick()
+		if d.lib.done {
+			break
+		}
+		if k > 10 {
+			t.Fatal("no end")
+		}
+	}
+	if len(sent) != 400 || !d.lib.ok {
+		t.Fatalf("%d sent, ok %v", len(sent), d.lib.ok)
+	}
+}

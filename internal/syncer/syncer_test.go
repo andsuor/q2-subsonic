@@ -1186,3 +1186,18 @@ func TestMoving(t *testing.T) {
 		t.Error("moving after Cancel")
 	}
 }
+
+// The runner is Busy until OnDone has returned, so the app never exits between a sync's end and
+// its library request (I15).
+func TestBusyUntilOnDone(t *testing.T) {
+	_, r, root := setup(t)
+	in, out := make(chan struct{}), make(chan struct{})
+	r.OnDone = func(plan.Plan) { close(in); <-out }
+	r.Start(plan.Plan{Add: []plan.Want{want(root, "a", "original")}})
+	<-in
+	busy := r.Busy()
+	close(out)
+	if !busy {
+		t.Fatal("not busy in OnDone")
+	}
+}

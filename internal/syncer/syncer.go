@@ -62,7 +62,8 @@ type Runner struct {
 	CardMounted func() bool
 	Now         func() time.Time
 	Net         *NetSlot
-	// OnDone is called, with no lock held, after each run that ends in state "done". It must not block.
+	// OnDone is called, with no lock held, after each run that ends in state "done". It must not
+	// block. The runner is Busy until it returns.
 	OnDone func(plan.Plan)
 
 	root string
@@ -73,6 +74,7 @@ type Runner struct {
 	mu                    sync.Mutex
 	plan                  *plan.Plan
 	state, stopAs         string
+	ending                bool // a run is done, and its OnDone hasn't returned yet
 	err                   error
 	cancel                context.CancelFunc
 	done                  chan struct{}
@@ -135,6 +137,9 @@ func (r *Runner) run(ctx context.Context, p plan.Plan, done chan struct{}) {
 		if finished && r.OnDone != nil {
 			r.OnDone(p)
 		}
+		r.mu.Lock()
+		r.ending = false
+		r.mu.Unlock()
 	}()
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -151,7 +156,7 @@ func (r *Runner) run(ctx context.Context, p plan.Plan, done chan struct{}) {
 		r.state, r.err = "error", err
 		r.logf("sync: %v", err)
 	default:
-		r.state, finished = "done", true
+		r.state, finished, r.ending = "done", true, true
 	}
 }
 
@@ -317,10 +322,11 @@ func (r *Runner) Moving(id string) bool {
 	return false
 }
 
+// Busy is whether a sync runs, or has just ended and its OnDone hasn't returned (I15).
 func (r *Runner) Busy() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.state == "running"
+	return r.state == "running" || r.ending
 }
 
 func (r *Runner) Snapshot() Snapshot {
