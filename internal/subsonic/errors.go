@@ -41,6 +41,10 @@ func isCert(err error) bool {
 
 // Message maps err to the user-facing sign-in copy.
 func Message(err error, host string) string {
+	var he *APIError
+	if errors.As(err, &he) && he.Code == 0 && he.HTTP != 0 && (he.HTTP < 200 || he.HTTP > 299) && errors.Is(err, ErrUnreachable) {
+		return fmt.Sprintf("Navidrome answered HTTP %d", he.HTTP)
+	}
 	switch {
 	case errors.Is(err, ErrAuth):
 		return "Wrong username or password"

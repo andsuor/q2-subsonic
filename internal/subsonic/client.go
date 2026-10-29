@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -36,7 +37,17 @@ func New(c Creds, hc *http.Client) (*Client, error) {
 	if u.Scheme != "https" {
 		return nil, ErrInsecure
 	}
-	return &Client{c: c, base: u, hc: hc}, nil
+	h := *hc
+	h.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if req.URL.Scheme != "https" {
+			return ErrInsecure
+		}
+		if len(via) >= 10 {
+			return errors.New("too many redirects")
+		}
+		return nil
+	}
+	return &Client{c: c, base: u, hc: &h}, nil
 }
 
 // auth returns the query values common to every request: a fresh salt and token each time.
@@ -82,11 +93,7 @@ func (c *Client) call(ctx context.Context, op string, q url.Values) (json.RawMes
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		c.logf("GET %s -> %v", u, err)
-		kind := ErrUnreachable
-		if isCert(err) {
-			kind = ErrCert
-		}
-		return nil, &APIError{Op: op, Msg: applog.Redact(err.Error()), kind: kind}
+		return nil, &APIError{Op: op, Msg: applog.Redact(err.Error()), kind: transportKind(err)}
 	}
 	defer resp.Body.Close()
 	c.logf("GET %s -> %d", u, resp.StatusCode)
@@ -98,6 +105,9 @@ func (c *Client) call(ctx context.Context, op string, q url.Values) (json.RawMes
 		R json.RawMessage `json:"subsonic-response"`
 	}
 	if json.Unmarshal(body, &env) != nil || env.R == nil {
+		if resp.StatusCode < 200 || resp.StatusCode > 299 {
+			return nil, &APIError{Op: op, HTTP: resp.StatusCode, Msg: http.StatusText(resp.StatusCode), kind: ErrUnreachable}
+		}
 		return nil, &APIError{Op: op, HTTP: resp.StatusCode, Msg: "not a Subsonic response", kind: ErrNotSubsonic}
 	}
 	var st struct {
@@ -291,12 +301,22 @@ func (c *Client) Get(ctx context.Context, u string, from int64) (*http.Response,
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		c.logf("GET %s -> %v", u, err)
-		kind := ErrUnreachable
-		if isCert(err) {
-			kind = ErrCert
-		}
-		return nil, &APIError{Op: "get", Msg: applog.Redact(err.Error()), kind: kind}
+		return nil, &APIError{Op: "get", Msg: applog.Redact(err.Error()), kind: transportKind(err)}
 	}
 	c.logf("GET %s -> %d", u, resp.StatusCode)
+	if resp.StatusCode != 200 && resp.StatusCode != 206 {
+		resp.Body.Close()
+		return nil, &APIError{Op: "get", HTTP: resp.StatusCode, Msg: http.StatusText(resp.StatusCode), kind: ErrUnreachable}
+	}
 	return resp, nil
+}
+
+func transportKind(err error) error {
+	switch {
+	case errors.Is(err, ErrInsecure):
+		return ErrInsecure
+	case isCert(err):
+		return ErrCert
+	}
+	return ErrUnreachable
 }

@@ -196,12 +196,61 @@ func TestGetRange(t *testing.T) {
 }
 
 func TestErrorAndLogRedacted(t *testing.T) {
-	srv, c := serve(t, "ping.json", nil)
-	lg := applog.Open(t.TempDir()+"/l", 1<<20)
-	c.Log = lg
+	var q url.Values
+	srv, c := serve(t, "ping.json", &q)
+	path := t.TempDir() + "/l"
+	c.Log = applog.Open(path, 1<<20)
+	if err := c.Ping(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(path)
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	if len(lines) != 1 || !strings.Contains(lines[0], "t=***") || !strings.Contains(lines[0], "s=***") ||
+		strings.Contains(lines[0], "pw") || strings.Contains(lines[0], q.Get("t")) || strings.Contains(lines[0], q.Get("s")) {
+		t.Fatalf("log: %q", b)
+	}
 	srv.Close()
 	err := c.Ping(context.Background())
-	if strings.Contains(err.Error(), "pw") || regexp.MustCompile(`[?&]t=[0-9a-f]{32}`).MatchString(err.Error()) {
-		t.Fatalf("token in error: %v", err)
+	if strings.Contains(err.Error(), "pw") || regexp.MustCompile(`[?&][ts]=[0-9a-f]{12}`).MatchString(err.Error()) {
+		t.Fatalf("secret in error: %v", err)
+	}
+}
+
+func TestRedirectToHTTPRefused(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://127.0.0.1:1/x", http.StatusFound)
+	}))
+	defer srv.Close()
+	c, _ := New(Creds{Server: srv.URL, User: "u", Password: "pw"}, srv.Client())
+	if err := c.Ping(context.Background()); !errors.Is(err, ErrInsecure) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+func TestHTTP502NotSubsonic(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(502)
+		w.Write([]byte("<html>bad gateway</html>"))
+	}))
+	defer srv.Close()
+	c, _ := New(Creds{Server: srv.URL, User: "u", Password: "pw"}, srv.Client())
+	err := c.Ping(context.Background())
+	var ae *APIError
+	if errors.Is(err, ErrNotSubsonic) || !errors.Is(err, ErrUnreachable) || !errors.As(err, &ae) || ae.HTTP != 502 {
+		t.Fatalf("got %v", err)
+	}
+	if m := Message(err, "h"); m != "Navidrome answered HTTP 502" {
+		t.Fatal(m)
+	}
+}
+
+func TestGetNon2xx(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(404) }))
+	defer srv.Close()
+	c, _ := New(Creds{Server: srv.URL, User: "u", Password: "pw"}, srv.Client())
+	resp, err := c.Get(context.Background(), srv.URL+"/x", 0)
+	var ae *APIError
+	if resp != nil || !errors.As(err, &ae) || ae.HTTP != 404 {
+		t.Fatalf("got %v %v", resp, err)
 	}
 }
