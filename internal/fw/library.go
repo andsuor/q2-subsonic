@@ -12,7 +12,7 @@ import (
 
 // RequestLibrary writes a library request to path (atomically via q2.WriteFile).
 // Format: <seq>, then "scan", then "import <path>" for each m3u.
-// Each import path must be directly in /mnt/mmc/_explaylist_data/ (no nesting, no ".."),
+// Each import path must be directly in a card's _explaylist_data/ (no nesting, no ".."),
 // end in .m3u, and contain no newline or carriage return (line injection prevention).
 // On any validation error, nothing is written.
 func RequestLibrary(path string, seq int64, m3us []string) error {
@@ -29,10 +29,9 @@ func RequestLibrary(path string, seq int64, m3us []string) error {
 			return fmt.Errorf("import path is not clean: %s", m3u)
 		}
 
-		// Directory must be exactly /mnt/mmc/_explaylist_data
-		dir := filepath.Dir(m3u)
-		if dir != "/mnt/mmc/_explaylist_data" {
-			return fmt.Errorf("import path not directly in /mnt/mmc/_explaylist_data/: %s", m3u)
+		// Directory must be a card's _explaylist_data (the firmware checks it is /mnt/mmc's)
+		if !filepath.IsAbs(m3u) || filepath.Base(filepath.Dir(m3u)) != "_explaylist_data" {
+			return fmt.Errorf("import path not directly in _explaylist_data/: %s", m3u)
 		}
 
 		// Base name must be non-empty, end in .m3u, and have non-empty name part
@@ -44,6 +43,10 @@ func RequestLibrary(path string, seq int64, m3us []string) error {
 		namePart := strings.TrimSuffix(base, ".m3u")
 		if namePart == "" {
 			return fmt.Errorf("import path must have a name before .m3u extension: %s", m3u)
+		}
+		// The firmware refuses ".." anywhere in the name, and with it the whole request
+		if strings.Contains(base, "..") {
+			return fmt.Errorf("import path has \"..\" in its name: %s", m3u)
 		}
 	}
 

@@ -364,9 +364,14 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 	}
 
 	for name, f := range m.Playlists {
-		if !library.ValidPlaylistFile(r.root, f) {
+		switch {
+		case !library.ValidPlaylistFile(r.root, f):
 			r.logf("sync: ignoring bad recorded playlist path %q for %s", f, name)
 			delete(m.Playlists, name)
+		case strings.Contains(filepath.Base(f), ".."): // an older SafeName's; the firmware refuses it
+			if m.Remove(r.root, f) == nil {
+				delete(m.Playlists, name) // written again below under a clean name
+			}
 		}
 	}
 	// Legacy "Navidrome - *.m3u" files are removed only in the sync after the one-time migration

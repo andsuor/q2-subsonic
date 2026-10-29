@@ -23,8 +23,37 @@ func TestSafeNameTrailingDotsSpaces(t *testing.T) {
 	if got := SafeName("Hello. . "); got != "Hello" {
 		t.Fatal(got)
 	}
-	if got := SafeName(".."); got != "_" {
+	if got := SafeName(".."); got != "…" { // never the ".." component
 		t.Fatal(got)
+	}
+}
+
+// The firmware refuses ".." anywhere in a playlist or queue line (I18), and the Q2's scan skips a
+// folder or file whose name starts with "." (M40).
+func TestSafeNameDots(t *testing.T) {
+	for in, want := range map[string]string{
+		"Wait... What": "Wait… What", "...Baby One More Time": "…Baby One More Time", "Oops!... I Did It Again": "Oops!… I Did It Again",
+		".38 Special": "_38 Special", "a.b": "a.b", "Wait..": "Wait…", ".": "_",
+	} {
+		if got := SafeName(in); got != want {
+			t.Errorf("%q: %q, want %q", in, got, want)
+		}
+	}
+}
+
+// StaleName finds song paths made before SafeName cleaned dots, so the plan moves them.
+func TestStaleName(t *testing.T) {
+	for p, want := range map[string]bool{
+		"/r/Subsonic/.38 Special/Alb/01 - a.flac":     true,
+		"/r/Subsonic/A/...Like Clockwork/01 - a.flac": true,
+		"/r/Subsonic/A/B/01 - Wait... What.flac":      true,
+		"/r/Subsonic/A/B/01 - a.b.flac":               false,
+		"/r/Subsonic/…And You/B/01 - a.flac":          false,
+		"/r/.subsonic/x/y":                            false,
+	} {
+		if StaleName("/r", p) != want {
+			t.Errorf("%s: want %v", p, want)
+		}
 	}
 }
 

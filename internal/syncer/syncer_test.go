@@ -705,3 +705,21 @@ func TestUserNavidromePrefixKept(t *testing.T) {
 		}
 	}
 }
+
+// A playlist file recorded under an older SafeName with ".." in it, which the firmware refuses (and
+// with it the whole library update), is replaced by one with a clean name (I18).
+func TestDottedPlaylistFileReplaced(t *testing.T) {
+	var old string
+	root, m := syncPlaylists(t, func(root string) {
+		old = root + "/_explaylist_data/Wait... What.m3u"
+		put(t, old, "#EXTM3U\n")
+		(&library.Manifest{Playlists: map[string]string{"Wait... What": old}}).Save(root, root+"/.subsonic/manifest.json")
+	}, "Wait... What")
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Error("old file left")
+	}
+	want := root + "/_explaylist_data/Wait… What.m3u"
+	if _, err := os.Stat(want); err != nil || m.Playlists["Wait... What"] != want {
+		t.Fatal(err, m.Playlists)
+	}
+}

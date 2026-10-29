@@ -160,3 +160,17 @@ func TestPlanUnsafeSuffixTranscodes(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+// A song synced under a name SafeName no longer makes (a leading "." the scan hides, or ".." the
+// firmware refuses) is moved to its clean path though its metadata is unchanged (I18, M40).
+func TestPlanRepathsDottedNames(t *testing.T) {
+	s := song("s1", "One")
+	s.AlbumArtist = ".38 Special"
+	old := library.Entry{ID: "s1", Path: root + "/Subsonic/.38 Special/2020 - Alb/01 - One.flac", Quality: "original",
+		Size: 1000, Items: []string{"song:s1"}, Meta: library.MetaKey(s, "original")}
+	sel := selection.Set{Items: []selection.Item{item("song", "s1", "original")}}
+	p := Compute(sel, map[string][]subsonic.Song{"song:s1": {s}}, nil, manifest(&old), root, big)
+	if len(p.Rename) != 1 || p.Rename[0].To != root+"/Subsonic/_38 Special/2020 - Alb/01 - One.flac" {
+		t.Fatalf("plan = %+v", p)
+	}
+}

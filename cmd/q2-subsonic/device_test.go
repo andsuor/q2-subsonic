@@ -819,3 +819,20 @@ func TestSignOutDropsPendingPlay(t *testing.T) {
 		t.Fatal("stream started after sign-out")
 	}
 }
+
+// A recorded playlist file whose name has ".." (the firmware refuses it, and with it the whole
+// request) is left out of the library request, so the scan and the other playlists still run (I18).
+func TestLibraryRequestSkipsDottedPlaylist(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "library", true)
+	good, bad := filepath.Join(d.card, "_explaylist_data", "Mix.m3u"), filepath.Join(d.card, "_explaylist_data", "Wait... What.m3u")
+	for _, f := range []string{good, bad} {
+		os.MkdirAll(filepath.Dir(f), 0o755)
+		os.WriteFile(f, []byte("#EXTM3U\n"), 0o644)
+	}
+	(&library.Manifest{Playlists: map[string]string{"Mix": good, "Wait... What": bad}}).Save(d.card, filepath.Join(d.card, ".subsonic", "manifest.json"))
+	d.syncDone(plan.Plan{PlaylistsStale: true})
+	b, err := os.ReadFile(filepath.Join(d.tmp, "q2-subsonic.library"))
+	if err != nil || !strings.Contains(string(b), "\nscan\n") || !strings.Contains(string(b), good+"\n") || strings.Contains(string(b), bad) {
+		t.Fatalf("%q %v", b, err)
+	}
+}

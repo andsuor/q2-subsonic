@@ -16,8 +16,12 @@ import (
 
 const maxComponent = 120
 
+// dotRun is two or more dots: the firmware refuses ".." anywhere in a playlist or queue line.
+var dotRun = regexp.MustCompile(`\.{2,}`)
+
 // SafeName makes s a single FAT-safe path component: reserved and control characters become
-// "_", trailing dots and spaces go, and it is cut to 120 bytes on a UTF-8 boundary.
+// "_", a run of dots becomes "…" and a leading dot "_" (the Q2's scan skips hidden names),
+// trailing dots and spaces go, and it is cut to 120 bytes on a UTF-8 boundary.
 func SafeName(s string) string {
 	s = strings.Map(func(r rune) rune {
 		if r < 0x20 || r == 0x7f || strings.ContainsRune(`<>:"/\|?*`, r) {
@@ -25,6 +29,10 @@ func SafeName(s string) string {
 		}
 		return r
 	}, strings.ToValidUTF8(s, "_"))
+	s = dotRun.ReplaceAllString(s, "…")
+	if strings.HasPrefix(s, ".") {
+		s = "_" + s[1:]
+	}
 	if len(s) > maxComponent {
 		n := maxComponent
 		for !utf8.RuneStart(s[n]) {
@@ -110,4 +118,19 @@ func PlaylistFile(root, name string) string {
 // LegacyPlaylistFile is the old "Navidrome - <name>.m3u", kept only so a sync can migrate it.
 func LegacyPlaylistFile(root, name string) string {
 	return filepath.Join(root, "_explaylist_data", "Navidrome - "+SafeName(name)+".m3u")
+}
+
+// StaleName reports whether path, under <root>/Subsonic/, has a component SafeName no longer makes:
+// one the Q2's scan hides (a leading ".") or its playlists refuse (".."). The plan moves such songs.
+func StaleName(root, path string) bool {
+	rel, ok := strings.CutPrefix(path, filepath.Join(root, "Subsonic")+string(filepath.Separator))
+	if !ok {
+		return false
+	}
+	for _, c := range strings.Split(rel, string(filepath.Separator)) {
+		if strings.HasPrefix(c, ".") || strings.Contains(c, "..") {
+			return true
+		}
+	}
+	return false
 }

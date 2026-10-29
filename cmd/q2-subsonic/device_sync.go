@@ -367,9 +367,14 @@ func (d *daemon) sendLibrary() (*libJob, error) {
 	var m3us []string
 	if m, _ := library.LoadManifest(filepath.Join(d.card, ".subsonic", "manifest.json")); m != nil {
 		for _, f := range m.Playlists {
-			if _, err := os.Stat(f); err == nil && library.ValidPlaylistFile(d.card, f) {
-				m3us = append(m3us, f)
+			if _, err := os.Stat(f); err != nil || !library.ValidPlaylistFile(d.card, f) {
+				continue
 			}
+			if strings.Contains(filepath.Base(f), "..") { // the next sync writes it under a clean name
+				d.log.Printf("library: skipping %s: the firmware refuses \"..\" in a name", f)
+				continue
+			}
+			m3us = append(m3us, f)
 		}
 		sort.Strings(m3us)
 	}

@@ -80,6 +80,9 @@ func TestRequestLibraryBadPaths(t *testing.T) {
 		// Invalid: bare .m3u (no base name)
 		{"bare_m3u", "/mnt/mmc/_explaylist_data/.m3u", true},
 
+		// Invalid: ".." inside the name, which the firmware refuses (I18)
+		{"dotdot_name", "/mnt/mmc/_explaylist_data/Wait... What.m3u", true},
+
 		// Invalid: wrong directory
 		{"wrong_dir", "/home/user/playlist.m3u", true},
 

@@ -102,10 +102,14 @@ func Compute(sel selection.Set, resolved map[string][]subsonic.Song, playlistNam
 	}
 	sort.Strings(ids)
 
+	// unchanged: the song stays as it is on the card.
+	unchanged := func(e *library.Entry, w *Want) bool {
+		return e.Quality == w.Quality && e.Meta == library.MetaKey(w.Song, w.Quality) && !library.StaleName(root, e.Path)
+	}
 	// Songs staying put own their path; removed entries still occupy theirs until deleted last.
 	claim := map[string]string{}
 	for id, e := range m.Songs {
-		if w := wants[id]; w == nil || (e.Quality == w.Quality && e.Meta == library.MetaKey(w.Song, w.Quality)) {
+		if w := wants[id]; w == nil || unchanged(e, w) {
 			claim[e.Path] = id
 		}
 	}
@@ -115,7 +119,7 @@ func Compute(sel selection.Set, resolved map[string][]subsonic.Song, playlistNam
 	for _, id := range ids {
 		w := wants[id]
 		e := m.Songs[id]
-		if e != nil && e.Quality == w.Quality && e.Meta == library.MetaKey(w.Song, w.Quality) {
+		if e != nil && unchanged(e, w) {
 			w.Path = e.Path
 			final[id] = e.Path
 			continue
