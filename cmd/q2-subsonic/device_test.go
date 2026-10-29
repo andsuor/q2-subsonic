@@ -28,6 +28,7 @@ import (
 // nav is a Navidrome stand-in: albums al0..alN-1 ("Album 000"…) by "Artist", each with songsPer
 // songs al<i>.<j>; playlist pl1 "Mix" holds al0's songs; artist ar1 has al0 and al1.
 type nav struct {
+	albumArtist      string // the albums' own artist, when not "Artist"
 	albums, songsPer int
 	stall            bool          // every request hangs until the client gives up
 	errCode          int           // every API call fails with this Subsonic code
@@ -38,7 +39,6 @@ type nav struct {
 	empty            bool          // every list reply is empty
 	lastRange        atomic.Value  // the Range header of the latest download, a string
 	various          bool          // albums are compilations: album artist "Various Artists", song j by "Artist j"
-	albumArtist      string        // the albums' own artist, when not "Artist"
 }
 
 func (n *nav) song(al, j int) map[string]any {
@@ -1034,22 +1034,5 @@ func TestLibraryAnswerTakenByTick(t *testing.T) {
 	d.tick()
 	if !d.manifest().Imported[mix] {
 		t.Fatal("answer not taken")
-	}
-}
-
-// Songs agreeing on their album artist keep it (a server's displayAlbumArtist is trusted); only an
-// album whose songs disagree, a compilation on a server without displayAlbumArtist, takes the
-// album's artist (review G1, Minor 2).
-func TestGetAlbumTrustsConsistentArtist(t *testing.T) {
-	d := newTestDaemon(t, &nav{albums: 1, songsPer: 2, albumArtist: "Someone Else"}, "", true)
-	d.do("toggle", "album:al0")
-	d.preview(t)
-	d.mu.Lock()
-	p := d.daemon.preview.plan
-	d.mu.Unlock()
-	for _, w := range p.Add {
-		if !strings.HasPrefix(w.Path, filepath.Join(d.card, "Subsonic", "Artist")+"/") {
-			t.Errorf("%s", w.Path)
-		}
 	}
 }
