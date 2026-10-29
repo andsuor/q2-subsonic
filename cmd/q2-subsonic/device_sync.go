@@ -486,10 +486,6 @@ func (d *daemon) sendLibrary() (*libJob, error) {
 			if _, err := os.Stat(f); err != nil || !library.ValidPlaylistFile(d.card, f) {
 				continue
 			}
-			if strings.Contains(filepath.Base(f), "..") { // the next sync writes it under a clean name
-				d.log.Printf("library: skipping %s: the firmware refuses \"..\" in a name", f)
-				continue
-			}
 			if m.Imported[f] {
 				imports = append(imports, f)
 			} else {

@@ -260,14 +260,14 @@ func TestLastSongFailureRetries(t *testing.T) {
 
 func TestPlaylistModeOriginalOnlyForPlayable(t *testing.T) {
 	e := newEnv(t, fw.Caps{Playlist: true})
-	ss := songs(2, "M4A")
-	ss[1].Suffix = "opus"
+	ss := songs(3, "M4A")
+	ss[1].Suffix, ss[2].Suffix = "wv", "opus" // WavPack the Q2 can't play; Opus it can (R40)
 	e.s.start(ss, 0)
-	until(t, "files", func() bool { return exists(e.stream(0, "m4a")) && exists(e.stream(1, "mp3")) })
-	e.src.mu.Lock()
-	defer e.src.mu.Unlock()
-	if e.src.urls[0] != "p:s0:original" || e.src.urls[1] != "p:s1:mp3-320" {
-		t.Fatal(e.src.urls)
+	until(t, "files", func() bool {
+		return exists(e.stream(0, "m4a")) && exists(e.stream(1, "mp3")) && exists(e.stream(2, "opus"))
+	})
+	if u := e.src.got(); u[0] != "p:s0:original" || u[1] != "p:s1:mp3-320" || u[2] != "p:s2:original" {
+		t.Fatal(u)
 	}
 }
 
@@ -283,7 +283,8 @@ func TestStreamUsesPlayURL(t *testing.T) {
 }
 
 // A synced song whose file is gone, or that a sync is about to move or remove, is streamed, not
-// queued at a path that never comes (M24); so is one whose path has "..", a line the firmware skips (I19).
+// queued at a path that never comes (M24). One with an ellipsis in its path plays from the card:
+// the firmware skips only a real ".." segment (I19).
 func TestStreamSyncedOnlyWhenThere(t *testing.T) {
 	e := newEnv(t, fw.Caps{Playlist: true})
 	here, gone, moving, dotted := e.root+"/Subsonic/A/0.flac", e.root+"/Subsonic/A/1.flac", e.root+"/Subsonic/A/2.flac",
@@ -300,7 +301,7 @@ func TestStreamSyncedOnlyWhenThere(t *testing.T) {
 	e.s.start(songs(4, "flac"), 0)
 	until(t, "play", func() bool { return exists(e.play) })
 	_, body := e.queue(t)
-	want := "#EXTM3U\n" + here + "\n" + e.stream(1, "flac") + "\n" + e.stream(2, "flac") + "\n" + e.stream(3, "flac") + "\n"
+	want := "#EXTM3U\n" + here + "\n" + e.stream(1, "flac") + "\n" + e.stream(2, "flac") + "\n" + dotted + "\n"
 	if body != want {
 		t.Fatalf("got %q want %q", body, want)
 	}

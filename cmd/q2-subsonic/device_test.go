@@ -876,9 +876,9 @@ func TestSignOutDropsPendingPlay(t *testing.T) {
 	}
 }
 
-// A recorded playlist file whose name has ".." (the firmware refuses it, and with it the whole
-// request) is left out of the library request, so the scan and the other playlists still run (I18).
-func TestLibraryRequestSkipsDottedPlaylist(t *testing.T) {
+// A recorded playlist file whose name has an ellipsis is imported: the firmware refuses only a real
+// ".." segment (I18).
+func TestLibraryRequestKeepsDottedPlaylist(t *testing.T) {
 	d := newTestDaemon(t, &nav{}, "library", true)
 	good, bad := filepath.Join(d.card, "_explaylist_data", "Mix.m3u"), filepath.Join(d.card, "_explaylist_data", "Wait... What.m3u")
 	for _, f := range []string{good, bad} {
@@ -888,7 +888,7 @@ func TestLibraryRequestSkipsDottedPlaylist(t *testing.T) {
 	(&library.Manifest{Playlists: map[string]string{"Mix": good, "Wait... What": bad}}).Save(d.card, filepath.Join(d.card, ".subsonic", "manifest.json"))
 	d.syncDone(plan.Plan{PlaylistsStale: true})
 	b, err := os.ReadFile(filepath.Join(d.tmp, "q2-subsonic.library"))
-	if err != nil || !strings.Contains(string(b), "\nscan\n") || !strings.Contains(string(b), good+"\n") || strings.Contains(string(b), bad) {
+	if err != nil || !strings.Contains(string(b), "\nscan\n") || !strings.Contains(string(b), good+"\n") || !strings.Contains(string(b), bad+"\n") {
 		t.Fatalf("%q %v", b, err)
 	}
 }

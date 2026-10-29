@@ -80,8 +80,11 @@ func TestRequestLibraryBadPaths(t *testing.T) {
 		// Invalid: bare .m3u (no base name)
 		{"bare_m3u", "/mnt/mmc/_explaylist_data/.m3u", true},
 
-		// Invalid: ".." inside the name, which the firmware refuses (I18)
-		{"dotdot_name", "/mnt/mmc/_explaylist_data/Wait... What.m3u", true},
+		// Valid: an ellipsis in the name; the firmware refuses only a real ".." segment
+		{"ellipsis_name", "/mnt/mmc/_explaylist_data/Wait... What.m3u", false},
+
+		// Invalid: the name is ".."
+		{"dotdot_name", "/mnt/mmc/_explaylist_data/...m3u", true},
 
 		// Invalid: wrong directory
 		{"wrong_dir", "/home/user/playlist.m3u", true},
@@ -205,7 +208,7 @@ func TestRequestLibraryAddLines(t *testing.T) {
 	if got, _ := os.ReadFile(f); string(got) != "8\nadd "+b+"\n" {
 		t.Fatalf("%q", got)
 	}
-	if err := RequestLibrary(f, 9, false, nil, []string{"/mnt/mmc/_explaylist_data/Wait... What.m3u"}); err == nil {
+	if err := RequestLibrary(f, 9, false, nil, []string{"/mnt/mmc/_explaylist_data/sub/Mix.m3u"}); err == nil {
 		t.Fatal("bad add path taken")
 	}
 	if seq, _ := ReadRequest(filepath.Join(t.TempDir(), "none")); seq != 0 {

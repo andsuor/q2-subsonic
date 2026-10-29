@@ -376,3 +376,19 @@ func TestMovePlaylist(t *testing.T) {
 		t.Fatal("moved an unrecorded playlist")
 	}
 }
+
+// The formats the Q2 plays: demo's own scan list (R40), so Opus, TAK, DTS, MP2 and AC3 originals
+// sync and stream as they are.
+func TestPlayable(t *testing.T) {
+	for _, sfx := range []string{"mp3", "wav", "wma", "ape", "flac", "aiff", "aif", "m4a", "aac", "dff", "dsf", "ogg",
+		"dts", "mp2", "ac3", "opus", "tak", "alac", "OPUS"} {
+		if !Playable(sfx) {
+			t.Errorf("%s not playable", sfx)
+		}
+	}
+	for _, sfx := range []string{"wv", "mpc", ""} {
+		if Playable(sfx) {
+			t.Errorf("%s playable", sfx)
+		}
+	}
+}

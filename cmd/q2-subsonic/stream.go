@@ -139,10 +139,11 @@ type job struct {
 	quality string
 }
 
-// synced reports whether e's file can play from the card: it is there, no sync is about to move or
-// remove it (M24), and its path has no "..", a queue line the firmware skips (I19).
+// synced reports whether e's file can play from the card: it is there, and no sync is about to
+// move or remove it (M24). (The firmware passes over only a real ".." segment, which a Clean path
+// has none of, so an ellipsis in a name plays: I19.)
 func (s *streamer) synced(e *library.Entry) bool {
-	return e != nil && exists(e.Path) && !strings.Contains(e.Path, "..") && (s.moving == nil || !s.moving(e.ID))
+	return e != nil && exists(e.Path) && (s.moving == nil || !s.moving(e.ID))
 }
 
 // start replaces whatever streams with songs, playing from index from.

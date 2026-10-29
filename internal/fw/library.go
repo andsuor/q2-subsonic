@@ -14,8 +14,8 @@ import (
 // <seq>, then "scan" when asked, then "import <path>" for each playlist the app owns (a playlist
 // of that name on the Q2 is the app's earlier import, and is replaced) and "add <path>" for each
 // it doesn't yet (skipped when the Q2 has a playlist of that name: the user's own).
-// Each path must be directly in a card's _explaylist_data/ (no nesting, no ".."), end in .m3u,
-// and contain no newline or carriage return (line injection prevention).
+// Each path must be directly in a card's _explaylist_data/ (no nesting, no ".." segment), end in
+// .m3u, and contain no newline or carriage return (line injection prevention).
 // On any validation error, nothing is written.
 func RequestLibrary(path string, seq int64, scan bool, imports, adds []string) error {
 	for _, m3u := range append(append([]string(nil), imports...), adds...) {
@@ -55,9 +55,10 @@ func checkM3U(m3u string) error {
 	if !strings.HasSuffix(base, ".m3u") || base == ".m3u" {
 		return fmt.Errorf("import path is not a named .m3u: %s", m3u)
 	}
-	// The firmware refuses ".." anywhere in the name, and with it the whole request
-	if strings.Contains(base, "..") {
-		return fmt.Errorf("import path has \"..\" in its name: %s", m3u)
+	// The firmware refuses only a real ".." segment (an ellipsis in a name is fine); Clean and the
+	// directory check above leave just a name that is ".." itself
+	if strings.TrimSuffix(base, ".m3u") == ".." {
+		return fmt.Errorf("import path names \"..\": %s", m3u)
 	}
 	return nil
 }
