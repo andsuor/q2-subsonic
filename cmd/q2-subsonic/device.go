@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -390,6 +391,10 @@ func (d *daemon) account() q2spot.Reply {
 	d.mu.Lock()
 	server, user := d.server, d.user
 	d.mu.Unlock()
+	if u, err := url.Parse(server); err == nil { // never a proxy's user:password@
+		u.User = nil
+		server = u.String()
+	}
 	return q2spot.Reply{Rows: []q2spot.Row{info(server), info(user), info("Password is stored on this card"),
 		info("Tip: use a server user just for the Q2"), act("signout", "Sign Out", "")}}
 }

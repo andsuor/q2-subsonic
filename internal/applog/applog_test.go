@@ -19,6 +19,20 @@ func TestRedact(t *testing.T) {
 	}
 }
 
+// M1: a server address with a password in it (a basic-auth proxy) never reaches the log.
+func TestRedactUserinfo(t *testing.T) {
+	for _, in := range []string{
+		"GET https://alice:proxySecret42@music.example/rest/ping?u=a -> 200",
+		`Get "https://alice:proxySecret42@music.example:8443/rest/ping": EOF`,
+		"https://alice:proxy@Secret42@music.example/x",
+	} {
+		got := Redact(in)
+		if strings.Contains(got, "Secret42") || !strings.Contains(got, "music.example") {
+			t.Errorf("%q -> %q", in, got)
+		}
+	}
+}
+
 func TestRotate(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "log.txt")
 	l := Open(p, 100)

@@ -426,3 +426,25 @@ func TestStalledBodyFails(t *testing.T) {
 		t.Fatal("a stalled body hangs the reader")
 	}
 }
+
+// M1: a user:password@ server address works, but its password never reaches log.txt.
+func TestUserinfoNotLogged(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"subsonic-response":{"status":"ok"}}`))
+	}))
+	defer srv.Close()
+	c, err := New(Creds{Server: strings.Replace(srv.URL, "https://", "https://alice:proxySecret42@", 1), User: "u", Password: "pw"}, srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := t.TempDir() + "/l"
+	c.Log = applog.Open(path, 1<<20)
+	if err := c.Ping(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	srv.Close()
+	c.Ping(context.Background())
+	if b, _ := os.ReadFile(path); strings.Contains(string(b), "proxySecret42") || !strings.Contains(string(b), "alice") {
+		t.Fatalf("log: %s", b)
+	}
+}

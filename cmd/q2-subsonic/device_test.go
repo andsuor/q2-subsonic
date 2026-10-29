@@ -819,3 +819,20 @@ func TestSignOutDropsPendingPlay(t *testing.T) {
 		t.Fatal("stream started after sign-out")
 	}
 }
+
+// M1: Account shows the server without a user:password@ part.
+func TestAccountHidesServerPassword(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "", false)
+	if err := creds.Save(d.dir, subsonic.Creds{Server: "https://alice:proxySecret42@music.example/sub", User: "u", Password: "pw"}); err != nil {
+		t.Fatal(err)
+	}
+	r := d.do("account")
+	if len(r.Rows) == 0 || r.Rows[0].Title != "https://music.example/sub" {
+		t.Fatalf("rows %+v", r.Rows)
+	}
+	for _, row := range r.Rows {
+		if strings.Contains(row.Title+row.Subtitle, "proxySecret42") {
+			t.Fatalf("password on screen: %+v", row)
+		}
+	}
+}
