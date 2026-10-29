@@ -22,6 +22,17 @@ func TestQ2AppName(t *testing.T) { // package.py zips this file as it is
 	}
 }
 
+// The release builds with a current Go, not go.mod's minimum (M44).
+func TestReleaseGoVersion(t *testing.T) {
+	b, err := os.ReadFile("../../.github/workflows/release.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "go-version-file") || !strings.Contains(string(b), "go-version: '1.27'") {
+		t.Error("release.yml doesn't pin a current Go")
+	}
+}
+
 func TestNoNavidromeInUI(t *testing.T) {
 	check := func(what string, r q2spot.Reply) {
 		t.Helper()

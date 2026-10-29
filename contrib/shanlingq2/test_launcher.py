@@ -35,7 +35,7 @@ def rig(tmp, body):
     (card/'run').write_text(source.replace(f'/tmp/q2-{app}', f'{t}/q2-{app}').replace('cd /tmp\n', f'cd {t}\n'))
     (bin_/'sleep').write_text('#!/bin/sh\necho "$1" >> "$Q2_TEST/sleeps"\n')
     (bin_/'sleep').chmod(0o755)
-    return card, t, dict(os.environ, Q2_TEST=str(tmp), PATH=f'{bin_}:/usr/bin:/bin')
+    return card, t, dict(os.environ, Q2_TEST=str(tmp), Q2_T=str(t), PATH=f'{bin_}:/usr/bin:/bin')
 
 
 def lines(path):
@@ -44,11 +44,15 @@ def lines(path):
 
 with tempfile.TemporaryDirectory(prefix='q2-launcher-') as d:
     tmp = pathlib.Path(d)
-    card, t, env = rig(tmp, 'echo "$@" >> "$Q2_TEST/args"\n[ "$(wc -l < "$Q2_TEST/args")" -ge 3 ] && exit 0\nexit 1\n')
+    card, t, env = rig(tmp, 'echo "$@" >> "$Q2_TEST/args"\n'
+                            'cat "$Q2_T/q2-%s.crash" >> "$Q2_TEST/crashes" 2>/dev/null\n'
+                            '[ "$(wc -l < "$Q2_TEST/args")" -ge 3 ] && exit 0\necho "panic: boom $(wc -l < "$Q2_TEST/args")" >&2\nexit 2\n' % app)
     subprocess.run(['/bin/sh', str(card/'run')], env=env, check=True, timeout=10)
     wait(lambda: len(lines(tmp/'args')) == 3 and not (t/f'q2-{app}').exists(), 'the loop to end')
     assert lines(tmp/'args') == [f'-dir {card}'] * 3, lines(tmp/'args')
     assert lines(tmp/'sleeps') == ['5', '10'], lines(tmp/'sleeps')
+    # each restart finds what the failed run left on stderr and its exit code, for log.txt (M43)
+    assert lines(tmp/'crashes') == ['panic: boom 1', 'exit 2', 'panic: boom 2', 'exit 2'], lines(tmp/'crashes')
     assert not list(t.iterdir()), list(t.iterdir())  # the pid, the copied app and launcher gone
 
 with tempfile.TemporaryDirectory(prefix='q2-launcher-') as d:
@@ -64,4 +68,4 @@ with tempfile.TemporaryDirectory(prefix='q2-launcher-') as d:
     os.kill(int((t/f'q2-{app}').read_text()), signal.SIGTERM)
     wait(lambda: not list(t.iterdir()), 'the TERM to tidy')
     assert lines(tmp/'terms') == ['term'] and not lines(tmp/'sleeps'), (lines(tmp/'terms'), lines(tmp/'sleeps'))
-print(f'Launcher (q2-{app}): restarts with backoff, exit 0, one at a time and TERM passed.')
+print(f'Launcher (q2-{app}): restarts with backoff, keeps a crash for the next start, exit 0, one at a time and TERM passed.')

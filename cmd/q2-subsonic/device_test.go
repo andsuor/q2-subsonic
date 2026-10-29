@@ -283,14 +283,34 @@ func eventually(t *testing.T, what string, ok func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
+// Signed out, the root offers Sign In from Your Phone; the sign-in page (a port on the LAN, and
+// hold=1) starts only when it is pressed, then the row opens the QR page (M4).
 func TestRootSignedOut(t *testing.T) {
 	d := newTestDaemon(t, &nav{}, "", false)
 	r := d.do("menu")
-	if len(r.Rows) != 1 || r.Rows[0].Kind != "remote" || r.Rows[0].Title != "Sign In from Your Phone" {
+	if len(r.Rows) != 1 || r.Rows[0].Kind != "action" || r.Rows[0].URI != "signin" || r.Rows[0].Title != "Sign In from Your Phone" {
 		t.Fatalf("rows %+v", r.Rows)
 	}
-	if !d.signin.active() {
-		t.Error("sign-in not started, the QR page would be empty")
+	if d.signin.active() {
+		t.Fatal("sign-in started without a press")
+	}
+	d.do("signin")
+	if r := d.do("menu"); r.Rows[0].Kind != "remote" || !d.signin.active() {
+		t.Fatalf("after the press %+v", r.Rows)
+	}
+}
+
+// Leaving the QR page ends the sign-in, as the spec has it: nothing listens once the user has gone
+// (M4).
+func TestLeavingQRPageStopsSignIn(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "", false)
+	d.do("signin")
+	d.do("menu")
+	d.mu.Lock()
+	d.lastMenu = time.Now().Add(-2 * qrLeftAfter) // the QR page was open: no refresh
+	d.mu.Unlock()
+	if r := d.do("menu"); r.Rows[0].Kind != "action" || d.signin.active() {
+		t.Fatalf("sign-in still on: %+v", r.Rows)
 	}
 }
 
@@ -544,6 +564,7 @@ func TestSigninTimeoutNotAutoRestarted(t *testing.T) {
 	d := newTestDaemon(t, &nav{}, "", false)
 	clk := &clock{t: time.Unix(1_000_000, 0)}
 	d.signin.now, d.signin.tick = clk.now, 5*time.Millisecond
+	d.do("signin")
 	if r := d.do("menu"); r.Rows[0].Kind != "remote" || !d.signin.active() {
 		t.Fatalf("menu %+v", r.Rows)
 	}
@@ -1114,7 +1135,7 @@ func TestAccountSaysKeyOrPassword(t *testing.T) {
 // and stays until the next try.
 func TestSigninFailureShownOnRoot(t *testing.T) {
 	d := newTestDaemon(t, &nav{}, "", false)
-	d.do("menu")
+	d.do("signin")
 	d.signin.mu.Lock()
 	addr, key := d.signin.ln.Addr().String(), d.signin.key
 	d.signin.mu.Unlock()
@@ -1132,7 +1153,7 @@ func TestSigninFailureShownOnRoot(t *testing.T) {
 	d.mu.Unlock()
 	for i := 0; i < 2; i++ {
 		r := d.do("menu")
-		if r.Rows[0].Kind != "remote" || r.Rows[0].Subtitle != "Can't reach 127.0.0.1:1" {
+		if r.Rows[0].Kind != "action" || r.Rows[0].Subtitle != "Can't reach 127.0.0.1:1" {
 			t.Fatalf("menu %d: %+v", i, r.Rows[0])
 		}
 	}
@@ -1654,5 +1675,21 @@ func TestDonePageKeptAfterChoosingDuringSync(t *testing.T) {
 	eventually(t, "the sync", func() bool { return d.runner.Snapshot().State == "done" })
 	if r := d.do("sync"); !strings.HasPrefix(r.Rows[0].Title, "Sync complete") {
 		t.Fatalf("rows %q", titles(r))
+	}
+}
+
+// What a crashed run left on stderr, and its exit code, which the launcher keeps in
+// /tmp/q2-subsonic.crash, goes into log.txt at the next start (M43).
+func TestCrashLogged(t *testing.T) {
+	card, tmp := t.TempDir(), t.TempDir()
+	crash := filepath.Join(tmp, "q2-subsonic.crash")
+	os.WriteFile(crash, []byte("panic: boom\n\ngoroutine 1 [running]:\n"+strings.Repeat("main.f()\n", 2000)+"exit 2\n"), 0o644)
+	newDaemon(filepath.Join(card, ".subsonic"), card, tmp)
+	b, _ := os.ReadFile(filepath.Join(card, ".subsonic", "log.txt"))
+	if !strings.Contains(string(b), "panic: boom") || !strings.Contains(string(b), "exit 2") || len(b) > 8<<10 {
+		t.Fatalf("log %d bytes:\n%.300s", len(b), b)
+	}
+	if _, err := os.Stat(crash); err == nil {
+		t.Fatal("crash file kept: logged again at every start")
 	}
 }

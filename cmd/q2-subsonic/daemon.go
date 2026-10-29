@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -188,7 +189,25 @@ func newDaemon(dir, card, tmp string) *daemon {
 	d.stream.clean("") // a stream an earlier run left (M26)
 	d.state.Write(nil)
 	d.migrateErr = library.Migrate(card, lg.Printf)
+	d.logCrash()
 	return d
+}
+
+// logCrash puts in log.txt what the launcher kept of a run that failed (/tmp/q2-subsonic.crash:
+// its stderr, a panic's trace, and its exit code), so a crash or an OOM kill leaves a trace on the
+// card (M43). A long trace keeps its start and the exit line.
+func (d *daemon) logCrash() {
+	f := filepath.Join(d.tmp, "q2-subsonic.crash")
+	b, err := os.ReadFile(f)
+	if err != nil {
+		return
+	}
+	os.Remove(f)
+	s := strings.TrimSpace(string(b))
+	if len(s) > 4<<10 {
+		s = strings.ToValidUTF8(s[:4<<10], "") + "\n…\n" + s[strings.LastIndex(s, "\n")+1:]
+	}
+	d.log.Printf("the last run failed:\n%s", s)
 }
 
 func freeBytes(path string) int64 {

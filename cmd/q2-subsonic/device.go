@@ -142,6 +142,9 @@ func (d *daemon) reply(req q2spot.Request) q2spot.Reply {
 	case "migrate":
 		return d.migrate()
 	case "signin":
+		d.mu.Lock()
+		d.lastMenu = time.Now() // pressed on the root: its toast is no gap
+		d.mu.Unlock()
 		d.signin.start(d.signinPort)
 		return q2spot.Reply{Message: "Scan the code with your phone"}
 	}
@@ -231,9 +234,11 @@ func details(ctx string) q2spot.Reply {
 }
 
 // menu is the root. Signed out it is the phone sign-in, kept live so the root turns into the
-// signed-in menu once the phone succeeds. The firmware's remote row sends nothing, so sign-in runs
-// while the root shows; the 2 s refresh pauses while the QR page is on top, and the first request
-// after such a gap means the QR page was left: that sign-in stops and a fresh one (new key and PIN) starts.
+// signed-in menu once the phone succeeds. The sign-in page (a port on the LAN, and hold=1) starts
+// only when its action row is pressed; the row then opens the QR page (remote, which sends
+// nothing). The 2 s refresh pauses while the QR page is on top, and the first request after such a
+// gap means it was left: the sign-in stops there, so nothing listens once the user has gone (M4).
+// The last failure stays as the row's subtitle (I24).
 func (d *daemon) menu() q2spot.Reply {
 	now := time.Now()
 	d.mu.Lock()
@@ -242,21 +247,15 @@ func (d *daemon) menu() q2spot.Reply {
 	d.mu.Unlock()
 	cl := d.client()
 	if cl == nil {
-		ok, msg := d.signin.result()
-		active, left := d.signin.active(), gap > qrLeftAfter
-		switch {
-		case active && !ok && left:
+		if gap > qrLeftAfter && d.signin.active() {
 			d.signin.stop()
-			d.signin.start(d.signinPort)
-		case !active && msg == signinTimedOut && !left:
-			// The 10 min are up while the root shows: the refresh doesn't start it again (R26).
-			return q2spot.Reply{Message: "refresh", Rows: []q2spot.Row{
-				{Kind: "action", URI: "signin", Title: "Sign In from Your Phone", Subtitle: msg}}}
-		case !active:
-			d.signin.start(d.signinPort)
 		}
-		_, msg = d.signin.result()
-		return q2spot.Reply{Message: "refresh", Rows: []q2spot.Row{{Kind: "remote", Title: "Sign In from Your Phone", Subtitle: msg}}}
+		_, msg := d.signin.result()
+		row := q2spot.Row{Kind: "action", URI: "signin", Title: "Sign In from Your Phone", Subtitle: msg}
+		if d.signin.active() {
+			row.Kind, row.URI = "remote", ""
+		}
+		return q2spot.Reply{Message: "refresh", Rows: []q2spot.Row{row}}
 	}
 	if d.signin.active() {
 		d.signin.stop()

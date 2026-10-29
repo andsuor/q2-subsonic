@@ -4,7 +4,9 @@
 # copied there first and the card's copy of this script is left at once (exec), so nothing keeps
 # the card busy and USB storage can always take it. The loop restarts the app after a failure,
 # waiting 5 s and doubling to a minute; an exit of 0 (stopped from the Q2 or the phone, or idle) ends
-# it. Q2 Pod stops it with a TERM to the loop's pid in /tmp/q2-subsonic.
+# it. A failed run's stderr (a panic's trace) and exit code are kept in /tmp/q2-subsonic.crash, which
+# the next start puts in .subsonic/log.txt. Q2 Pod stops it with a TERM to the loop's pid in
+# /tmp/q2-subsonic.
 pid=/tmp/q2-subsonic
 if [ "$1" != --loop ]; then
     [ -f $pid ] && kill -0 "$(cat $pid)" 2>/dev/null && exit 0
@@ -17,17 +19,18 @@ fi
 dir=$2
 (
     child=
-    trap '[ -n "$child" ] && kill -TERM $child 2>/dev/null && wait $child; rm -f $pid /tmp/q2-subsonic.bin /tmp/q2-subsonic.run; exit 0' TERM INT
+    trap '[ -n "$child" ] && kill -TERM $child 2>/dev/null && wait $child; rm -f $pid /tmp/q2-subsonic.bin /tmp/q2-subsonic.run /tmp/q2-subsonic.err /tmp/q2-subsonic.crash; exit 0' TERM INT
     delay=5
     while :; do
-        /tmp/q2-subsonic.bin -dir "$dir" &
+        /tmp/q2-subsonic.bin -dir "$dir" 2>/tmp/q2-subsonic.err &
         child=$!
         wait $child
         code=$?
         [ $code = 0 ] && break
+        { cat /tmp/q2-subsonic.err; echo "exit $code"; } >/tmp/q2-subsonic.crash
         sleep $delay
         [ $delay -lt 60 ] && delay=$((delay * 2))
     done
-    rm -f $pid /tmp/q2-subsonic.bin /tmp/q2-subsonic.run
+    rm -f $pid /tmp/q2-subsonic.bin /tmp/q2-subsonic.run /tmp/q2-subsonic.err /tmp/q2-subsonic.crash
 ) </dev/null >/dev/null 2>&1 &
 echo $! > $pid

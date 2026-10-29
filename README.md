@@ -17,13 +17,13 @@ A Subsonic client for the **Shanling Q2** running [Q2 Pod](https://github.com/Di
 
 ## Sign in
 
-1. Open **Streaming → Subsonic**. While signed out, the first row is **Sign In from Your Phone**.
-2. Press it. The Q2 shows a QR code and a PIN. Scan the code with your phone on the same Wi-Fi (or open the address and type the PIN) and fill in the server address, user name and password.
-3. The Q2 checks the login and the list opens.
+1. Open **Streaming → Subsonic**. While signed out, the only row is **Sign In from Your Phone**.
+2. Press it to start the sign-in page, then press it again to open the QR page. The Q2 shows a QR code and a PIN. Scan the code with your phone on the same Wi-Fi (or open the address and type the PIN) and fill in the server address, user name and password.
+3. The Q2 checks the login and the list opens. If it fails, the phone and the row say why.
 
 Things to know:
 
-- The sign-in page only runs while you are signed out, and for at most 10 minutes per start. Leave the page and it stops.
+- The sign-in page runs only after you press **Sign In from Your Phone**, and stops when you are signed in, when you leave the QR page, or after 10 minutes. Until you press it, the app opens no port.
 - The password crosses your local Wi-Fi unencrypted, once, from the phone to the Q2. Do it on a network you trust.
 - The server must be `https://`; `http://` is refused. Certificates are verified.
 - The password is stored on the card, in `.subsonic/credentials`. If your server offers OpenSubsonic API keys (`apiKeyAuthentication`), enter a key from its settings as the password instead: then only the key is stored. exFAT has no file permissions, so anyone with the card can read it. **Make a server user just for the Q2, not an admin.** If the card is lost, delete that user on the server and the card is worthless.
@@ -35,9 +35,9 @@ The list has **Sync**, **On This Q2**, **Playlists**, **Albums**, **Artists**, *
 
 **Choosing what to sync:** hold **Play/Pause** on a playlist, album, artist or song to toggle it in Sync, or open it and press **Add to Sync** / **Remove from Sync**. The Q2 answers `Added to Sync · N songs`, `Removed from Sync` or, for a song already covered by something bigger, `Included via <name>`. **On This Q2** lists what you picked, with its status and size on the card; hold Play/Pause there to take one out.
 
-**Quality** is per item, with a default in **Settings → Default Quality**: **Original** (the default), **MP3 320** or **MP3 128**. AAC is not offered: Navidrome's AAC transcode can't carry tags.
+**Quality** is per item, with a default in **Settings → Default Quality**: **Original** (the default), **MP3 320** or **MP3 128**. Change it with the **Quality** row inside a chosen item; Entire Library's and a single song's are in **On This Q2**. An original the Q2 can't play (WavPack, Musepack) syncs as MP3 320. AAC is not offered: Navidrome's AAC transcode can't carry tags.
 
-**Syncing:** open **Sync**. It first shows a preview, and nothing happens until you press **Start Sync**: songs to add (`+N`), to remove (`−N`), to replace (`Replace N`), and `Needs X · Y free`. If the card is too small it says so and offers no Start. Then it shows progress: percent, songs, time left, the current song, and **Pause**, **Resume** and **Cancel**. Leave the page and the sync carries on. If Wi-Fi drops or the Q2 restarts, it picks up where it was. Songs that fail are listed under **Failed Songs**, with **Retry Failed**.
+**Syncing:** open **Sync**. It first shows a preview, and nothing happens until you press **Start Sync**: songs to add (`+N`), to remove (`−N`), to replace (`Replace N`), playlists to update (`Update N playlists`), and `Needs X · Y free`. A song you deleted from the card is fetched again. If the card is too small it says so and offers no Start. Then it shows progress: percent, songs, time left, the current song, and **Pause**, **Resume** and **Cancel**. Leave the page and the sync carries on. If Wi-Fi drops or the Q2 restarts, it picks up where it was. Songs that fail are listed under **Failed Songs**, with **Retry Failed**.
 
 **Playing:** press a song to play it and the rest of the list after it. Songs already synced play from the card; the others stream. A song streams in its original format: FLAC and MP3 always, and other formats the Q2 plays too when the firmware has the `playlist` extension; without it they stream as MP3 320. **Settings → Streaming Quality** (Original, the default, MP3 320 or MP3 128) overrides this: anything but Original transcodes every streamed song to MP3. Streamed files are deleted as you go.
 
@@ -63,13 +63,13 @@ Newer Q2 Pod firmware offers extensions to card apps. Without them everything st
 
 ## Errors and logs
 
-A failure shows a short message on screen. Open its **Details** row for the operation, the HTTP status or Subsonic error code, and the time. The full trail is in `.subsonic/log.txt`; passwords and tokens are never logged.
+A failure shows a short message on screen. Open its **Details** row for the operation, the HTTP status or Subsonic error code, and the time. The full trail is in `.subsonic/log.txt`; passwords and tokens are never logged. If the app crashed, its trace and exit code are added there at the next start.
 
 ## Update and remove
 
 **System settings → Apps** shows **Update** when a newer release is out. By hand, replace the five files in `.subsonic` listed above. Your login, settings and selection are kept.
 
-To remove it, press **Subsonic** twice in **System settings → Apps**, or delete `.subsonic`. Synced music stays in `Subsonic/`; delete that folder to free the space.
+To remove it, first **Settings → Account → Sign Out**, which deletes the stored login, then press **Subsonic** twice in **System settings → Apps**. That leaves `.subsonic/` on the card with your settings, selection and sync records (and the login, if you didn't sign out): delete the folder to remove everything. Synced music stays in `Subsonic/`; delete that folder to free the space.
 
 ## Build
 
