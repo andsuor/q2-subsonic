@@ -23,9 +23,11 @@ type fakeSrc struct {
 	urls  []string
 	onGet func()
 	fail  func(u string) bool
+	body  func(u string) (io.Reader, int64) // optional: the answer's body and its Content-Length (-1: none sent)
 }
 
 func (f *fakeSrc) MediaURL(id, q string) string { return "u:" + id + ":" + q }
+func (f *fakeSrc) PlayURL(id, q string) string  { return "p:" + id + ":" + q }
 func (f *fakeSrc) Get(_ context.Context, u string, _ int64) (*http.Response, error) {
 	f.mu.Lock()
 	f.urls = append(f.urls, u)
@@ -36,7 +38,18 @@ func (f *fakeSrc) Get(_ context.Context, u string, _ int64) (*http.Response, err
 	if f.fail != nil && f.fail(u) {
 		return nil, fmt.Errorf("boom")
 	}
-	return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("data-" + u))}, nil
+	if f.body != nil {
+		b, n := f.body(u)
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(b), ContentLength: n}, nil
+	}
+	b := "data-" + u
+	return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(b)), ContentLength: int64(len(b))}, nil
+}
+
+func (f *fakeSrc) got() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.urls...)
 }
 
 type env struct {
@@ -119,6 +132,8 @@ func TestStreamQueueWrittenOnce(t *testing.T) {
 func TestStreamQueueUsesSyncedPaths(t *testing.T) {
 	e := newEnv(t, fw.Caps{Playlist: true})
 	synced := e.root + "/Subsonic/A/b.flac"
+	os.MkdirAll(filepath.Dir(synced), 0o755)
+	os.WriteFile(synced, []byte("x"), 0o644)
 	e.man.Songs["s1"] = &library.Entry{ID: "s1", Path: synced}
 	e.s.start(songs(3, "flac"), 0)
 	until(t, "play", func() bool { return exists(e.play) })
@@ -142,7 +157,7 @@ func TestStreamFallbackTranscodesOthers(t *testing.T) {
 	until(t, "play", func() bool { return exists(e.play) })
 	e.src.mu.Lock()
 	defer e.src.mu.Unlock()
-	if e.src.urls[0] != "u:s0:mp3-320" || e.src.urls[1] != "u:s1:original" {
+	if e.src.urls[0] != "p:s0:mp3-320" || e.src.urls[1] != "p:s1:original" {
 		t.Fatal(e.src.urls)
 	}
 	if b, _ := os.ReadFile(e.play); !strings.HasSuffix(string(b), " "+e.root+"/.subsonic/stream") {
@@ -251,7 +266,141 @@ func TestPlaylistModeOriginalOnlyForPlayable(t *testing.T) {
 	until(t, "files", func() bool { return exists(e.stream(0, "m4a")) && exists(e.stream(1, "mp3")) })
 	e.src.mu.Lock()
 	defer e.src.mu.Unlock()
-	if e.src.urls[0] != "u:s0:original" || e.src.urls[1] != "u:s1:mp3-320" {
+	if e.src.urls[0] != "p:s0:original" || e.src.urls[1] != "p:s1:mp3-320" {
 		t.Fatal(e.src.urls)
 	}
 }
+
+// Playback streams an original as it is through PlayURL (stream?format=raw), which servers allow
+// with downloads turned off; MediaURL's download is for sync (M27, R37).
+func TestStreamUsesPlayURL(t *testing.T) {
+	e := newEnv(t, fw.Caps{Playlist: true})
+	e.s.start(songs(1, "flac"), 0)
+	until(t, "fetched", func() bool { return exists(e.stream(0, "flac")) })
+	if u := e.src.got(); len(u) != 1 || u[0] != "p:s0:original" {
+		t.Fatal(u)
+	}
+}
+
+// A synced song whose file is gone, or that a sync is about to move or remove, is streamed, not
+// queued at a path that never comes (M24); so is one whose path has "..", a line the firmware skips (I19).
+func TestStreamSyncedOnlyWhenThere(t *testing.T) {
+	e := newEnv(t, fw.Caps{Playlist: true})
+	here, gone, moving, dotted := e.root+"/Subsonic/A/0.flac", e.root+"/Subsonic/A/1.flac", e.root+"/Subsonic/A/2.flac",
+		e.root+"/Subsonic/...Like Clockwork/3.flac"
+	for _, f := range []string{here, moving, dotted} {
+		os.MkdirAll(filepath.Dir(f), 0o755)
+		os.WriteFile(f, []byte("x"), 0o644)
+	}
+	for i, f := range []string{here, gone, moving, dotted} {
+		id := fmt.Sprint("s", i)
+		e.man.Songs[id] = &library.Entry{ID: id, Path: f}
+	}
+	e.s.moving = func(id string) bool { return id == "s2" }
+	e.s.start(songs(4, "flac"), 0)
+	until(t, "play", func() bool { return exists(e.play) })
+	_, body := e.queue(t)
+	want := "#EXTM3U\n" + here + "\n" + e.stream(1, "flac") + "\n" + e.stream(2, "flac") + "\n" + e.stream(3, "flac") + "\n"
+	if body != want {
+		t.Fatalf("got %q want %q", body, want)
+	}
+}
+
+// Stream names never hold "..", which the firmware skips (I19).
+func TestStreamNameWithDots(t *testing.T) {
+	e := newEnv(t, fw.Caps{Playlist: true})
+	ss := songs(1, "flac")
+	ss[0].Title = "Oops!... I Did It Again"
+	e.s.start(ss, 0)
+	until(t, "play", func() bool { return exists(e.play) })
+	if _, body := e.queue(t); strings.Contains(body, "..") {
+		t.Fatal(body)
+	}
+}
+
+// A synced song played twice in a list: the second time is found after the first, so the songs
+// after it are fetched (M25).
+func TestStreamDuplicateSyncedSongs(t *testing.T) {
+	e := newEnv(t, fw.Caps{Playlist: true})
+	a, b := e.root+"/Subsonic/A/a.flac", e.root+"/Subsonic/A/b.flac"
+	for _, f := range []string{a, b} {
+		os.MkdirAll(filepath.Dir(f), 0o755)
+		os.WriteFile(f, []byte("x"), 0o644)
+	}
+	ss := []subsonic.Song{{ID: "A"}, {ID: "B"}, {ID: "s2", Title: "T2"}, {ID: "s3", Title: "T3"}, {ID: "s4", Title: "T4"},
+		{ID: "A"}, {ID: "B"}, {ID: "s7", Title: "T7"}}
+	for i := range ss {
+		ss[i].Suffix = "flac"
+	}
+	e.man.Songs["A"] = &library.Entry{ID: "A", Path: a}
+	e.man.Songs["B"] = &library.Entry{ID: "B", Path: b}
+	e.s.start(ss, 0)
+	until(t, "x2", func() bool { return exists(e.stream(2, "flac")) })
+	for _, p := range []string{a, b, e.stream(2, "flac"), e.stream(3, "flac"), e.stream(4, "flac"), a, b} {
+		os.WriteFile(e.playing, []byte(p+"\n"), 0o644)
+		time.Sleep(30 * time.Millisecond)
+	}
+	until(t, "y7", func() bool { return exists(e.stream(7, "flac")) })
+}
+
+// Once the songs around the one playing are on the card, the stream moves no data: hold is off,
+// so the Q2 can sleep. With no new song for the idle time the stream ends and deletes what it
+// fetched but the song last played (I14, M26).
+func TestStreamIdleEnds(t *testing.T) {
+	e := newEnv(t, fw.Caps{Playlist: true})
+	e.s.idle = 300 * time.Millisecond
+	e.s.start(songs(12, "flac"), 0)
+	until(t, "window", func() bool { return exists(e.stream(2, "flac")) })
+	until(t, "not busy", func() bool { return !e.s.busy() })
+	if !e.s.active() {
+		t.Fatal("ended before the idle time")
+	}
+	os.WriteFile(e.playing, []byte(e.stream(1, "flac")+"\n"), 0o644)
+	until(t, "busy for song 3", func() bool { return exists(e.stream(3, "flac")) })
+	until(t, "ended", func() bool { return !e.s.active() })
+	if exists(e.stream(0, "flac")) || exists(e.stream(2, "flac")) || exists(e.stream(3, "flac")) || !exists(e.stream(1, "flac")) {
+		t.Fatal("left the fetched songs, or deleted the one playing")
+	}
+	if e.s.busy() {
+		t.Fatal("busy after the end")
+	}
+}
+
+// A list played to its last song leaves only that song (M26).
+func TestStreamEndCleansUp(t *testing.T) {
+	e := newEnv(t, fw.Caps{Playlist: true})
+	e.s.start(songs(3, "flac"), 0)
+	until(t, "window", func() bool { return exists(e.stream(2, "flac")) })
+	os.WriteFile(e.playing, []byte(e.stream(2, "flac")+"\n"), 0o644)
+	until(t, "ended", func() bool { return !e.s.active() })
+	if exists(e.stream(0, "flac")) || exists(e.stream(1, "flac")) || !exists(e.stream(2, "flac")) {
+		t.Fatal("played songs left, or the last one deleted")
+	}
+}
+
+// A body that runs past its song's size (no Content-Length) is cut, never left to fill the card;
+// one shorter than its Content-Length, or empty, is no song (M9, I8).
+func TestStreamBodyBounds(t *testing.T) {
+	for name, body := range map[string]func(string) (io.Reader, int64){
+		"endless": func(string) (io.Reader, int64) { return io.LimitReader(zeros{}, 40<<20), -1 },
+		"short":   func(string) (io.Reader, int64) { return strings.NewReader("half"), 1000 },
+		"empty":   func(string) (io.Reader, int64) { return strings.NewReader(""), -1 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t, fw.Caps{Playlist: true})
+			e.s.backoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+			e.src.body = body
+			ss := songs(1, "flac")
+			ss[0].Size = 1000
+			e.s.start(ss, 0)
+			until(t, "err", func() bool { return e.s.Err() != nil })
+			if exists(e.stream(0, "flac")) {
+				t.Fatal("kept as the song")
+			}
+		})
+	}
+}
+
+type zeros struct{}
+
+func (zeros) Read(p []byte) (int, error) { clear(p); return len(p), nil }

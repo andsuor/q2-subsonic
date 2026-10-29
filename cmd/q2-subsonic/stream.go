@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/andsuor/q2-subsonic/internal/applog"
@@ -21,12 +23,8 @@ import (
 
 const streamWindow = 2 // songs fetched ahead of, and kept behind, the one playing
 
-// playableSuffix are the formats the Q2 plays, streamed as they are when the firmware takes playlists.
-var playableSuffix = map[string]bool{"flac": true, "mp3": true, "m4a": true, "aac": true, "alac": true, "ogg": true,
-	"wav": true, "aiff": true, "aif": true, "ape": true, "wma": true, "dsf": true, "dff": true}
-
 type streamSource interface {
-	MediaURL(id, quality string) string
+	PlayURL(id, quality string) string
 	Get(ctx context.Context, u string, from int64) (*http.Response, error)
 }
 
@@ -39,12 +37,19 @@ type streamer struct {
 	manifest                    func() *library.Manifest
 	net                         *syncer.NetSlot
 	poll                        time.Duration
-	backoff                     []time.Duration // wait after each failed try of a song; one try per entry
-	log                         *applog.Log     // optional
-	quality                     func() string   // optional Streaming Quality; mp3-320/mp3-128 transcode every streamed song
+	backoff                     []time.Duration      // wait after each failed try of a song; one try per entry
+	log                         *applog.Log          // optional
+	quality                     func() string        // optional Streaming Quality; mp3-320/mp3-128 transcode every streamed song
+	moving                      func(id string) bool // optional: a sync running or paused will move or remove this song
+	// idle ends a stream when no new song has played for this long and nothing is left to fetch: the
+	// firmware leaves .playing alone once it plays anything else, so this is also how a stream learns
+	// that it was left. Default idleAfter.
+	idle time.Duration
 
 	errMu sync.Mutex
-	err   error
+	err   *streamErr
+
+	xfer atomic.Bool // a song of the window is still to fetch (busy)
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -57,14 +62,25 @@ func newStreamer(root, play, playing string, caps fw.Caps, src streamSource, man
 		backoff: []time.Duration{2 * time.Second, 8 * time.Second, 30 * time.Second}}
 }
 
-// Err is set when a song failed all its tries; prefetching stops at that song.
-func (s *streamer) Err() error {
+// streamErr is a song that failed all its tries: what the root shows, and its Details.
+type streamErr struct {
+	title, id string
+	at        time.Time
+	err       error // the last try's
+}
+
+func (e *streamErr) Error() string { return "Couldn't stream " + e.title }
+func (e *streamErr) Unwrap() error { return e.err }
+
+// Err is set when a song failed all its tries; prefetching stops at that song. A new list or a
+// stop clears it.
+func (s *streamer) Err() *streamErr {
 	s.errMu.Lock()
 	defer s.errMu.Unlock()
 	return s.err
 }
 
-func (s *streamer) setErr(err error) {
+func (s *streamer) setErr(err *streamErr) {
 	s.errMu.Lock()
 	s.err = err
 	s.errMu.Unlock()
@@ -86,10 +102,15 @@ func (s *streamer) active() bool {
 	}
 }
 
+// busy is whether the stream moves data: a song of the window is still to fetch. Waiting for the
+// firmware to play on is not busy, so the Q2 may sleep while a list is paused (I14).
+func (s *streamer) busy() bool { return s.active() && s.xfer.Load() }
+
 func (s *streamer) stop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.stopLocked()
+	s.setErr(nil)
 }
 
 func (s *streamer) stopLocked() {
@@ -100,11 +121,28 @@ func (s *streamer) stopLocked() {
 	}
 }
 
+// clean empties the stream folder but for keep: a new list, or a daemon start, leaves no songs
+// from an older one on the card (M26).
+func (s *streamer) clean(keep string) {
+	ents, _ := os.ReadDir(s.dir())
+	for _, e := range ents {
+		if p := filepath.Join(s.dir(), e.Name()); p != keep {
+			library.Remove(s.root, p)
+		}
+	}
+}
+
 // job is one song of the list: where it plays from, and how to fetch it when it is not synced.
 type job struct {
 	path    string
 	fetch   bool
 	quality string
+}
+
+// synced reports whether e's file can play from the card: it is there, no sync is about to move or
+// remove it (M24), and its path has no "..", a queue line the firmware skips (I19).
+func (s *streamer) synced(e *library.Entry) bool {
+	return e != nil && exists(e.Path) && !strings.Contains(e.Path, "..") && (s.moving == nil || !s.moving(e.ID))
 }
 
 // start replaces whatever streams with songs, playing from index from.
@@ -117,21 +155,16 @@ func (s *streamer) start(songs []subsonic.Song, from int) {
 	}
 	s.setErr(nil)
 	stale, _ := os.ReadFile(s.playingFile) // belongs to the previous list
-	// A new list gets a clean folder (old queue file, stale and half-fetched songs).
-	if ents, err := os.ReadDir(s.dir()); err == nil {
-		for _, e := range ents {
-			library.Remove(s.root, filepath.Join(s.dir(), e.Name()))
-		}
-	}
+	s.clean("")                            // old queue file, stale and half-fetched songs
 	jobs := make([]job, len(songs))
 	m := s.manifest()
 	for i, sg := range songs {
-		if e := m.Songs[sg.ID]; s.caps.Playlist && e != nil {
+		if e := m.Songs[sg.ID]; s.caps.Playlist && s.synced(e) {
 			jobs[i] = job{path: e.Path}
 			continue
 		}
 		ext, q := strings.ToLower(sg.Suffix), "original"
-		if s.caps.Playlist && !playableSuffix[ext] || !s.caps.Playlist && ext != "flac" && ext != "mp3" {
+		if s.caps.Playlist && !library.Playable(ext) || !s.caps.Playlist && ext != "flac" && ext != "mp3" {
 			ext, q = "mp3", "mp3-320"
 		}
 		if s.quality != nil {
@@ -145,8 +178,8 @@ func (s *streamer) start(songs []subsonic.Song, from int) {
 	seq := time.Now().UnixNano() // never reused
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel, s.done = cancel, make(chan struct{})
-	r := &streamRun{s: s, ctx: ctx, songs: songs, jobs: jobs, from: from, seq: seq, stale: strings.TrimSpace(string(stale)),
-		fails: map[int]int{}, next: map[int]time.Time{}}
+	r := &streamRun{s: s, ctx: ctx, songs: songs, jobs: jobs, from: from, last: from, seq: seq,
+		stale: strings.TrimSpace(string(stale)), fails: map[int]int{}, next: map[int]time.Time{}}
 	if s.caps.Playlist {
 		// Written once, whole: the firmware has queued these lines and waits for missing files.
 		var paths []string
@@ -170,6 +203,7 @@ type streamRun struct {
 	songs     []subsonic.Song
 	jobs      []job
 	from      int
+	last      int // the index .playing named last: a song in the list twice is found after it (M25)
 	seq       int64
 	announced bool
 	stale     string // .playing at start: ignored until it changes
@@ -183,59 +217,85 @@ func (r *streamRun) announce(path string) {
 	}
 }
 
-// current is the index of the song .playing names, else the first one.
-func (r *streamRun) current() int {
+// current is the index of the song .playing names, looked for from the last one found on, then back
+// from it (a song in the list twice is the occurrence nearest), else the last one; and .playing as read.
+func (r *streamRun) current() (int, string) {
 	b, _ := os.ReadFile(r.s.playingFile)
 	p := strings.TrimSpace(string(b))
-	for i := r.from; i < len(r.jobs) && p != "" && p != r.stale; i++ {
+	if p == "" || p == r.stale {
+		return r.last, p
+	}
+	for i := r.last; i < len(r.jobs); i++ {
 		if r.jobs[i].path == p {
-			return i
+			r.last = i
+			return i, p
 		}
 	}
-	return r.from
+	for i := r.last - 1; i >= r.from; i-- {
+		if r.jobs[i].path == p {
+			r.last = i
+			return i, p
+		}
+	}
+	return r.last, p
 }
 
 func (r *streamRun) run() {
+	defer r.s.xfer.Store(false)
+	idle := r.s.idle
+	if idle == 0 {
+		idle = idleAfter
+	}
+	seen, since := "", time.Now() // .playing as read last, and since when
 	for r.ctx.Err() == nil {
-		cur := r.current()
+		cur, now := r.current()
+		if now != seen {
+			seen, since = now, time.Now()
+		}
 		for i := r.from; i < cur-streamWindow; i++ {
 			if r.jobs[i].fetch {
 				library.Remove(r.s.root, r.jobs[i].path)
 			}
 		}
-		fetched, missing := false, false
+		want := -1 // the first song of the window still to fetch
 		for i := cur; i < len(r.jobs) && i <= cur+streamWindow; i++ {
-			j := r.jobs[i]
-			if !j.fetch || exists(j.path) {
-				continue
+			if j := r.jobs[i]; j.fetch && !exists(j.path) {
+				want = i
+				break
 			}
-			missing = true
-			if time.Now().Before(r.next[i]) {
-				break // backing off
-			}
-			if err := r.fetch(r.songs[i], j); err != nil {
+		}
+		r.s.xfer.Store(want >= 0)
+		fetched := false
+		if want >= 0 && !time.Now().Before(r.next[want]) { // else backing off
+			if err := r.fetch(r.songs[want], r.jobs[want]); err != nil {
 				if r.ctx.Err() != nil {
 					return
 				}
-				r.fails[i]++
+				r.fails[want]++
 				s := r.s
 				if s.log != nil {
-					s.log.Printf("%s", applog.Redact(fmt.Sprintf("stream %q try %d: %v", r.songs[i].Title, r.fails[i], err)))
+					s.log.Printf("%s", applog.Redact(fmt.Sprintf("stream %q try %d: %v", r.songs[want].Title, r.fails[want], err)))
 				}
-				if r.fails[i] >= len(s.backoff) {
-					s.setErr(fmt.Errorf("Couldn't stream %s", r.songs[i].Title))
+				if r.fails[want] >= len(s.backoff) {
+					s.setErr(&streamErr{title: r.songs[want].Title, id: r.songs[want].ID, at: time.Now(), err: err})
 					return
 				}
-				r.next[i] = time.Now().Add(s.backoff[r.fails[i]-1])
-				break
+				r.next[want] = time.Now().Add(s.backoff[r.fails[want]-1])
+			} else {
+				fetched = true
 			}
-			fetched, missing = true, false
-			break
 		}
 		if !r.announced && exists(r.jobs[r.from].path) {
 			r.announce(r.s.dir()) // stock firmware: plays the folder once it has a song
 		}
-		if cur == len(r.jobs)-1 && !fetched && !missing {
+		// The last song plays, or none has started for the idle time (paused, or the firmware plays
+		// something else): nothing more to fetch. What was fetched goes but the song last playing (M26).
+		if want < 0 && (cur == len(r.jobs)-1 || time.Since(since) >= idle) {
+			if r.jobs[cur].fetch {
+				r.s.clean(r.jobs[cur].path)
+			} else {
+				r.s.clean("")
+			}
 			return
 		}
 		if !fetched {
@@ -250,14 +310,15 @@ func (r *streamRun) run() {
 func exists(p string) bool { _, err := os.Stat(p); return err == nil }
 
 // fetch downloads one song to <final>.part, syncs it and renames it, holding the network slot
-// with priority so it goes before the syncer's next file.
+// with priority so it goes before the syncer's next file. Originals come through PlayURL, which
+// servers allow when downloads are turned off (M27, R37).
 func (r *streamRun) fetch(sg subsonic.Song, j job) error {
 	s := r.s
 	if err := s.net.Acquire(r.ctx, true); err != nil {
 		return err
 	}
 	defer s.net.Release()
-	resp, err := s.src.Get(r.ctx, s.src.MediaURL(sg.ID, j.quality), 0)
+	resp, err := s.src.Get(r.ctx, s.src.PlayURL(sg.ID, j.quality), 0)
 	if err != nil {
 		return err
 	}
@@ -270,7 +331,11 @@ func (r *streamRun) fetch(sg subsonic.Song, j job) error {
 	if err != nil {
 		return err
 	}
-	_, err = io.Copy(f, resp.Body)
+	limit := maxBytes(resp.ContentLength, sg, j.quality)
+	n, err := io.Copy(f, io.LimitReader(resp.Body, limit+1))
+	if err == nil {
+		err = sizeErr(n, resp.ContentLength, limit)
+	}
 	if err == nil {
 		err = f.Sync()
 	}
@@ -284,4 +349,38 @@ func (r *streamRun) fetch(sg subsonic.Song, j job) error {
 		library.Remove(s.root, part)
 	}
 	return err
+}
+
+// maxBytes is the most a song's answer may hold: its Content-Length, else twice what the song
+// takes and 8 MiB, so a server that never stops can't fill the card (M9).
+// ponytail: unbounded when the server sends neither a length nor a size or duration.
+func maxBytes(contentLength int64, sg subsonic.Song, quality string) int64 {
+	if contentLength >= 0 {
+		return contentLength
+	}
+	want := sg.Size
+	switch quality {
+	case "mp3-320":
+		want = max(want, int64(sg.Duration)*320000/8)
+	case "mp3-128":
+		want = max(want, int64(sg.Duration)*128000/8)
+	}
+	if want <= 0 {
+		return 1<<63 - 2
+	}
+	return 2*want + 8<<20
+}
+
+// sizeErr refuses a body of n bytes that is empty, short of its Content-Length (when one came) or
+// past limit: it is no song (I8, M9).
+func sizeErr(n, contentLength, limit int64) error {
+	switch {
+	case n == 0:
+		return errors.New("the server sent an empty file")
+	case contentLength >= 0 && n < contentLength:
+		return fmt.Errorf("the server sent %d of %d bytes", n, contentLength)
+	case n > limit:
+		return fmt.Errorf("the server sent more than the %d bytes expected", limit)
+	}
+	return nil
 }

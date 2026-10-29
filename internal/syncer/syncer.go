@@ -292,6 +292,31 @@ func (r *Runner) RetryFailed() {
 	}
 }
 
+// Moving reports whether the plan a sync runs, or holds paused, renames, replaces or removes song
+// id: the streamer then fetches the song rather than queue a path that is about to go (M24).
+func (r *Runner) Moving(id string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if p := r.plan; p != nil && (r.state == "running" || r.state == "paused") {
+		for _, mv := range p.Rename {
+			if mv.ID == id {
+				return true
+			}
+		}
+		for _, w := range p.Replace {
+			if w.Song.ID == id {
+				return true
+			}
+		}
+		for _, e := range p.Remove {
+			if e.ID == id {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (r *Runner) Busy() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()

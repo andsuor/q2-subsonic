@@ -37,6 +37,7 @@ type nav struct {
 	empty            bool          // every list reply is empty
 	lastRange        atomic.Value  // the Range header of the latest download, a string
 	various          bool          // albums are compilations: album artist "Various Artists", song j by "Artist j"
+	mediaErr         int           // download and stream answer this Subsonic error code
 }
 
 func (n *nav) song(al, j int) map[string]any {
@@ -149,6 +150,12 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		k, _ := strconv.Atoi(j)
 		ok("song", n.song(a, k))
 	case "download", "stream":
+		if n.mediaErr != 0 {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"subsonic-response": map[string]any{"status": "failed",
+				"error": map[string]any{"code": n.mediaErr, "message": "Song not found"}}})
+			return
+		}
 		if n.block != nil {
 			select {
 			case <-n.block:
@@ -1091,5 +1098,58 @@ func TestSigninFailureShownOnRoot(t *testing.T) {
 		if r.Rows[0].Kind != "remote" || r.Rows[0].Subtitle != "Can't reach 127.0.0.1:1" {
 			t.Fatalf("menu %d: %+v", i, r.Rows[0])
 		}
+	}
+}
+
+// A stream that gave up shows below the root's fixed rows, so the row under the cursor stays
+// what it was, with Details (M33).
+func TestRootStreamErrorLast(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 2, mediaErr: 70}, "", true)
+	d.stream.backoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	d.do("play", "album:al0 0")
+	var r q2spot.Reply
+	eventually(t, "the stream error", func() bool { r = d.do("menu"); _, ok := find(r, "Couldn't stream Song 0"); return ok })
+	if r.Rows[0].Title != "Sync Entire Library" {
+		t.Fatalf("first row %q", titles(r))
+	}
+	det := r.Rows[len(r.Rows)-1]
+	if r.Rows[len(r.Rows)-2].Title != "Couldn't stream Song 0" || det.Title != "Details" {
+		t.Fatalf("rows %q", titles(r))
+	}
+	got := strings.Join(titles(d.do(det.URI, det.Context)), "|")
+	for _, w := range []string{"Op: stream", "Code: 70", "Song: al0.0"} {
+		if !strings.Contains(got, w) {
+			t.Errorf("details %q lack %q", got, w)
+		}
+	}
+}
+
+// Songs an earlier run streamed are deleted when the app starts (M26).
+func TestStreamFolderEmptiedAtStart(t *testing.T) {
+	card := t.TempDir()
+	old := filepath.Join(card, ".subsonic", "stream", "0003 - Song [x].flac")
+	os.MkdirAll(filepath.Dir(old), 0o755)
+	os.WriteFile(old, []byte("x"), 0o644)
+	newTestDaemonOn(t, card, &nav{}, "", true)
+	if _, err := os.Stat(old); err == nil {
+		t.Fatal("left on the card")
+	}
+}
+
+// A stream holds the Q2 awake only while it fetches: with the songs around the one playing on the
+// card, hold=1 goes, though the stream still runs (I14).
+func TestNoHoldWhileStreamWaits(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 6}, "playlist", true)
+	d.do("play", "album:al0 0")
+	eventually(t, "the window", func() bool {
+		return exists(filepath.Join(d.card, ".subsonic", "stream", "0002 - Song 2 [al0.2].flac"))
+	})
+	eventually(t, "hold off", func() bool {
+		d.tick()
+		b, _ := os.ReadFile(filepath.Join(d.tmp, "q2-subsonic.state"))
+		return !strings.Contains(string(b), "hold=1")
+	})
+	if !d.stream.active() {
+		t.Fatal("the stream ended")
 	}
 }

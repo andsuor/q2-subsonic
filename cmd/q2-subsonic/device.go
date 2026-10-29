@@ -238,20 +238,25 @@ func (d *daemon) menu() q2spot.Reply {
 		d.signin.stop()
 	}
 	d.state.Write(nil) // the QR page's last words, once it is left
-	var rows []q2spot.Row
-	if err := d.stream.Err(); err != nil {
-		rows = append(rows, info(err.Error()))
-	}
 	sel, _ := d.selection()
 	m := d.manifest()
 	var bytes int64
 	for _, e := range m.Songs {
 		bytes += e.Size
 	}
-	rows = append(rows, d.libraryRow(sel), list("sync", "Sync", d.syncSubtitle(cl), ""),
+	rows := []q2spot.Row{d.libraryRow(sel), list("sync", "Sync", d.syncSubtitle(cl), ""),
 		list("onq2", "On This Q2", plural(len(sel.Items), "item")+" · "+size(bytes), ""),
 		list("playlists", "Playlists", "", ""), list("albums", "Albums", "", ""), list("artists", "Artists", "", ""),
-		q2spot.Row{Kind: "search", Title: "Search"}, list("settings", "Settings", "", ""))
+		q2spot.Row{Kind: "search", Title: "Search"}, list("settings", "Settings", "", "")}
+	// Last, so the rows above keep their places under the cursor (M33).
+	if e := d.stream.Err(); e != nil {
+		op, h, code := "stream", 0, 0
+		var ae *subsonic.APIError
+		if errors.As(e, &ae) {
+			op, h, code = ae.Op, ae.HTTP, ae.Code
+		}
+		rows = append(rows, info(e.Error()), list("details", "Details", "", detailsCtx(op, h, code, e.at, e.id)))
+	}
 	return q2spot.Reply{Message: "refresh", Rows: rows}
 }
 

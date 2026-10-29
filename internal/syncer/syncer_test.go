@@ -1164,3 +1164,25 @@ func TestImported(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Moving names the songs a running or paused sync will rename, replace or remove: the streamer
+// fetches them rather than queue a path about to go (M24).
+func TestMoving(t *testing.T) {
+	f, r, root := setup(t)
+	a := want(root, "a", "original")
+	f.block["a"] = make(chan struct{})
+	r.Start(plan.Plan{Add: []plan.Want{a}, Replace: []plan.Want{want(root, "b", "mp3-320")},
+		Rename: []plan.Move{{ID: "c"}}, Remove: []*library.Entry{{ID: "d"}}})
+	for _, id := range []string{"b", "c", "d"} {
+		if !r.Moving(id) {
+			t.Errorf("%s not moving", id)
+		}
+	}
+	if r.Moving("a") {
+		t.Error("an added song moving")
+	}
+	r.Cancel()
+	if r.Moving("d") {
+		t.Error("moving after Cancel")
+	}
+}

@@ -181,6 +181,8 @@ func newDaemon(dir, card, tmp string) *daemon {
 		d.caps, src{d}, d.manifest, syncer.Net, time.Second)
 	d.stream.log = lg
 	d.stream.quality = func() string { return d.settings().stream() }
+	d.stream.moving = d.runner.Moving
+	d.stream.clean("") // a stream an earlier run left (M26)
 	d.state.Write(nil)
 	if err := library.Migrate(card, lg.Printf); err != nil {
 		d.migrateErr = err
@@ -252,6 +254,13 @@ func (s src) MediaURL(id, q string) string {
 	return ""
 }
 
+func (s src) PlayURL(id, q string) string {
+	if c := s.d.client(); c != nil {
+		return c.PlayURL(id, q)
+	}
+	return ""
+}
+
 func (s src) CoverURL(id string) string {
 	if c := s.d.client(); c != nil {
 		return c.CoverURL(id)
@@ -308,10 +317,10 @@ func (d *daemon) saveSettings(s settings) error {
 	return q2.WriteFile(filepath.Join(d.dir, "settings.json"), b)
 }
 
-// tick keeps the state file's hold=1 while files move, the phone page is open or a stream plays,
-// and takes the firmware's answer to a library request as soon as it comes.
+// tick keeps the state file's hold=1 while files move (a sync, or a stream fetching) or the phone
+// page is open, and takes the firmware's answer to a library request as soon as it comes.
 func (d *daemon) tick() {
-	d.state.setHold(d.runner.Busy() || d.signin.active() || d.stream.active())
+	d.state.setHold(d.runner.Busy() || d.signin.active() || d.stream.busy())
 	if d.caps.Library {
 		d.mu.Lock()
 		d.libPoll()
