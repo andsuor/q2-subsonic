@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -113,7 +114,7 @@ func TestTokenAuth(t *testing.T) {
 	}
 	sum := md5.Sum([]byte("pw" + q.Get("s")))
 	if q.Get("u") != "u" || q.Get("t") != hex.EncodeToString(sum[:]) || len(q.Get("s")) != 12 ||
-		q.Get("v") != "1.16.1" || q.Get("c") != "q2-subsonic" || q.Get("f") != "json" || q.Has("p") {
+		q.Get("v") != "1.13.0" || q.Get("c") != "q2-subsonic" || q.Get("f") != "json" || q.Has("p") {
 		t.Fatalf("bad query %v", q)
 	}
 }
@@ -252,5 +253,45 @@ func TestGetNon2xx(t *testing.T) {
 	var ae *APIError
 	if resp != nil || !errors.As(err, &ae) || ae.HTTP != 404 {
 		t.Fatalf("got %v %v", resp, err)
+	}
+}
+
+// serveJSON answers every request with body as application/json.
+func serveJSON(t *testing.T, body string) *Client {
+	t.Helper()
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	c, err := New(Creds{Server: srv.URL, User: "u", Password: "pw"}, srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+func failed(code int) string {
+	return fmt.Sprintf(`{"subsonic-response":{"status":"failed","version":"1.15.0","error":{"code":%d,"message":"m"}}}`, code)
+}
+
+// I22/I23: version and sign-in method errors get their own words; 41 is not "wrong password".
+func TestCodeCopy(t *testing.T) {
+	for code, want := range map[int]string{
+		20: "The server needs a newer version of this app",
+		30: "The server's Subsonic API is too old for this app",
+		41: "This server doesn't allow token sign-in for this user",
+		42: "This server doesn't accept this sign-in method",
+		44: "Invalid API key: enter one from your server as the password",
+	} {
+		err := serveJSON(t, failed(code)).Ping(context.Background())
+		if m := Message(err, "h"); m != want {
+			t.Errorf("code %d: %q, want %q", code, m, want)
+		}
+		if code == 41 || code == 42 {
+			if errors.Is(err, ErrAuth) || !errors.Is(err, ErrAuthMethod) {
+				t.Errorf("code %d kind: %v", code, err)
+			}
+		}
 	}
 }

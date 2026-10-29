@@ -60,7 +60,7 @@ func (c *Client) auth() url.Values {
 	v.Set("u", c.c.User)
 	v.Set("t", hex.EncodeToString(sum[:]))
 	v.Set("s", salt)
-	v.Set("v", "1.16.1")
+	v.Set("v", "1.13.0") // token auth's version; a higher one makes Airsonic refuse every request (code 30)
 	v.Set("c", "q2-subsonic")
 	v.Set("f", "json")
 	return v
@@ -121,11 +121,7 @@ func (c *Client) call(ctx context.Context, op string, q url.Values) (json.RawMes
 		return nil, &APIError{Op: op, HTTP: resp.StatusCode, Msg: "bad response", kind: ErrNotSubsonic}
 	}
 	if st.Status != "ok" {
-		var kind error
-		if st.Error.Code == 40 || st.Error.Code == 41 {
-			kind = ErrAuth
-		}
-		return nil, &APIError{Op: op, HTTP: resp.StatusCode, Code: st.Error.Code, Msg: st.Error.Message, kind: kind}
+		return nil, &APIError{Op: op, HTTP: resp.StatusCode, Code: st.Error.Code, Msg: st.Error.Message, kind: codeKind(st.Error.Code)}
 	}
 	return env.R, nil
 }
