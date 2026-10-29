@@ -249,18 +249,36 @@ func TestSigninTimeout(t *testing.T) {
 		t.Fatal("stopped early")
 	}
 	r.clk.add(2 * time.Second)
-	deadline := time.Now().Add(time.Second)
-	for r.s.active() && time.Now().Before(deadline) {
+	// stop() clears ln first and the state keys just after, so wait for both (generous: loaded CI).
+	keys := []string{"addr=", "pin=", "qr=", "qrsize=", "note="}
+	var st []byte
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		st, _ = os.ReadFile(filepath.Join(r.dir, "state"))
+		gone := !r.s.active()
+		for _, k := range keys {
+			gone = gone && !strings.Contains(string(st), k)
+		}
+		if conn, err := net.DialTimeout("tcp", r.addr, time.Second); err == nil {
+			conn.Close()
+			gone = false
+		}
+		if gone || time.Now().After(deadline) {
+			break
+		}
 		time.Sleep(5 * time.Millisecond)
 	}
 	if r.s.active() {
 		t.Fatal("still active after 10 min")
 	}
-	st, _ := os.ReadFile(filepath.Join(r.dir, "state"))
-	for _, k := range []string{"addr=", "pin=", "qr=", "qrsize=", "note="} {
+	for _, k := range keys {
 		if strings.Contains(string(st), k) {
 			t.Errorf("state still has %q", k)
 		}
+	}
+	if conn, err := net.DialTimeout("tcp", r.addr, time.Second); err == nil {
+		conn.Close()
+		t.Fatal("listener still open")
 	}
 }
 
