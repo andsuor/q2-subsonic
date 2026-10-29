@@ -29,6 +29,7 @@ type nav struct {
 	stall            bool          // every request hangs until the client gives up
 	errCode          int           // every API call fails with this Subsonic code
 	block            chan struct{} // downloads wait for it
+	failID           string        // getAlbum fails for this album only
 }
 
 func (n *nav) song(al, j int) map[string]any {
@@ -81,6 +82,11 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		ok("albumList2", map[string]any{"album": al})
 	case "getAlbum":
+		if q.Get("id") == n.failID {
+			json.NewEncoder(w).Encode(map[string]any{"subsonic-response": map[string]any{"status": "failed",
+				"error": map[string]any{"code": 70, "message": "Album not found"}}})
+			return
+		}
 		a := n.album(albumOf(q.Get("id")))
 		a["song"] = n.songs(albumOf(q.Get("id")))
 		ok("album", a)
@@ -334,7 +340,7 @@ func TestProgressRowKindByCaps(t *testing.T) {
 	}
 	d = newTestDaemon(t, &nav{}, "", true)
 	r = d.syncRows(snap)
-	if r.Rows[0].Kind != "info" || !strings.HasPrefix(r.Rows[0].Title, "[") || r.Rows[0].Title != "[####------] 47 %" {
+	if r.Rows[0].Kind != "info" || !strings.HasPrefix(r.Rows[0].Title, "[") || r.Rows[0].Title != "[#####-----] 47 %" {
 		t.Fatalf("without progress: %+v", r.Rows[0])
 	}
 }
@@ -405,4 +411,75 @@ func TestStateHoldDuringSync(t *testing.T) {
 	if r := d.do("sync"); r.Rows[0].Title != "Sync complete · 2 songs · 0 failed" {
 		t.Errorf("done rows %q", titles(r))
 	}
+}
+
+// A fast failure while the preview is still starting its workers (run with -race).
+func TestPreviewFailsFastWithoutRace(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 40, songsPer: 1, failID: "al0"}, "", true)
+	sel := selection.Set{Version: 1}
+	for i := 0; i < 40; i++ {
+		sel.Toggle(selection.Item{Kind: selection.KindAlbum, ID: fmt.Sprintf("al%d", i), Name: "x", Quality: "original"})
+	}
+	sel.Save(filepath.Join(d.dir, "selection.json"))
+	r := d.preview(t)
+	if r.Rows[0].Title != "Album not found" {
+		t.Fatalf("preview rows %q", titles(r))
+	}
+	if _, ok := find(r, "Start Sync"); ok {
+		t.Fatal("a failed preview offers Start Sync")
+	}
+}
+
+func TestSigninTimeoutNotAutoRestarted(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "", false)
+	clk := &clock{t: time.Unix(1_000_000, 0)}
+	d.signin.now, d.signin.tick = clk.now, 5*time.Millisecond
+	if r := d.do("menu"); r.Rows[0].Kind != "remote" || !d.signin.active() {
+		t.Fatalf("menu %+v", r.Rows)
+	}
+	clk.add(11 * time.Minute)
+	eventually(t, "the sign-in to time out", func() bool { return !d.signin.active() })
+	for i := 0; i < 3; i++ { // the root's 2 s refresh
+		r := d.do("menu")
+		if row := r.Rows[0]; row.Kind != "action" || row.URI != "signin" || row.Title != "Sign In from Your Phone" {
+			t.Fatalf("after timeout %+v", r.Rows)
+		}
+		if d.signin.active() {
+			t.Fatal("the refresh restarted sign-in")
+		}
+	}
+	if r := d.do("signin"); r.Message != "Scan the code with your phone" || !d.signin.active() {
+		t.Fatalf("signin: %q, active %v", r.Message, d.signin.active())
+	}
+	if r := d.do("menu"); r.Rows[0].Kind != "remote" {
+		t.Fatalf("after pressing %+v", r.Rows)
+	}
+}
+
+// Ops that stop the sync or the stream answer at once even while a download and a stream fetch hang.
+func TestControlOpsReplyFast(t *testing.T) {
+	n := &nav{albums: 2, songsPer: 3, block: make(chan struct{})}
+	d := newTestDaemon(t, n, "", true)
+	t.Cleanup(func() { close(n.block) })
+	d.do("toggle", "album:al0")
+	d.preview(t)
+	timed := func(op string, args ...string) q2spot.Reply {
+		t.Helper()
+		start := time.Now()
+		r := d.do(op, args...)
+		if took := time.Since(start); took >= 2*time.Second {
+			t.Errorf("%s took %v", op, took)
+		}
+		return r
+	}
+	timed("start")
+	eventually(t, "the sync to run", d.runner.Busy)
+	timed("play", "album:al1 0")
+	eventually(t, "the stream to start", d.stream.active)
+	timed("play", "album:al1 1")
+	timed("pause")
+	timed("resume")
+	timed("cancel")
+	timed("signout")
+	eventually(t, "the stream to stop", func() bool { return !d.stream.active() })
 }

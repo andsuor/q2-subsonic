@@ -239,6 +239,12 @@ func TestSigninSuccessStops(t *testing.T) {
 	if ok, msg := r.s.result(); !ok || msg != "Signed in as u" {
 		t.Fatalf("result %v %q", ok, msg)
 	}
+	// The QR page, still open on the Q2, says it worked instead of asking for Wi-Fi.
+	st, _ = os.ReadFile(filepath.Join(r.dir, "state"))
+	if !strings.Contains(string(st), "note=Signed in as u · Press Return") || !strings.Contains(string(st), "addr=") ||
+		!strings.Contains(string(st), "qrsize=") || strings.Contains(string(st), "pin=") {
+		t.Errorf("state after success:\n%s", st)
+	}
 }
 
 func TestSigninTimeout(t *testing.T) {

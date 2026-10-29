@@ -25,10 +25,11 @@ import (
 var signinHTML []byte
 
 const (
-	signinCookie  = "q2sub"
-	signinTimeout = 10 * time.Minute
-	pinTries      = 10
-	pinLock       = time.Minute
+	signinCookie   = "q2sub"
+	signinTimeout  = 10 * time.Minute
+	pinTries       = 10
+	pinLock        = time.Minute
+	signinTimedOut = "Sign-in timed out"
 )
 
 // listenTCP listens on port, or on the next nine when it is taken; port 0 takes any free one.
@@ -65,6 +66,7 @@ type signin struct {
 	lockout  time.Time
 	ok       bool
 	msg      string
+	shown    map[string]string // the QR page's keys as start wrote them
 }
 
 func (s *signin) clock() time.Time {
@@ -113,6 +115,7 @@ func (s *signin) start(port int) {
 			kv["qr"], kv["qrsize"] = c.Hex(), fmt.Sprint(c.Size)
 		}
 	}
+	s.shown = kv
 	s.state.Write(kv)
 }
 
@@ -132,7 +135,7 @@ func (s *signin) watch(done chan struct{}) {
 			s.mu.Lock()
 			late := !s.clock().Before(s.deadline)
 			if late {
-				s.ok, s.msg = false, "Sign-in timed out"
+				s.ok, s.msg = false, signinTimedOut
 			}
 			s.mu.Unlock()
 			if late {
@@ -153,8 +156,16 @@ func (s *signin) stop() {
 	srv := s.srv
 	s.ln, s.srv = nil, nil
 	close(s.done)
+	// After a success the Q2 may still show the QR page, which draws its note only beside a code
+	// (addon.c qr_refresh; without addr it says "Connect the Q2 to Wi-Fi"): keep the code and
+	// address, drop the PIN and say it worked. The server behind them is closed.
+	kv := map[string]string{}
+	if s.ok {
+		kv = map[string]string{"addr": s.shown["addr"], "qr": s.shown["qr"], "qrsize": s.shown["qrsize"],
+			"note": s.msg + " · Press Return"}
+	}
 	s.mu.Unlock()
-	s.state.Write(map[string]string{})
+	s.state.Write(kv)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	if srv.Shutdown(ctx) != nil {

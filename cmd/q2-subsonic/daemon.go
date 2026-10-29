@@ -79,6 +79,12 @@ func (s *stateKeys) setHold(h bool) error {
 	return s.flush()
 }
 
+func (s *stateKeys) remove() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.st.Remove()
+}
+
 func (s *stateKeys) flush() error {
 	m := map[string]string{"version": version}
 	for k, v := range s.sign {
@@ -132,6 +138,8 @@ type daemon struct {
 	showDone           bool // the finished sync's page, until the selection changes or Check Again
 	lib                *libJob
 	resolved           map[string][]subsonic.Song // selection key -> its songs, as last fetched
+	playSeq            int                        // the latest play request; an older one still waiting is dropped
+	playMu             sync.Mutex                 // one streamer.start at a time
 	man                *library.Manifest
 	manAt              time.Time
 	manSize            int64
@@ -148,7 +156,13 @@ func newDaemon(dir, card, tmp string) *daemon {
 		},
 		free: freeBytes, answerIn: answerIn, signinPort: signinPort,
 		lastReq: time.Now(), resolved: map[string][]subsonic.Song{}}
-	d.signin = &signin{dir: dir, state: d.state}
+	d.signin = &signin{dir: dir, state: d.state, newClient: func(c subsonic.Creds) (*subsonic.Client, error) {
+		cl, err := d.newClient(c)
+		if cl != nil {
+			cl.Log = lg // the sign-in ping goes in log.txt too, redacted
+		}
+		return cl, err
+	}}
 	d.runner = syncer.New(card, src{d}, lg)
 	d.stream = newStreamer(card, filepath.Join(tmp, "q2-subsonic.play"), filepath.Join(tmp, "q2-subsonic.playing"),
 		d.caps, src{d}, d.manifest, syncer.Net, time.Second)
@@ -196,13 +210,15 @@ func (d *daemon) hostName() string {
 	return d.host
 }
 
+// signOut forgets the sign-in at once; the sync and stream stop in the background (R27: a reply
+// never waits for a download to notice its cancel).
 func (d *daemon) signOut() {
-	d.runner.Pause()
-	d.stream.stop()
 	creds.Remove(d.dir)
 	d.mu.Lock()
 	d.cl, d.pinged, d.preview = nil, false, nil
 	d.mu.Unlock()
+	go d.runner.Pause()
+	go d.stream.stop()
 }
 
 // src lends the current client to the runner and the streamer, which outlive a sign-in.
@@ -288,7 +304,7 @@ func (d *daemon) close(sock string) {
 	d.signin.stop()
 	d.stream.stop()
 	d.runner.Pause()
-	d.state.st.Remove()
+	d.state.remove()
 	os.Remove(sock)
 }
 

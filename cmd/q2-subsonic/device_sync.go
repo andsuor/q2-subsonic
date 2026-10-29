@@ -74,9 +74,10 @@ func (d *daemon) computePreview(cl *subsonic.Client, p *preview) {
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 4)
+	var werr error // the first worker's failure, under mu; it cancels ctx, so the rest return at once
 	for _, it := range sel.Items {
 		if err != nil {
-			break
+			break // the selection didn't load; no worker has started
 		}
 		wg.Add(1)
 		go func(it selection.Item) {
@@ -87,14 +88,17 @@ func (d *daemon) computePreview(cl *subsonic.Client, p *preview) {
 			key := selection.Key(it.Kind, it.ID)
 			mu.Lock()
 			defer mu.Unlock()
-			if e != nil && err == nil {
-				err = e
+			if e != nil && werr == nil {
+				werr = e
 				cancel()
 			}
 			resolved[key], names[key] = songs, name
 		}(it)
 	}
 	wg.Wait()
+	if err == nil {
+		err = werr
+	}
 	var pl plan.Plan
 	if err == nil {
 		pl = plan.Compute(sel, resolved, names, d.manifest(), d.card, d.free(d.card))
@@ -149,7 +153,7 @@ func (d *daemon) syncRows(s syncer.Snapshot) q2spot.Reply {
 		}
 		rows = append(rows, q2spot.Row{Kind: "progress", Title: pct, Subtitle: sub, Position: strconv.Itoa(s.Permille)})
 	} else {
-		n := min(max(s.Permille/100, 0), 10)
+		n := min(max((s.Permille+50)/100, 0), 10)
 		rows = append(rows, info("["+strings.Repeat("#", n)+strings.Repeat("-", 10-n)+"] "+pct))
 	}
 	rows = append(rows, info(fmt.Sprintf("%d of %s", s.Done, plural(s.Total, "song"))))
@@ -213,9 +217,10 @@ func (d *daemon) failed() q2spot.Reply {
 func (d *daemon) removed(cursor string) q2spot.Reply {
 	d.mu.Lock()
 	p := d.preview
+	ready := p != nil && p.done && p.plan != nil
 	d.mu.Unlock()
 	var rows []q2spot.Row
-	if p != nil && p.done && p.plan != nil {
+	if ready {
 		for _, e := range p.plan.Remove {
 			rows = append(rows, info(strings.TrimPrefix(e.Path, filepath.Join(d.card, "Navidrome")+"/")))
 		}
@@ -230,9 +235,10 @@ func (d *daemon) syncAction(op string) q2spot.Reply {
 	switch op {
 	case "start":
 		d.mu.Lock()
-		p, gen := d.preview, d.gen
+		p := d.preview
+		ready := p != nil && p.done && p.err == nil && p.gen == d.gen
 		d.mu.Unlock()
-		if p == nil || !p.done || p.err != nil || p.gen != gen {
+		if !ready {
 			return q2spot.Reply{Message: "Open Sync again to check"}
 		}
 		if !p.plan.Fits {
@@ -245,12 +251,12 @@ func (d *daemon) syncAction(op string) q2spot.Reply {
 		d.mu.Lock()
 		d.showDone, d.preview, d.lib = true, nil, nil
 		d.mu.Unlock()
-	case "pause":
-		d.runner.Pause()
+	case "pause": // R27: stopping waits for the download to notice; the reply doesn't
+		go d.runner.Pause()
 	case "resume":
 		d.runner.Resume()
 	case "cancel":
-		d.runner.Cancel()
+		go d.runner.Cancel()
 	case "retry":
 		d.runner.RetryFailed()
 		d.mu.Lock()

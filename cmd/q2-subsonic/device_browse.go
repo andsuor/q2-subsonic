@@ -374,6 +374,20 @@ func (d *daemon) play(ctx context.Context, cl *subsonic.Client, arg string) q2sp
 	if i < 0 || i >= len(songs) {
 		return q2spot.Fail(q2spot.Unavailable, "Nothing to play")
 	}
-	d.stream.start(songs, i)
+	// R27: starting stops the last stream, which may be mid-fetch; reply now, start behind it.
+	d.mu.Lock()
+	d.playSeq++
+	seq := d.playSeq
+	d.mu.Unlock()
+	go func() {
+		d.playMu.Lock()
+		defer d.playMu.Unlock()
+		d.mu.Lock()
+		latest := seq == d.playSeq
+		d.mu.Unlock()
+		if latest {
+			d.stream.start(songs, i)
+		}
+	}()
 	return q2spot.Reply{Message: "Playing " + songs[i].Title}
 }

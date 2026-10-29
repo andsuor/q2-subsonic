@@ -106,6 +106,9 @@ func (d *daemon) device(req q2spot.Request) q2spot.Reply {
 		return d.settingsOp(req.Op)
 	case "onq2":
 		return d.onQ2()
+	case "signin":
+		d.signin.start(d.signinPort)
+		return q2spot.Reply{Message: "Scan the code with your phone"}
 	}
 	cl := d.client()
 	if cl == nil {
@@ -204,18 +207,26 @@ func (d *daemon) menu() q2spot.Reply {
 	d.mu.Unlock()
 	cl := d.client()
 	if cl == nil {
-		if ok, _ := d.signin.result(); d.signin.active() && !ok && gap > qrLeftAfter {
+		ok, msg := d.signin.result()
+		active, left := d.signin.active(), gap > qrLeftAfter
+		switch {
+		case active && !ok && left:
 			d.signin.stop()
-		}
-		if !d.signin.active() {
+			d.signin.start(d.signinPort)
+		case !active && msg == signinTimedOut && !left:
+			// The 10 min are up while the root shows: the refresh doesn't start it again (R26).
+			return q2spot.Reply{Message: "refresh", Rows: []q2spot.Row{
+				{Kind: "action", URI: "signin", Title: "Sign In from Your Phone", Subtitle: msg}}}
+		case !active:
 			d.signin.start(d.signinPort)
 		}
-		_, msg := d.signin.result()
+		_, msg = d.signin.result()
 		return q2spot.Reply{Message: "refresh", Rows: []q2spot.Row{{Kind: "remote", Title: "Sign In from Your Phone", Subtitle: msg}}}
 	}
 	if d.signin.active() {
 		d.signin.stop()
 	}
+	d.state.Write(nil) // the QR page's last words, once it is left
 	var rows []q2spot.Row
 	if err := d.stream.Err(); err != nil {
 		rows = append(rows, info(err.Error()))
