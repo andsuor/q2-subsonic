@@ -39,7 +39,7 @@ The list has **Sync**, **On This Q2**, **Playlists**, **Albums**, **Artists**, *
 
 **Syncing:** open **Sync**. It first shows a preview, and nothing happens until you press **Start Sync**: songs to add (`+N`), to remove (`−N`), to replace (`Replace N`), and `Needs X · Y free`. If the card is too small it says so and offers no Start. Then it shows progress: percent, songs, time left, the current song, and **Pause**, **Resume** and **Cancel**. Leave the page and the sync carries on. If Wi-Fi drops or the Q2 restarts, it picks up where it was. Songs that fail are listed under **Failed Songs**, with **Retry Failed**.
 
-**Playing:** press a song to play it and the rest of the list after it. Songs already synced play from the card; the others stream. FLAC and MP3 are streamed as they are, any other format as MP3 320 (**Settings → Streaming Quality**). Streamed files are deleted as you go.
+**Playing:** press a song to play it and the rest of the list after it. Songs already synced play from the card; the others stream. A song streams in its original format: FLAC and MP3 always, and other formats the Q2 plays too when the firmware has the `playlist` extension; without it they stream as MP3 320. **Settings → Streaming Quality** (Original, the default, MP3 320 or MP3 128) overrides this: anything but Original transcodes every streamed song to MP3. Streamed files are deleted as you go.
 
 ## Sync rules
 
@@ -59,7 +59,7 @@ Newer Q2 Pod firmware offers extensions to card apps. Without them everything st
 |---|---|---|
 | `library` | After a sync the Q2 updates its library and imports the playlists itself (it waits while music is playing). | Run **Library → Update Local Music**, then **Playlists → Import playlist** yourself. The sync page's **Update Your Library** row reminds you. |
 | `progress` | A real progress bar. | A text bar such as `[#####-----] 47 %`. |
-| `playlist` | Streaming plays the synced songs from the card inside a playlist. | Everything in the list streams, synced or not. |
+| `playlist` | Streaming plays the synced songs from the card inside a playlist, and streams every format the Q2 plays as it is. | Everything in the list streams, synced or not, and only FLAC and MP3 stream as they are (others as MP3 320). |
 
 ## Errors and logs
 
