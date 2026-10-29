@@ -50,6 +50,9 @@ func SetDateURL(u string) {
 	mu.Unlock()
 }
 
+// DateURL is the URL set by SetDateURL.
+func DateURL() string { mu.Lock(); defer mu.Unlock(); return dateURL }
+
 // Now is the system time when its year is 2025 or later, else the server's time (cached as an offset
 // from the system clock). Until the server's time is known, and for 30 s after a failed fetch, it
 // is the system time, never a wait. One fetch runs at a time.

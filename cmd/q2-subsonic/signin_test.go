@@ -16,6 +16,7 @@ import (
 	"github.com/andsuor/q2-subsonic/internal/creds"
 	"github.com/andsuor/q2-subsonic/internal/q2"
 	"github.com/andsuor/q2-subsonic/internal/subsonic"
+	"github.com/andsuor/q2-subsonic/internal/tlsroots"
 )
 
 type clock struct {
@@ -54,7 +55,7 @@ type rig struct {
 	nd   *httptest.Server
 }
 
-func newRig(t *testing.T) *rig {
+func newRig(t *testing.T, opts ...func(*signin, *httptest.Server)) *rig {
 	t.Helper()
 	nd := fakeNavidrome(t)
 	dir := t.TempDir()
@@ -65,6 +66,9 @@ func newRig(t *testing.T) *rig {
 		now:       clk.now,
 		tick:      5 * time.Millisecond,
 		newClient: func(c subsonic.Creds) (*subsonic.Client, error) { return subsonic.New(c, nd.Client()) },
+	}
+	for _, o := range opts {
+		o(s, nd)
 	}
 	s.start(0)
 	t.Cleanup(s.stop)
@@ -306,5 +310,24 @@ func TestSigninWrongPassword(t *testing.T) {
 	}
 	if !r.s.active() {
 		t.Fatal("stopped on failure")
+	}
+}
+
+// Sign-in sets the clock-fallback URL before its ping, so a Q2 with an unset clock can sign in.
+func TestSigninSetsDateURL(t *testing.T) {
+	tlsroots.SetDateURL("")
+	var seen string
+	r := newRig(t, func(s *signin, nd *httptest.Server) {
+		s.newClient = func(c subsonic.Creds) (*subsonic.Client, error) {
+			seen = tlsroots.DateURL() // newClient runs just before the ping
+			return subsonic.New(c, nd.Client())
+		}
+	})
+	c := r.login(t)
+	if resp, body := r.post(t, "/api/signin", `{"server":"`+r.nd.URL+`","user":"u","password":"pw"}`, true, c); resp.StatusCode != 200 {
+		t.Fatal(body)
+	}
+	if seen != r.nd.URL {
+		t.Fatalf("date URL before ping %q, want %q", seen, r.nd.URL)
 	}
 }

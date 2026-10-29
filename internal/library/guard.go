@@ -33,11 +33,10 @@ func resolve(p string) string {
 // .subsonic/, and in _explaylist_data/ only the .m3u files recorded in m.Playlists (m may be nil)
 // plus legacy "Navidrome - *.m3u" files, which exist only to be migrated away.
 func Owned(root, path string, m *Manifest) bool {
-	rel, err := filepath.Rel(resolve(root+"/."), resolve(path))
-	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	parts := relParts(root, path)
+	if parts == nil {
 		return false
 	}
-	parts := strings.Split(rel, string(filepath.Separator))
 	switch parts[0] {
 	case "Subsonic", ".subsonic":
 		return len(parts) > 1
@@ -57,6 +56,22 @@ func Owned(root, path string, m *Manifest) bool {
 		}
 	}
 	return false
+}
+
+// relParts splits path, symlinks resolved, relative to root; nil when it is root or outside it.
+func relParts(root, path string) []string {
+	rel, err := filepath.Rel(resolve(root+"/."), resolve(path))
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil
+	}
+	return strings.Split(rel, string(filepath.Separator))
+}
+
+// InSongs reports whether path, in Clean form, is strictly inside <root>/Subsonic/: the only place
+// a sync writes songs. Owned also allows .subsonic/, which holds the app binary and run script.
+func InSongs(root, path string) bool {
+	parts := relParts(root, path)
+	return filepath.Clean(path) == path && len(parts) > 1 && parts[0] == "Subsonic"
 }
 
 // ValidPlaylistFile reports whether f is exactly <root>/_explaylist_data/<name>.m3u in Clean form,

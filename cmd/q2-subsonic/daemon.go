@@ -222,9 +222,14 @@ func (d *daemon) signOut() {
 	creds.Remove(d.dir)
 	d.mu.Lock()
 	d.cl, d.pinged, d.preview = nil, false, nil
+	d.playSeq++ // a play still waiting for playMu is dropped
 	d.mu.Unlock()
 	go d.runner.Pause()
-	go d.stream.stop()
+	go func() { // under playMu, so a start already running finishes first and is then stopped
+		d.playMu.Lock()
+		defer d.playMu.Unlock()
+		d.stream.stop()
+	}()
 }
 
 // src lends the current client to the runner and the streamer, which outlive a sign-in.

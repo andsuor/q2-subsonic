@@ -369,6 +369,9 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 			delete(m.Playlists, name)
 		}
 	}
+	// Legacy "Navidrome - *.m3u" files are removed only in the sync after the one-time migration
+	// (which sets PlaylistsStale); otherwise a file with that name is the user's own.
+	migrating := m.PlaylistsStale
 	used := map[string]bool{} // playlist files claimed in this run
 	names := make([]string, 0, len(p.Playlists))
 	for name := range p.Playlists {
@@ -398,8 +401,10 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 			}
 			return r.cardErr(err)
 		}
-		library.Remove(r.root, library.LegacyPlaylistFile(r.root, name)) // migration from "Navidrome - <name>"
-		if err := save(); err != nil {                                   // record each file as soon as it exists
+		if migrating {
+			library.Remove(r.root, library.LegacyPlaylistFile(r.root, name))
+		}
+		if err := save(); err != nil { // record each file as soon as it exists
 			return err
 		}
 	}
@@ -410,11 +415,13 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 			}
 		}
 	}
-	m.PlaylistsStale = false
-	legacy, _ := filepath.Glob(filepath.Join(r.root, "_explaylist_data", "Navidrome - *.m3u"))
-	for _, f := range legacy {
-		library.Remove(r.root, f)
+	if migrating {
+		legacy, _ := filepath.Glob(filepath.Join(r.root, "_explaylist_data", "Navidrome - *.m3u"))
+		for _, f := range legacy {
+			library.Remove(r.root, f)
+		}
 	}
+	m.PlaylistsStale = false
 	if err := save(); err != nil {
 		return err
 	}
@@ -470,9 +477,10 @@ func (r *Runner) remove(path string) error {
 	return nil
 }
 
+// owned gates song writes (downloads and renames): only under Subsonic/, never .subsonic/.
 func owned(root, path string) error {
-	if filepath.Clean(path) != path || !library.Owned(root, path, nil) {
-		return errors.New("refusing path outside owned trees: " + path)
+	if !library.InSongs(root, path) {
+		return errors.New("refusing song path outside Subsonic/: " + path)
 	}
 	return nil
 }

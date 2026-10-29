@@ -296,6 +296,7 @@ func (s *signin) signin(w http.ResponseWriter, r *http.Request) {
 	if u, err := url.Parse(c.Server); err == nil && u.Host != "" {
 		host = u.Host
 	}
+	tlsroots.SetDateURL(c.Server) // the ping's certificate check needs a real clock (an unset Q2's isn't)
 	mk := s.newClient
 	if mk == nil {
 		mk = func(c subsonic.Creds) (*subsonic.Client, error) {

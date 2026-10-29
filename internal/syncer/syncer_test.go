@@ -626,6 +626,7 @@ func TestLegacyPrefixMigrated(t *testing.T) {
 		legacyGone = library.LegacyPlaylistFile(root, "Old")
 		put(t, legacySel, "#EXTM3U\n")
 		put(t, legacyGone, "#EXTM3U\n")
+		(&library.Manifest{PlaylistsStale: true}).Save(root, root+"/.subsonic/manifest.json") // set by the migration
 	}, "Mix")
 	for _, f := range []string{legacySel, legacyGone} {
 		if _, err := os.Stat(f); !os.IsNotExist(err) {
@@ -665,5 +666,42 @@ func TestBadRecordedPlaylistIgnored(t *testing.T) {
 	}, "X")
 	if m.Playlists["X"] != library.PlaylistFile(root, "X") || len(m.Playlists) != 1 {
 		t.Fatal(m.Playlists)
+	}
+}
+
+// Song writes go under Subsonic/ only: .subsonic/ holds the app binary and its run script.
+func TestSongWritesOnlyUnderSubsonic(t *testing.T) {
+	_, r, root := setup(t)
+	bin := root + "/.subsonic/q2-subsonic"
+	put(t, bin, "app")
+	w := want(root, "a", "original")
+	w.Path = bin
+	src := root + "/Subsonic/A/B/1.mp3"
+	put(t, src, "x")
+	r.Start(plan.Plan{Add: []plan.Want{w}, Rename: []plan.Move{{From: src, To: root + "/.subsonic/run", ID: "r"}}})
+	wait(t, r)
+	if b, _ := os.ReadFile(bin); string(b) != "app" {
+		t.Fatalf("binary overwritten: %d bytes", len(b))
+	}
+	for _, p := range []string{bin + ".part", root + "/.subsonic/run"} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatal("written:", p)
+		}
+	}
+}
+
+// Outside the one-time migration, a "Navidrome - X.m3u" is the user's own and is left alone.
+func TestUserNavidromePrefixKept(t *testing.T) {
+	var mine, sel string
+	syncPlaylists(t, func(root string) {
+		mine = library.LegacyPlaylistFile(root, "X")
+		sel = library.LegacyPlaylistFile(root, "Mix")
+		put(t, mine, "#EXTM3U\n")
+		put(t, sel, "#EXTM3U\n")
+	}, "Mix")
+	for _, f := range []string{mine, sel} {
+		if _, err := os.Stat(f); err != nil {
+			t.Fatal("user playlist deleted:", f)
+		}
 	}
 }

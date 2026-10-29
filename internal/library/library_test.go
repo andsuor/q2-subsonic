@@ -271,3 +271,38 @@ func TestOwnedPlaylistsOnlyRecorded(t *testing.T) {
 		t.Fatal("wrote unrecorded")
 	}
 }
+
+// A hostile server's suffix or id must never steer a song path out of its folder.
+func TestHostileSuffixAndID(t *testing.T) {
+	s := song
+	s.Suffix = "x/../../../../.subsonic/q2-subsonic"
+	got := SongPath("/r", s, "original", false)
+	if want := "/r/Subsonic/Art/1999 - Alb/03 - Intro.mp3"; got != want {
+		t.Fatal(got)
+	}
+	for _, sfx := range []string{"FLAC", "m4a", "opus"} {
+		s.Suffix = sfx
+		if p := SongPath("/r", s, "original", false); filepath.Ext(p) != "."+strings.ToLower(sfx) {
+			t.Fatal(p)
+		}
+	}
+	if got := WithID("/r/Subsonic/A/B/03 - x.mp3", "../../../.subsonic/run"); filepath.Dir(got) != "/r/Subsonic/A/B" {
+		t.Fatal(got)
+	}
+}
+
+func TestInSongs(t *testing.T) {
+	root := t.TempDir()
+	for p, want := range map[string]bool{
+		root + "/Subsonic/A/B/1.mp3":                 true,
+		root + "/.subsonic/q2-subsonic":              false,
+		root + "/.subsonic/manifest.json":            false,
+		root + "/_explaylist_data/Navidrome - X.m3u": false,
+		root + "/Subsonic":                           false,
+		root + "/Subsonic/../.subsonic/run":          false,
+	} {
+		if InSongs(root, p) != want {
+			t.Errorf("%s: want %v", p, want)
+		}
+	}
+}

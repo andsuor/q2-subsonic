@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"unicode/utf8"
 
@@ -37,9 +38,14 @@ func SafeName(s string) string {
 	return s
 }
 
+// safeExt is a server-supplied suffix that can only be an extension: 1-5 of [a-z0-9]. Anything
+// else (e.g. "x/../../.subsonic/q2-subsonic") falls back to "mp3", so a hostile server can't steer
+// the path; the Q2 sniffs the format from the content anyway.
+var safeExt = regexp.MustCompile(`^[a-z0-9]{1,5}$`)
+
 func ext(s subsonic.Song, quality string) string {
-	if quality == "original" && s.Suffix != "" {
-		return strings.ToLower(s.Suffix)
+	if e := strings.ToLower(s.Suffix); quality == "original" && safeExt.MatchString(e) {
+		return e
 	}
 	return "mp3"
 }
@@ -76,7 +82,7 @@ func SongPath(root string, s subsonic.Song, quality string, multiDisc bool) stri
 func WithID(path, id string) string {
 	e := filepath.Ext(path)
 	dir, stem := filepath.Split(strings.TrimSuffix(path, e))
-	tag := " [" + id + "]"
+	tag := " [" + SafeName(id) + "]"
 	if n := maxComponent - len(e) - len(tag); len(stem) > n && n > 0 {
 		for n > 0 && !utf8.RuneStart(stem[n]) {
 			n--

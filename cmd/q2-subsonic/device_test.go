@@ -795,3 +795,19 @@ func TestLibraryRowNoDoubleRequest(t *testing.T) {
 		t.Errorf("second request: %s -> %s", seq, got)
 	}
 }
+
+// A play still waiting for playMu when Sign Out is pressed never starts.
+func TestSignOutDropsPendingPlay(t *testing.T) {
+	n := &nav{albums: 2, songsPer: 3, block: make(chan struct{})}
+	d := newTestDaemon(t, n, "", true)
+	t.Cleanup(func() { close(n.block) })
+	d.playMu.Lock() // a previous start still running
+	d.do("play", "album:al1 0")
+	d.do("signout")
+	time.Sleep(50 * time.Millisecond) // let an unguarded stop run first, as in the race
+	d.playMu.Unlock()
+	time.Sleep(300 * time.Millisecond)
+	if d.stream.active() {
+		t.Fatal("stream started after sign-out")
+	}
+}
