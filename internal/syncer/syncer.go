@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -354,8 +355,20 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 		r.op("download", w.Path)
 	}
 
+	for name, f := range m.Playlists {
+		if !library.ValidPlaylistFile(r.root, f) {
+			r.logf("sync: ignoring bad recorded playlist path %q for %s", f, name)
+			delete(m.Playlists, name)
+		}
+	}
 	used := map[string]bool{} // playlist files claimed in this run
-	for name, paths := range p.Playlists {
+	names := make([]string, 0, len(p.Playlists))
+	for name := range p.Playlists {
+		names = append(names, name)
+	}
+	sort.Strings(names) // a failure part-way leaves a predictable set recorded
+	for _, name := range names {
+		paths := p.Playlists[name]
 		f := m.Playlists[name]
 		if f == "" {
 			f = r.freePlaylistFile(m, name, used)
@@ -378,6 +391,9 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 			return r.cardErr(err)
 		}
 		library.Remove(r.root, library.LegacyPlaylistFile(r.root, name)) // migration from "Navidrome - <name>"
+		if err := save(); err != nil {                                   // record each file as soon as it exists
+			return err
+		}
 	}
 	for name, f := range m.Playlists {
 		if _, ok := p.Playlists[name]; !ok {

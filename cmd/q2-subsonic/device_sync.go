@@ -310,7 +310,7 @@ func (d *daemon) library() q2spot.Reply {
 		var m3us []string            // the files the last sync recorded; the user's own playlists are never imported
 		if m, _ := library.LoadManifest(filepath.Join(d.card, ".subsonic", "manifest.json")); m != nil {
 			for _, f := range m.Playlists {
-				if _, err := os.Stat(f); err == nil {
+				if _, err := os.Stat(f); err == nil && library.ValidPlaylistFile(d.card, f) {
 					m3us = append(m3us, f)
 				}
 			}

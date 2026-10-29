@@ -636,3 +636,34 @@ func TestLegacyPrefixMigrated(t *testing.T) {
 		t.Fatal(err, m.Playlists)
 	}
 }
+
+func TestPlaylistWriteFailureKeepsRecords(t *testing.T) {
+	_, r, root := setup(t)
+	bad := library.PlaylistFile(root, "B")
+	os.MkdirAll(bad, 0o755) // a directory where B.m3u must go: the write fails
+	(&library.Manifest{Playlists: map[string]string{"B": bad}}).Save(root, root+"/.subsonic/manifest.json")
+	r.Start(plan.Plan{Playlists: map[string][]string{"A": nil, "B": nil, "C": nil}})
+	if s := wait(t, r); s.State != "error" {
+		t.Fatalf("%+v", s)
+	}
+	if got := manifest(t, root).Playlists["A"]; got != library.PlaylistFile(root, "A") {
+		t.Fatalf("A not recorded: %v", manifest(t, root).Playlists)
+	}
+	os.Remove(bad)
+	r.Start(plan.Plan{Playlists: map[string][]string{"A": nil, "B": nil, "C": nil}})
+	if s := wait(t, r); s.State != "done" {
+		t.Fatalf("%+v", s)
+	}
+	if m, _ := filepath.Glob(root + "/_explaylist_data/*(Navidrome*"); len(m) != 0 {
+		t.Fatal("duplicates:", m)
+	}
+}
+
+func TestBadRecordedPlaylistIgnored(t *testing.T) {
+	root, m := syncPlaylists(t, func(root string) {
+		(&library.Manifest{Playlists: map[string]string{"X": "/etc/passwd", "Y": root + "/Navidrome/y.m3u"}}).Save(root, root+"/.subsonic/manifest.json")
+	}, "X")
+	if m.Playlists["X"] != library.PlaylistFile(root, "X") || len(m.Playlists) != 1 {
+		t.Fatal(m.Playlists)
+	}
+}

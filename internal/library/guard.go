@@ -59,6 +59,14 @@ func Owned(root, path string, m *Manifest) bool {
 	return false
 }
 
+// ValidPlaylistFile reports whether f is exactly <root>/_explaylist_data/<name>.m3u in Clean form,
+// the only shape a recorded playlist path may have.
+func ValidPlaylistFile(root, f string) bool {
+	b := filepath.Base(f)
+	return filepath.Clean(f) == f && filepath.Dir(f) == filepath.Join(root, "_explaylist_data") &&
+		strings.HasSuffix(b, ".m3u") && b != ".m3u"
+}
+
 // checkOwned is the gate for every write and delete: path must already be in Clean form (so the
 // OS and the guard read the same path, e.g. no "link/.." tricks) and Owned.
 func checkOwned(root, path string, m *Manifest) error {
