@@ -178,20 +178,30 @@ func (r *Runner) Refresh(keep []plan.Want) error {
 	return r.edit(func(m *library.Manifest) (bool, error) { return applyKeep(m, keep), nil })
 }
 
-// Imported takes the firmware's answer to a library request that named sent and skipped exists
-// (R35). The rest of sent are now Q2 playlists the app made, so later requests replace them by
-// name. A skipped file still under its playlist's own name met a playlist the user made: it is
-// renamed "<name> (Subsonic).m3u" and returned in again, to add once more. One skipped under that
-// name too is a clash. ErrBusy while a sync runs.
-func (r *Runner) Imported(sent, exists []string) (again, clash []string, err error) {
-	err = r.edit(func(m *library.Manifest) (bool, error) {
-		skipped := map[string]bool{}
-		for _, f := range exists {
+// Imported takes the firmware's answer to a library request that imported imports, added adds,
+// and skipped exists (R35). What it imported or added is now a Q2 playlist the app made, so later
+// requests replace it by name. A skipped add still under its playlist's own name met a playlist
+// the user made: it is renamed "<name> (Subsonic).m3u" and returned in again, to add once more.
+// One skipped under that name too is a clash. Only an exists naming exactly an add of the request
+// counts; any other is logged and ignored, and then no add is recorded (one may have been
+// skipped: the guard fails closed). ErrBusy while a sync runs.
+func (r *Runner) Imported(imports, adds, exists []string) (again, clash []string, err error) {
+	added, skipped, trusted := map[string]bool{}, map[string]bool{}, true
+	for _, f := range adds {
+		added[f] = true
+	}
+	for _, f := range exists {
+		if added[f] {
 			skipped[f] = true
+			continue
 		}
+		r.logf("library: ignoring \"exists %s\": not an add of this request", f)
+		trusted = false
+	}
+	err = r.edit(func(m *library.Manifest) (bool, error) {
 		changed := false
-		for _, f := range sent {
-			if !skipped[f] && !m.Imported[f] {
+		for _, f := range append(append([]string(nil), imports...), adds...) {
+			if (!added[f] || trusted && !skipped[f]) && !m.Imported[f] {
 				m.Imported[f], changed = true, true
 			}
 		}

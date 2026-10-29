@@ -1151,7 +1151,7 @@ func TestImported(t *testing.T) {
 		put(t, f, "#EXTM3U\n")
 	}
 	(&library.Manifest{Playlists: map[string]string{"Mix": mix, "Rock": rock, "Fav": fav}, Imported: map[string]bool{}}).Save(root, root+"/.subsonic/manifest.json")
-	again, clash, err := r.Imported([]string{mix, rock, fav}, []string{rock, fav})
+	again, clash, err := r.Imported(nil, []string{mix, rock, fav}, []string{rock, fav})
 	rockS := root + "/_explaylist_data/Rock (Subsonic).m3u"
 	if err != nil || !reflect.DeepEqual(again, []string{rockS}) || !reflect.DeepEqual(clash, []string{fav}) {
 		t.Fatal(again, clash, err)
@@ -1191,5 +1191,26 @@ func TestProxyErrorPauses(t *testing.T) {
 		if err := stopReason(&subsonic.APIError{Op: "download", HTTP: st}); err != nil {
 			t.Error(st, "is the song's own:", err)
 		}
+	}
+}
+
+// Only an "exists" line naming exactly an add of that request is honoured. Any other (an import, a
+// path in another form) is logged and ignored, and then no add of that request is recorded as
+// imported: one of them may have been skipped, and recording it would let a later "import"
+// replace the user's playlist. The guard fails closed (review G1, Minor 1).
+func TestImportedTrustsOnlySentAdds(t *testing.T) {
+	_, r, root := setup(t)
+	mix, rock := library.PlaylistFile(root, "Mix"), library.PlaylistFile(root, "Rock")
+	for _, f := range []string{mix, rock} {
+		put(t, f, "#EXTM3U\n")
+	}
+	(&library.Manifest{Playlists: map[string]string{"Mix": mix, "Rock": rock}, Imported: map[string]bool{rock: true}}).Save(root, root+"/.subsonic/manifest.json")
+	again, clash, err := r.Imported([]string{rock}, []string{mix}, []string{"/mnt/mmc/_explaylist_data/Mix.m3u", rock})
+	if err != nil || len(again)+len(clash) != 0 {
+		t.Fatal(again, clash, err)
+	}
+	m := manifest(t, root)
+	if m.Imported[mix] || !m.Imported[rock] || m.Playlists["Mix"] != mix || m.Playlists["Rock"] != rock {
+		t.Fatalf("%+v %+v", m.Imported, m.Playlists)
 	}
 }
