@@ -137,13 +137,14 @@ type daemon struct {
 	preview            *preview
 	showDone           bool // the finished sync's page, until the selection changes or Check Again
 	lib                *libJob
-	libTaken           int64                      // the library request whose answer was taken last (libPoll)
-	libAgain           bool                       // a request was wanted while one awaited its answer: sent once that comes
-	libRest            [2][]string                // the import and add paths the request on file had no room for (I20)
-	resolved           map[string][]subsonic.Song // selection key -> its songs, as last fetched
-	libCount           [2]int                     // albums, playlists of the Entire Library, as last resolved
-	playSeq            int                        // the latest play request; an older one still waiting is dropped
-	playMu             sync.Mutex                 // one streamer.start at a time
+	libTaken           int64                       // the library request whose answer was taken last (libPoll)
+	libAgain           bool                        // a request was wanted while one awaited its answer: sent once that comes
+	libRest            [2][]string                 // the import and add paths the request on file had no room for (I20)
+	resolved           map[string][]subsonic.Song  // selection key -> its songs, as last fetched
+	artistAlbums       map[string][]subsonic.Album // artist id -> its albums, as last fetched
+	libCount           [2]int                      // albums, playlists of the Entire Library, as last resolved
+	playSeq            int                         // the latest play request; an older one still waiting is dropped
+	playMu             sync.Mutex                  // one streamer.start at a time
 	man                *library.Manifest
 	manAt              time.Time
 	manSize            int64
@@ -168,7 +169,7 @@ func newDaemon(dir, card, tmp string) *daemon {
 			return subsonic.New(c, tlsroots.Client(15*time.Second))
 		},
 		free: freeBytes, answerIn: answerIn, signinPort: signinPort,
-		lastReq: time.Now(), resolved: map[string][]subsonic.Song{}}
+		lastReq: time.Now(), resolved: map[string][]subsonic.Song{}, artistAlbums: map[string][]subsonic.Album{}}
 	d.signin = &signin{dir: dir, state: d.state, newClient: func(c subsonic.Creds) (*subsonic.Client, error) {
 		cl, err := d.newClient(c)
 		if cl != nil {

@@ -75,16 +75,36 @@ func size(b int64) string {
 	return fmt.Sprintf("%d MB", (b+5e5)/1e6)
 }
 
-// page is rows from cursor (an offset) on, at most 50, with the cursor of the next page.
+// page is rows from cursor (an offset) on, as many as one reply carries (fit), with the cursor of
+// the next page.
 func page(rows []q2spot.Row, cursor string) q2spot.Reply {
 	off, _ := strconv.Atoi(cursor)
 	off = max(0, min(off, len(rows)))
-	end := min(off+q2spot.MaxRows, len(rows))
+	end := off + fit(rows[off:min(off+q2spot.MaxRows, len(rows))])
 	r := q2spot.Reply{Rows: rows[off:end]}
 	if end < len(rows) {
 		r.Cursor = strconv.Itoa(end)
 	}
 	return r
+}
+
+// fit is how many of rows (at most 50) one reply carries with room for a Sync Now row: a row that
+// Encode left out for 64 KiB would never be shown, as the cursor would go on past it (M28).
+func fit(rows []q2spot.Row) int {
+	// The longest message stands in for "pages" and the Sync Now row's bytes.
+	r := q2spot.Reply{Message: strings.Repeat("x", q2spot.MaxMessage), Cursor: "9999999999", Rows: rows}
+	_, kept := r.Encode("99999999999999999999")
+	return min(len(rows), max(kept, 1))
+}
+
+// listErr is a list that failed: on its first page the message and Details; on a later one, which
+// the firmware adds to the list while it loads it page by page, a failed reply, so the list keeps
+// More… to try again (M30).
+func (d *daemon) listErr(err error, cursor string) q2spot.Reply {
+	if cursor != "" {
+		return d.errToast(err)
+	}
+	return d.errRows(err, "")
 }
 
 // parseKey splits "kind:id" (or a song row's Context, whose first field it is).
@@ -116,7 +136,7 @@ func (d *daemon) reply(req q2spot.Request) q2spot.Reply {
 	case "settings", "defq", "streamq":
 		return d.settingsOp(req.Op)
 	case "onq2":
-		return d.onQ2()
+		return d.onQ2(req.Arg(0))
 	case "signin":
 		d.signin.start(d.signinPort)
 		return q2spot.Reply{Message: "Scan the code with your phone"}
@@ -155,7 +175,7 @@ func (d *daemon) reply(req q2spot.Request) q2spot.Reply {
 	case "removed":
 		return d.removed(req.Arg(0))
 	case "failed":
-		return d.failed()
+		return d.failed(req.Arg(0))
 	case "library":
 		return d.library()
 	}
@@ -331,29 +351,25 @@ func (d *daemon) libraryRow(sel selection.Set) q2spot.Row {
 }
 
 // onQ2 is the selection, each with its status and size on the card; a hold takes one out. Entire
-// Library is switched from the root; here it shows only while on, as one of the items.
-func (d *daemon) onQ2() q2spot.Reply {
+// Library is switched from the root; here it shows only while on, as one of the items. Entire
+// Library and a song, which have no page of their own, have their Quality here (I25).
+func (d *daemon) onQ2(cursor string) q2spot.Reply {
 	v := d.view()
 	var rows []q2spot.Row
-	if v.sel.Has(selection.KindLibrary, "all") {
-		rows = append(rows, d.libraryRow(v.sel))
-	}
 	if len(v.sel.Items) == 0 {
-		return q2spot.Reply{Rows: append(rows, q2spot.Row{Kind: "info", Title: "Nothing chosen yet",
-			Subtitle: "Hold Play/Pause on a playlist, album or artist"})}
+		return q2spot.Reply{Rows: []q2spot.Row{{Kind: "info", Title: "Nothing chosen yet",
+			Subtitle: "Hold Play/Pause on a playlist, album or artist"}}}
 	}
 	for _, it := range v.sel.Items {
+		key := selection.Key(it.Kind, it.ID)
+		quality := act("quality", "Quality: "+qualityName(it.Quality), key)
 		if it.Kind == selection.KindLibrary {
+			rows = append([]q2spot.Row{d.libraryRow(v.sel), quality}, rows...)
 			continue
 		}
-		key := selection.Key(it.Kind, it.ID)
 		var b int64
-		for _, e := range v.m.Songs {
-			for _, k := range e.Items {
-				if k == key {
-					b += e.Size
-				}
-			}
+		for _, sid := range v.keyed[key] {
+			b += v.m.Songs[sid].Size
 		}
 		total := 0
 		if it.Kind == selection.KindSong {
@@ -361,12 +377,13 @@ func (d *daemon) onQ2() q2spot.Reply {
 		}
 		row := v.item(it.Kind, it.ID, it.Name, "", total)
 		row.Subtitle = join(row.Subtitle, size(b))
-		if it.Kind == selection.KindSong { // no page of its own
-			row.Kind, row.URI = "info", ""
-		}
 		rows = append(rows, row)
+		if it.Kind == selection.KindSong {
+			rows[len(rows)-1].Kind, rows[len(rows)-1].URI = "info", ""
+			rows = append(rows, quality)
+		}
 	}
-	return q2spot.Reply{Rows: rows}
+	return page(rows, cursor)
 }
 
 var settingsMu sync.Mutex

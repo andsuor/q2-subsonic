@@ -268,14 +268,14 @@ func (d *daemon) doneRows(s syncer.Snapshot) q2spot.Reply {
 	return reply
 }
 
-func (d *daemon) failed() q2spot.Reply {
+func (d *daemon) failed(cursor string) q2spot.Reply {
 	rows := []q2spot.Row{act("retry", "Retry Failed", "")}
 	for _, f := range d.runner.Snapshot().Failures {
 		if f.Op != "cover" {
 			rows = append(rows, list("details", f.Title, f.Msg, detailsCtx(f.Op, f.HTTP, f.Code, f.At, f.SongID)))
 		}
 	}
-	return q2spot.Reply{Rows: rows}
+	return page(rows, cursor)
 }
 
 // removed lists what the previewed sync deletes.

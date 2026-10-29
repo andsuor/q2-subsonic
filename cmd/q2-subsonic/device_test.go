@@ -38,6 +38,9 @@ type nav struct {
 	lastRange        atomic.Value  // the Range header of the latest download, a string
 	various          bool          // albums are compilations: album artist "Various Artists", song j by "Artist j"
 	mediaErr         int           // download and stream answer this Subsonic error code
+	dup              bool          // each playlist holds its first song twice, last too
+	artists          int           // getArtists lists this many more artists, ar2.., with no albums
+	listErr          int           // getAlbumList2 fails with this code from offset 50 on
 }
 
 func (n *nav) song(al, j int) map[string]any {
@@ -63,7 +66,11 @@ func (n *nav) playlist(k int) map[string]any {
 	if k > 1 {
 		name = fmt.Sprintf("Mix %d", k)
 	}
-	return map[string]any{"id": fmt.Sprintf("pl%d", k), "name": name, "songCount": n.songsPer}
+	count := n.songsPer
+	if n.dup {
+		count++
+	}
+	return map[string]any{"id": fmt.Sprintf("pl%d", k), "name": name, "songCount": count}
 }
 
 func (n *nav) songs(al int) []map[string]any {
@@ -98,6 +105,11 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "ping":
 		ok("", nil)
 	case "getAlbumList2":
+		if off, _ := strconv.Atoi(q.Get("offset")); n.listErr != 0 && off >= 50 {
+			json.NewEncoder(w).Encode(map[string]any{"subsonic-response": map[string]any{"status": "failed",
+				"error": map[string]any{"code": n.listErr, "message": "Data not found"}}})
+			return
+		}
 		if n.empty {
 			ok("albumList2", map[string]any{})
 			return
@@ -129,13 +141,20 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		kk, _ := strconv.Atoi(strings.TrimPrefix(q.Get("id"), "pl"))
 		p := n.playlist(kk)
 		p["entry"] = n.songs(kk - 1)
+		if n.dup {
+			p["entry"] = append(n.songs(kk-1), n.song(kk-1, 0))
+		}
 		ok("playlist", p)
 	case "getArtists":
 		if n.empty {
 			ok("artists", map[string]any{})
 			return
 		}
-		ok("artists", map[string]any{"index": []any{map[string]any{"artist": []any{map[string]any{"id": "ar1", "name": "Artist", "albumCount": 2}}}}})
+		ars := []any{map[string]any{"id": "ar1", "name": "Artist", "albumCount": 2}}
+		for i := 0; i < n.artists; i++ {
+			ars = append(ars, map[string]any{"id": fmt.Sprintf("ar%d", i+2), "name": fmt.Sprintf("Artist %05d", i+2), "albumCount": 1})
+		}
+		ok("artists", map[string]any{"index": []any{map[string]any{"artist": ars}}})
 	case "getArtist":
 		ok("artist", map[string]any{"id": "ar1", "name": "Artist", "albumCount": 2, "album": []any{n.album(0), n.album(1)}})
 	case "search3":
@@ -318,7 +337,8 @@ func TestStatusSubtitles(t *testing.T) {
 	sel.Save(filepath.Join(d.dir, "selection.json"))
 	m := &library.Manifest{Songs: map[string]*library.Entry{}}
 	add := func(id, key string) {
-		m.Songs[id] = &library.Entry{ID: id, Path: filepath.Join(d.card, "Subsonic", id+".flac"), Size: 1000, Items: []string{key}}
+		m.Songs[id] = &library.Entry{ID: id, Path: filepath.Join(d.card, "Subsonic", id+".flac"), Size: 1000, Items: []string{key},
+			Quality: "original"}
 	}
 	for j := 0; j < 3; j++ {
 		add(fmt.Sprintf("al0.%d", j), "album:al0")
@@ -588,7 +608,8 @@ func TestNoSyncNowRowWhenUpToDate(t *testing.T) {
 	m := &library.Manifest{Songs: map[string]*library.Entry{}}
 	for j := 0; j < 2; j++ {
 		id := fmt.Sprintf("al0.%d", j)
-		m.Songs[id] = &library.Entry{ID: id, Path: filepath.Join(d.card, "Subsonic", id+".flac"), Size: 1, Items: []string{"album:al0"}}
+		m.Songs[id] = &library.Entry{ID: id, Path: filepath.Join(d.card, "Subsonic", id+".flac"), Size: 1, Items: []string{"album:al0"},
+			Quality: "original"}
 	}
 	if err := m.Save(d.card, filepath.Join(d.card, ".subsonic", "manifest.json")); err != nil {
 		t.Fatal(err)
@@ -654,7 +675,7 @@ func TestEntireLibraryRow(t *testing.T) {
 		t.Fatalf("after resolve %q", got)
 	}
 	r = d.do("onq2")
-	if len(r.Rows) != 1 || r.Rows[0].Subtitle != "On · 3 albums · 2 playlists" {
+	if len(r.Rows) != 2 || r.Rows[0].Subtitle != "On · 3 albums · 2 playlists" || r.Rows[1].Title != "Quality: Original" {
 		t.Fatalf("on this q2 while on %q", titles(r))
 	}
 	if r := d.do("toggle", "library:all"); r.Message != "Removed from Sync" {
@@ -1230,5 +1251,198 @@ func TestLibraryRequestSplit(t *testing.T) {
 	}
 	if len(sent) != 400 || !d.lib.ok {
 		t.Fatalf("%d sent, ok %v", len(sent), d.lib.ok)
+	}
+}
+
+// syncOK runs a sync of what is chosen to done.
+func (d *tdaemon) syncOK(t *testing.T) {
+	t.Helper()
+	d.do("check")
+	d.preview(t)
+	d.do("start")
+	eventually(t, "the sync to finish", func() bool { return d.runner.Snapshot().State == "done" })
+}
+
+// A synced playlist that holds a song twice is On Q2, also after a restart (its server count has
+// the duplicate), and so is a chosen empty one: no Sync Now for them (I13).
+func TestPlaylistDuplicateOnQ2(t *testing.T) {
+	n := &nav{albums: 1, songsPer: 3, dup: true}
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", "playlist:pl1")
+	d.syncOK(t)
+	for _, dd := range []*tdaemon{d, newTestDaemonOn(t, d.card, n, "", true)} {
+		r := dd.do("playlists")
+		if row, _ := find(r, "Mix"); row.Subtitle != "4 songs · On Q2" {
+			t.Errorf("Mix %q", row.Subtitle)
+		}
+		if _, ok := find(r, "Sync Now"); ok {
+			t.Error("Sync Now")
+		}
+	}
+	e := newTestDaemon(t, &nav{albums: 1, songsPer: 0}, "", true)
+	e.do("toggle", "playlist:pl1")
+	e.syncOK(t)
+	if row, _ := find(e.do("playlists"), "Mix"); row.Subtitle != "0 songs · On Q2" {
+		t.Errorf("empty Mix %q", row.Subtitle)
+	}
+}
+
+// Artists builds each row's status from one index of the manifest, not a walk of it per artist:
+// thousands of artists over a big library still answer at once (I17).
+func TestArtistsFastOnBigLibrary(t *testing.T) {
+	d := newTestDaemon(t, &nav{artists: 4000}, "", true)
+	m := &library.Manifest{Songs: map[string]*library.Entry{}}
+	for i := 0; i < 40000; i++ {
+		id := fmt.Sprintf("s%d", i)
+		m.Songs[id] = &library.Entry{ID: id, Path: filepath.Join(d.card, "Subsonic", id+".flac"), Size: 1,
+			Items: []string{fmt.Sprintf("album:al%d", i/10), "library:all"}}
+	}
+	if err := m.Save(d.card, filepath.Join(d.card, ".subsonic", "manifest.json")); err != nil {
+		t.Fatal(err)
+	}
+	d.do("onq2") // the manifest read once
+	start := time.Now()
+	r := d.do("artists")
+	took := time.Since(start)
+	if took > time.Second || len(r.Rows) != 50 {
+		t.Fatalf("%d rows in %v", len(r.Rows), took)
+	}
+	t.Logf("%v", took)
+}
+
+// On This Q2 pages like every list: past 50 chosen items, More… (I21).
+func TestOnQ2Pages(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 70, songsPer: 1}, "", true)
+	sel := selection.Set{Version: 1}
+	for i := 0; i < 70; i++ {
+		sel.Toggle(selection.Item{Kind: selection.KindAlbum, ID: fmt.Sprintf("al%d", i), Name: fmt.Sprintf("Album %03d", i), Quality: "original"})
+	}
+	sel.Save(filepath.Join(d.dir, "selection.json"))
+	r := d.do("onq2")
+	if len(r.Rows) != 50 || r.Cursor == "" || r.Message != "pages" {
+		t.Fatalf("%d rows, cursor %q, message %q", len(r.Rows), r.Cursor, r.Message)
+	}
+	if r = d.do("onq2", r.Cursor); len(r.Rows) != 20 || r.Rows[19].Title != "Album 069" {
+		t.Fatalf("second page %q", titles(r))
+	}
+}
+
+// Entire Library and a chosen song have their Quality in On This Q2 (I25).
+func TestOnQ2Quality(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 2}, "", true)
+	d.do("toggle", "song:al0.1 album:al0 1")
+	r := d.do("onq2")
+	q, ok := find(r, "Quality: Original")
+	if !ok || q.Kind != "action" || q.URI != "quality" || q.Context != "song:al0.1" {
+		t.Fatalf("song: %+v in %q", q, titles(r))
+	}
+	d.do("toggle", "song:al0.1 album:al0 1")
+	d.do("toggle", "library:all")
+	r = d.do("onq2")
+	q, ok = find(r, "Quality: Original")
+	if !ok || q.Kind != "action" || q.URI != "quality" || q.Context != "library:all" {
+		t.Fatalf("library: %+v in %q", q, titles(r))
+	}
+	if r := d.do(q.URI, q.Context); r.Message != "Quality: MP3 320" {
+		t.Fatalf("toast %q", r.Message)
+	}
+	if it := d.selected(t); it[0].Quality != "mp3-320" {
+		t.Fatalf("%+v", it)
+	}
+}
+
+// A page whose rows are too big for one 64 KiB reply ends where the reply ends, and the next page
+// starts there: no row is skipped (M28).
+func TestPageCutsBySize(t *testing.T) {
+	var rows []q2spot.Row
+	for i := 0; i < 60; i++ {
+		rows = append(rows, list("album", fmt.Sprintf("%02d", i)+strings.Repeat("%", 250), strings.Repeat("%", 255), "album:x"))
+	}
+	r := page(rows, "")
+	if _, kept := r.Encode("4294967295"); kept != len(r.Rows) || r.Cursor != strconv.Itoa(len(r.Rows)) {
+		t.Fatalf("%d rows, %d sent, cursor %q", len(r.Rows), kept, r.Cursor)
+	}
+	r.Rows = append([]q2spot.Row{list("sync", "Sync Now", "999 waiting", "")}, r.Rows...)
+	if _, kept := r.Encode("4294967295"); kept != len(r.Rows) {
+		t.Fatalf("with Sync Now: %d of %d sent", kept, len(r.Rows))
+	}
+}
+
+// Failed Songs pages (M29).
+func TestFailedSongsPages(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 60, mediaErr: 70}, "", true)
+	d.runner.Backoff = []time.Duration{time.Millisecond}
+	d.do("toggle", "album:al0")
+	d.syncOK(t)
+	r := d.do("failed")
+	if len(r.Rows) != 50 || r.Cursor == "" {
+		t.Fatalf("%d rows, cursor %q", len(r.Rows), r.Cursor)
+	}
+	if r = d.do("failed", r.Cursor); len(r.Rows) != 11 {
+		t.Fatalf("second page %d rows", len(r.Rows))
+	}
+}
+
+// A later page that fails while the firmware loads the list page by page is a failed reply, so the
+// list keeps More… to try again; a first page still shows the message with Details (M30).
+func TestLaterPageFails(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 120, songsPer: 1, listErr: 70}, "", true)
+	r := d.do("albums")
+	if r.Status != "" || r.Cursor == "" {
+		t.Fatalf("first page %+v", r)
+	}
+	if r = d.do("albums", r.Cursor); r.Status == "" || r.Status == q2spot.OK || len(r.Rows) != 0 {
+		t.Fatalf("later page %+v", r)
+	}
+}
+
+// A removed item and a quality change wait for a sync, with Sync Now (M35).
+func TestSyncNowForRemovalAndQuality(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 3, songsPer: 2}, "", true)
+	d.do("toggle", "album:al0")
+	d.do("toggle", "album:al1")
+	d.syncOK(t)
+	if _, ok := find(d.do("albums"), "Sync Now"); ok {
+		t.Fatal("Sync Now after the sync")
+	}
+	d.do("toggle", "album:al0")
+	d.do("quality", "album:al1")
+	r := d.do("albums")
+	if row, _ := find(r, "Sync Now"); row.Subtitle != "2 waiting" {
+		t.Errorf("Sync Now %q in %q", row.Subtitle, titles(r))
+	}
+	for _, a := range []string{"Album 000", "Album 001"} {
+		if row, _ := find(r, a); row.Subtitle != "Artist · Waiting to sync" {
+			t.Errorf("%s %q", a, row.Subtitle)
+		}
+	}
+}
+
+// An artist that isn't chosen shows how much of it is on the Q2 through other items, once its page
+// has been opened (M36).
+func TestArtistPartialStatus(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 2, songsPer: 2}, "", true)
+	d.do("toggle", "album:al0")
+	d.syncOK(t)
+	d.do("artist", "artist:ar1")
+	if row, _ := find(d.do("artists"), "Artist"); row.Subtitle != "2 albums · 2 of 4 songs on Q2" {
+		t.Errorf("artist %q", row.Subtitle)
+	}
+}
+
+// With Entire Library on, an item's page says it is included that way instead of offering a
+// removal that can't happen (M37).
+func TestItemPageUnderLibrary(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 3, songsPer: 2}, "", true)
+	d.do("toggle", "album:al2")
+	d.do("toggle", "library:all")
+	for _, a := range []string{"album:al2", "album:al1"} {
+		r := d.do("album", a)
+		if r.Rows[0].Title == "Sync Now" {
+			r.Rows = r.Rows[1:]
+		}
+		if r.Rows[0].Kind != "info" || r.Rows[0].Title != "Included via Entire Library" {
+			t.Errorf("%s: %+v", a, r.Rows[0])
+		}
 	}
 }

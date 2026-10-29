@@ -1,13 +1,16 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strconv"
 	"strings"
 
 	"github.com/andsuor/q2-subsonic/internal/library"
+	"github.com/andsuor/q2-subsonic/internal/plan"
 	"github.com/andsuor/q2-subsonic/internal/q2spot"
 	"github.com/andsuor/q2-subsonic/internal/selection"
 	"github.com/andsuor/q2-subsonic/internal/subsonic"
@@ -15,56 +18,133 @@ import (
 
 // Browsing (playlists, albums, artists, search, an item's page) and choosing what syncs.
 
-// view is what status subtitles are read from.
+// view is what status subtitles are read from: the selection, the manifest and the songs fetched,
+// indexed in one pass per request, so a list of thousands of items never walks the manifest per
+// row (I17).
+// ponytail: built again per request (twice with Sync Now), about 25 ms per 40k songs on a laptop;
+// cache it by manifest, selection and resolve if pages of a huge library are slow on the Q2.
 type view struct {
-	sel selection.Set
-	m   *library.Manifest
-	res map[string][]subsonic.Song
+	sel     selection.Set
+	m       *library.Manifest
+	res     map[string][]subsonic.Song
+	artists map[string][]subsonic.Album // artist id -> its albums, as last fetched
+	keyed   map[string][]string         // item key -> the songs on the card recorded for it
+	albumOn map[string]map[string]bool  // album id -> its fetched songs that are on the card
+	// pending: item key -> a sync is due though no song of it is missing: the item was taken out
+	// and its songs are still on the card, or they are there at another quality (M35).
+	pending map[string]bool
+	quality map[string]string // chosen item key -> its quality
+	libQ    string            // Entire Library's quality, "" while it is off
 }
 
 func (d *daemon) view() view {
 	sel, _ := d.selection()
 	m := d.manifest()
 	d.mu.Lock()
-	res := make(map[string][]subsonic.Song, len(d.resolved))
-	for k, v := range d.resolved {
-		res[k] = v
-	}
+	res, artists := maps.Clone(d.resolved), maps.Clone(d.artistAlbums)
 	d.mu.Unlock()
-	return view{sel, m, res}
+	v := view{sel: sel, m: m, res: res, artists: artists, keyed: map[string][]string{}, albumOn: map[string]map[string]bool{},
+		pending: map[string]bool{}, quality: map[string]string{}}
+	for _, it := range sel.Items {
+		q := cmp.Or(it.Quality, "original")
+		v.quality[selection.Key(it.Kind, it.ID)] = q
+		if it.Kind == selection.KindLibrary {
+			v.libQ = q
+		}
+	}
+	suffix := map[string]string{} // of the fetched songs on the card
+	for _, songs := range res {
+		for _, s := range songs {
+			if m.Songs[s.ID] == nil {
+				continue
+			}
+			if v.albumOn[s.AlbumID] == nil {
+				v.albumOn[s.AlbumID] = map[string]bool{}
+			}
+			v.albumOn[s.AlbumID][s.ID], suffix[s.ID] = true, s.Suffix
+		}
+	}
+	for id, e := range m.Songs {
+		want := "" // the best quality among the chosen items holding it, as the plan picks
+		for _, k := range e.Items {
+			v.keyed[k] = append(v.keyed[k], id)
+			if q, ok := v.chosen(k); !ok {
+				v.pending[k] = true // taken out: its songs go at the next sync
+			} else if plan.Better(q, want) {
+				want = q
+			}
+		}
+		// An original the Q2 can't play syncs as MP3 320: not a change, nor is one whose format
+		// isn't known here.
+		if want == "" || e.Quality == want || want == "original" && e.Quality == "mp3-320" && !library.Playable(suffix[id]) {
+			continue
+		}
+		for _, k := range e.Items {
+			v.pending[k] = true
+		}
+	}
+	return v
+}
+
+// chosen is the quality of the chosen item with key k: one in the selection, or a playlist
+// Entire Library takes in (its quality, as the preview gives it).
+func (v view) chosen(k string) (string, bool) {
+	if q, ok := v.quality[k]; ok {
+		return q, true
+	}
+	if v.libQ != "" && strings.HasPrefix(k, string(selection.KindPlaylist)+":") {
+		return v.libQ, true
+	}
+	return "", false
+}
+
+// on counts ids and those of keyed[key] not among them: songs on the card through two indexes.
+func (v view) on(key string, ids map[string]bool) int {
+	n := len(ids)
+	for _, sid := range v.keyed[key] {
+		if !ids[sid] {
+			n++
+		}
+	}
+	return n
 }
 
 // status is an item's sync status: On Q2, Waiting to sync, X of Y songs on Q2, or "" when none of it
 // is on the Q2 and it is not selected. total is Y when its songs were never fetched.
-// ponytail: an unselected artist never fetched shows no partial status; its songs are found by item key only.
 func (v view) status(kind selection.Kind, id string, total int) string {
 	key := selection.Key(kind, id)
-	on := map[string]bool{}
-	for sid, e := range v.m.Songs {
-		for _, k := range e.Items {
-			if k == key {
-				on[sid] = true
-			}
-		}
-	}
-	if songs, ok := v.res[key]; ok {
-		total = len(songs)
+	selected := v.sel.Has(kind, id)
+	songs, resolved := v.res[key]
+	x := 0
+	switch {
+	case resolved: // counted by id: a playlist may hold a song twice (I13)
+		on, all := map[string]bool{}, map[string]bool{}
 		for _, s := range songs {
+			all[s.ID] = true
 			if v.m.Songs[s.ID] != nil {
 				on[s.ID] = true
 			}
 		}
-	} else if kind == selection.KindAlbum {
-		for _, songs := range v.res {
-			for _, s := range songs {
-				if s.AlbumID == id && v.m.Songs[s.ID] != nil {
-					on[s.ID] = true
-				}
-			}
+		x, total = v.on(key, on), len(all)
+	case kind == selection.KindAlbum:
+		x = v.on(key, v.albumOn[id])
+	case kind == selection.KindArtist && !selected && v.artists[id] != nil: // through its albums (M36)
+		total = 0
+		for _, a := range v.artists[id] {
+			total += a.SongCount
+			x += v.on(selection.Key(selection.KindAlbum, a.ID), v.albumOn[a.ID])
+		}
+	default:
+		x = len(v.keyed[key])
+		if kind == selection.KindPlaylist && selected {
+			total = 0 // the server's count holds a song twice when the playlist does (I13)
 		}
 	}
-	x, selected := len(on), v.sel.Has(kind, id)
 	switch {
+	case v.pending[key]:
+		return "Waiting to sync"
+	case selected && resolved && total == 0:
+		return "On Q2" // chosen and empty: nothing to wait for (I13)
 	case x == 0 && selected:
 		return "Waiting to sync"
 	case x == 0:
@@ -91,13 +171,19 @@ func (v view) song(s subsonic.Song, listKey string, i int) q2spot.Row {
 		Context: fmt.Sprintf("song:%s %s %d", s.ID, listKey, i), Position: "toggle"}
 }
 
-// syncNowRow is the shortcut to Sync, present while selected items are not all on the Q2.
+// syncNowRow is the shortcut to Sync, present while the card differs from the selection: a chosen
+// item not all on the Q2 or at another quality, or one taken out whose songs are still there (M35).
 // Cheap: read from the selection, manifest and cached songs, never the network.
 func (d *daemon) syncNowRow() (q2spot.Row, bool) {
 	v := d.view()
 	n := 0
 	for _, it := range v.sel.Items {
 		if v.status(it.Kind, it.ID, 0) != "On Q2" {
+			n++
+		}
+	}
+	for k := range v.pending {
+		if _, ok := v.chosen(k); !ok {
 			n++
 		}
 	}
@@ -129,7 +215,7 @@ func (d *daemon) browse(ctx context.Context, cl *subsonic.Client, op, cursor str
 		off, _ := strconv.Atoi(cursor)
 		al, err := cl.Albums(ctx, off, q2spot.MaxRows+1)
 		if err != nil {
-			return d.errRows(err, "")
+			return d.listErr(err, cursor)
 		}
 		var r q2spot.Reply
 		if len(al) > q2spot.MaxRows {
@@ -138,6 +224,9 @@ func (d *daemon) browse(ctx context.Context, cl *subsonic.Client, op, cursor str
 		for _, a := range al {
 			r.Rows = append(r.Rows, v.item(selection.KindAlbum, a.ID, a.Name, a.Artist, a.SongCount))
 		}
+		if n := fit(r.Rows); n < len(r.Rows) {
+			r.Rows, r.Cursor = r.Rows[:n], strconv.Itoa(off+n)
+		}
 		if len(r.Rows) == 0 && off == 0 {
 			r.Rows = []q2spot.Row{info("No albums")}
 		}
@@ -145,7 +234,7 @@ func (d *daemon) browse(ctx context.Context, cl *subsonic.Client, op, cursor str
 	case "playlists":
 		pls, err := cl.Playlists(ctx)
 		if err != nil {
-			return d.errRows(err, "")
+			return d.listErr(err, cursor)
 		}
 		for _, p := range pls {
 			rows = append(rows, v.item(selection.KindPlaylist, p.ID, p.Name, plural(p.SongCount, "song"), p.SongCount))
@@ -156,7 +245,7 @@ func (d *daemon) browse(ctx context.Context, cl *subsonic.Client, op, cursor str
 	case "artists":
 		ars, err := cl.Artists(ctx)
 		if err != nil {
-			return d.errRows(err, "")
+			return d.listErr(err, cursor)
 		}
 		for _, a := range ars {
 			rows = append(rows, v.item(selection.KindArtist, a.ID, a.Name, plural(a.AlbumCount, "album"), 0))
@@ -186,18 +275,26 @@ func (d *daemon) itemPage(ctx context.Context, cl *subsonic.Client, arg, cursor 
 		return q2spot.Fail(q2spot.Bad, "Bad request")
 	}
 	if err != nil {
-		return d.errRows(err, "")
+		return d.listErr(err, cursor)
 	}
+	d.mu.Lock()
 	if songs != nil {
-		d.mu.Lock()
 		d.resolved[key] = songs
-		d.mu.Unlock()
 	}
+	if kind == selection.KindArtist {
+		d.artistAlbums[id] = albums
+	}
+	d.mu.Unlock()
 	v := d.view()
 	rows := []q2spot.Row{act("toggle", "Add to Sync", key)}
+	if v.sel.Has(selection.KindLibrary, "all") { // a press could neither add nor remove it (R30, M37)
+		rows[0] = info("Included via Entire Library")
+	}
 	for _, it := range v.sel.Items {
 		if it.Kind == kind && it.ID == id {
-			rows[0].Title = "Remove from Sync"
+			if rows[0].Kind == "action" {
+				rows[0].Title = "Remove from Sync"
+			}
 			rows = append(rows, act("quality", "Quality: "+qualityName(it.Quality), key))
 		}
 	}
@@ -222,7 +319,7 @@ func (d *daemon) itemPage(ctx context.Context, cl *subsonic.Client, arg, cursor 
 func (d *daemon) search(ctx context.Context, cl *subsonic.Client, term, cursor string) q2spot.Reply {
 	ars, als, songs, err := cl.Search(ctx, term, 0)
 	if err != nil {
-		return d.errRows(err, "")
+		return d.listErr(err, cursor)
 	}
 	v := d.view()
 	var rows []q2spot.Row
@@ -278,6 +375,9 @@ func (d *daemon) songsOf(ctx context.Context, cl *subsonic.Client, kind selectio
 		if err != nil {
 			return nil, "", err
 		}
+		d.mu.Lock()
+		d.artistAlbums[id] = als
+		d.mu.Unlock()
 		name = a.Name
 		for _, al := range als {
 			_, s, err := getAlbum(ctx, cl, al.ID)
