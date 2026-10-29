@@ -448,3 +448,23 @@ func TestUserinfoNotLogged(t *testing.T) {
 		t.Fatalf("log: %s", b)
 	}
 }
+
+// M8: with the clock unset and no server Date yet (a failed fetch's 30 s back-off), a certificate
+// that is "not yet valid" means the time couldn't be read, not that the certificate is bad.
+func TestNotYetValidWhileClockUnknown(t *testing.T) {
+	srv, _ := serve(t, "ping.json", nil)
+	hc := srv.Client()
+	tr := hc.Transport.(*http.Transport).Clone()
+	tr.TLSClientConfig.Time = func() time.Time { return time.Date(1960, 1, 1, 0, 0, 0, 0, time.UTC) }
+	hc.Transport = tr
+	c, _ := New(Creds{Server: srv.URL, User: "u", Password: "pw"}, hc)
+	defer func(f func() bool) { timeKnown = f }(timeKnown)
+	timeKnown = func() bool { return false }
+	if err := c.Ping(context.Background()); !errors.Is(err, ErrUnreachable) || errors.Is(err, ErrCert) {
+		t.Fatalf("clock unknown: %v", err)
+	}
+	timeKnown = func() bool { return true }
+	if err := c.Ping(context.Background()); !errors.Is(err, ErrCert) {
+		t.Fatalf("clock known: %v", err)
+	}
+}

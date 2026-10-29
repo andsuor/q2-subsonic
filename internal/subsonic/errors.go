@@ -5,6 +5,8 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+
+	"github.com/andsuor/q2-subsonic/internal/tlsroots"
 )
 
 var (
@@ -55,6 +57,9 @@ var codeMsg = map[int]string{
 	43: "This server doesn't accept this sign-in method",
 	44: "Invalid API key: enter one from your server as the password",
 }
+
+// timeKnown is tlsroots.Known, injectable for tests.
+var timeKnown = tlsroots.Known
 
 // isCert reports whether err is a certificate verification failure.
 func isCert(err error) bool {
