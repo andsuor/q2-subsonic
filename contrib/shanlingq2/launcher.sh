@@ -19,7 +19,8 @@ fi
 dir=$2
 (
     child=
-    trap '[ -n "$child" ] && kill -TERM $child 2>/dev/null && wait $child; rm -f $pid /tmp/q2-subsonic.bin /tmp/q2-subsonic.run /tmp/q2-subsonic.err /tmp/q2-subsonic.crash; exit 0' TERM INT
+    # A TERM keeps a crash for the next start: a crash loop stopped from the Q2 is when it matters.
+    trap '[ -n "$child" ] && kill -TERM $child 2>/dev/null && wait $child; rm -f $pid /tmp/q2-subsonic.bin /tmp/q2-subsonic.run /tmp/q2-subsonic.err; exit 0' TERM INT
     delay=5
     while :; do
         /tmp/q2-subsonic.bin -dir "$dir" 2>/tmp/q2-subsonic.err &

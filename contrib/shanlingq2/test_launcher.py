@@ -68,4 +68,16 @@ with tempfile.TemporaryDirectory(prefix='q2-launcher-') as d:
     os.kill(int((t/f'q2-{app}').read_text()), signal.SIGTERM)
     wait(lambda: not list(t.iterdir()), 'the TERM to tidy')
     assert lines(tmp/'terms') == ['term'] and not lines(tmp/'sleeps'), (lines(tmp/'terms'), lines(tmp/'sleeps'))
+with tempfile.TemporaryDirectory(prefix='q2-launcher-') as d:  # stopped in a crash loop: the trace stays
+    tmp = pathlib.Path(d)
+    card, t, env = rig(tmp, 'echo start >> "$Q2_TEST/starts"\n'
+                            '[ "$(wc -l < "$Q2_TEST/starts")" -lt 2 ] && { echo "panic: early" >&2; exit 2; }\n'
+                            'trap \'exit 0\' TERM\n'
+                            'while :; do /bin/sleep 0.05; done\n')
+    subprocess.run(['/bin/sh', str(card/'run')], env=env, check=True, timeout=10)
+    wait(lambda: len(lines(tmp/'starts')) == 2, 'the restart')
+    os.kill(int((t/f'q2-{app}').read_text()), signal.SIGTERM)
+    wait(lambda: not (t/f'q2-{app}').exists(), 'the TERM to tidy')
+    assert [f.name for f in t.iterdir()] == [f'q2-{app}.crash'], list(t.iterdir())
+    assert lines(t/f'q2-{app}.crash') == ['panic: early', 'exit 2'], lines(t/f'q2-{app}.crash')
 print(f'Launcher (q2-{app}): restarts with backoff, keeps a crash for the next start, exit 0, one at a time and TERM passed.')
