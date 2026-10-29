@@ -54,11 +54,9 @@ var safeExt = regexp.MustCompile(`^[a-z0-9]{1,5}$`)
 // without one as mp3-320, so the "mp3" ext() falls back to is true.
 func SafeSuffix(suffix string) bool { return safeExt.MatchString(strings.ToLower(suffix)) }
 
-// playable are the formats the Q2 plays (R19), and opus, which the sync kept as it is before M22:
-// the stock scan lists .opus.
-// ponytail: opus until the device check (progress.md) says whether the Q2 plays it.
+// playable are the formats the Q2 plays (R19).
 var playable = map[string]bool{"flac": true, "mp3": true, "m4a": true, "aac": true, "alac": true, "ogg": true,
-	"wav": true, "aiff": true, "aif": true, "ape": true, "wma": true, "dsf": true, "dff": true, "opus": true}
+	"wav": true, "aiff": true, "aif": true, "ape": true, "wma": true, "dsf": true, "dff": true}
 
 // Playable reports whether a song's original, by its suffix, plays on the Q2 (and so can be its
 // file's extension).
