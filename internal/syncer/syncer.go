@@ -934,7 +934,11 @@ func (r *Runner) fetch(ctx context.Context, w plan.Want) (int64, error) {
 	r.mu.Lock()
 	r.cur, r.curMax = from, w.Bytes
 	r.mu.Unlock()
-	n, err := r.copy(f, resp.Body, from, yield)
+	limit := Limit(resp.ContentLength, w.Bytes)
+	n, err := r.copy(f, io.LimitReader(resp.Body, limit+1), from, yield)
+	if err == nil {
+		err = SizeErr(n-from, resp.ContentLength, limit) // checked before the rename (I8)
+	}
 	if err == nil {
 		err = f.Sync()
 	}
@@ -952,6 +956,33 @@ func (r *Runner) fetch(ctx context.Context, w plan.Want) (int64, error) {
 	r.part = ""
 	r.mu.Unlock()
 	return n, nil
+}
+
+// Limit is the most an answer's body may hold: its Content-Length when the server sent one, else
+// twice the size expected (want, an estimate for a transcode) and 8 MiB, so a server that never
+// stops can't fill the card (M9); no limit when neither is known.
+func Limit(contentLength, want int64) int64 {
+	switch {
+	case contentLength >= 0:
+		return contentLength
+	case want > 0:
+		return 2*want + 8<<20
+	}
+	return 1<<63 - 2
+}
+
+// SizeErr refuses a body of n bytes that is empty, short of its Content-Length (when one came) or
+// past limit: it is no song (I8, M9). A server's own Size isn't the measure: a transcode differs.
+func SizeErr(n, contentLength, limit int64) error {
+	switch {
+	case n == 0:
+		return errors.New("the server sent an empty file")
+	case contentLength >= 0 && n < contentLength:
+		return fmt.Errorf("the server sent %d of %d bytes", n, contentLength)
+	case n > limit:
+		return fmt.Errorf("the server sent more than the %d bytes expected", limit)
+	}
+	return nil
 }
 
 // copy writes body to f, counting progress; n starts at from (the bytes already in the .part).

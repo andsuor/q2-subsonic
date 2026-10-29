@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1199,5 +1200,45 @@ func TestBusyUntilOnDone(t *testing.T) {
 	close(out)
 	if !busy {
 		t.Fatal("not busy in OnDone")
+	}
+}
+
+// crafted answers every download with a body and Content-Length of its own (-1: none sent), as a
+// transport that doesn't hold a body to its length would pass them on.
+type crafted struct{ body func() (io.Reader, int64) }
+
+func (c crafted) MediaURL(id, q string) string { return "https://h/rest/download?id=" + id }
+func (c crafted) CoverURL(id string) string    { return "" }
+func (c crafted) Get(context.Context, string, int64) (*http.Response, error) {
+	b, n := c.body()
+	return &http.Response{StatusCode: 200, Body: io.NopCloser(b), ContentLength: n}, nil
+}
+
+type zeros struct{}
+
+func (zeros) Read(p []byte) (int, error) { clear(p); return len(p), nil }
+
+// A body short of its Content-Length, an empty one, or one that runs on past twice its song's
+// size (no Content-Length) is never saved as the song (I8, M9).
+func TestBodyBounds(t *testing.T) {
+	for name, body := range map[string]func() (io.Reader, int64){
+		"short":   func() (io.Reader, int64) { return strings.NewReader("half"), 1000 },
+		"empty":   func() (io.Reader, int64) { return strings.NewReader(""), -1 },
+		"endless": func() (io.Reader, int64) { return io.LimitReader(zeros{}, 40<<20), -1 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			r := New(root, crafted{body}, nil)
+			r.Backoff, r.CardMounted, r.Net = []time.Duration{time.Millisecond}, func() bool { return true }, NewNetSlot()
+			w := want(root, "a", "original")
+			w.Bytes = 1000
+			r.Start(plan.Plan{Add: []plan.Want{w}})
+			if s := wait(t, r); s.Failed != 1 {
+				t.Fatalf("%+v", s)
+			}
+			if _, err := os.Stat(w.Path); err == nil {
+				t.Fatal("saved as the song")
+			}
+		})
 	}
 }

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -332,10 +331,10 @@ func (r *streamRun) fetch(sg subsonic.Song, j job) error {
 	if err != nil {
 		return err
 	}
-	limit := maxBytes(resp.ContentLength, sg, j.quality)
+	limit := syncer.Limit(resp.ContentLength, expect(sg, j.quality))
 	n, err := io.Copy(f, io.LimitReader(resp.Body, limit+1))
 	if err == nil {
-		err = sizeErr(n, resp.ContentLength, limit)
+		err = syncer.SizeErr(n, resp.ContentLength, limit)
 	}
 	if err == nil {
 		err = f.Sync()
@@ -352,36 +351,14 @@ func (r *streamRun) fetch(sg subsonic.Song, j job) error {
 	return err
 }
 
-// maxBytes is the most a song's answer may hold: its Content-Length, else twice what the song
-// takes and 8 MiB, so a server that never stops can't fill the card (M9).
-// ponytail: unbounded when the server sends neither a length nor a size or duration.
-func maxBytes(contentLength int64, sg subsonic.Song, quality string) int64 {
-	if contentLength >= 0 {
-		return contentLength
-	}
-	want := sg.Size
+// expect is about the bytes a song takes at quality: its server size, or for a transcode its
+// duration at the bitrate when that is more; 0 when neither is known.
+func expect(sg subsonic.Song, quality string) int64 {
 	switch quality {
 	case "mp3-320":
-		want = max(want, int64(sg.Duration)*320000/8)
+		return max(sg.Size, int64(sg.Duration)*320000/8)
 	case "mp3-128":
-		want = max(want, int64(sg.Duration)*128000/8)
+		return max(sg.Size, int64(sg.Duration)*128000/8)
 	}
-	if want <= 0 {
-		return 1<<63 - 2
-	}
-	return 2*want + 8<<20
-}
-
-// sizeErr refuses a body of n bytes that is empty, short of its Content-Length (when one came) or
-// past limit: it is no song (I8, M9).
-func sizeErr(n, contentLength, limit int64) error {
-	switch {
-	case n == 0:
-		return errors.New("the server sent an empty file")
-	case contentLength >= 0 && n < contentLength:
-		return fmt.Errorf("the server sent %d of %d bytes", n, contentLength)
-	case n > limit:
-		return fmt.Errorf("the server sent more than the %d bytes expected", limit)
-	}
-	return nil
+	return sg.Size
 }
