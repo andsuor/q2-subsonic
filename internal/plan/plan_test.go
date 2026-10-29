@@ -304,3 +304,21 @@ func TestPlanKeepsRecordsFresh(t *testing.T) {
 		t.Errorf("keep with nothing to refresh: %+v", up.Keep)
 	}
 }
+
+// Playlist files to write or delete though no song moves: new, changed (songs or order) and taken
+// out; one written with the same songs is not (I10).
+func TestPlanPlaylistsChanged(t *testing.T) {
+	a, b := song("s1", "One"), song("s2", "Two")
+	m := manifest(entry(a, "original", 1000, "album:a1"), entry(b, "original", 1000, "album:a1"))
+	pa, pb := m.Songs["s1"].Path, m.Songs["s2"].Path
+	m.Playlists = map[string]string{"Same": "/x/Same.m3u", "Order": "/x/Order.m3u", "Gone": "/x/Gone.m3u"}
+	m.PlaylistSums = map[string]string{"Same": library.PlaylistSum([]string{pa, pb}),
+		"Order": library.PlaylistSum([]string{pa, pb}), "Gone": library.PlaylistSum(nil)}
+	sel := selection.Set{Items: []selection.Item{item("album", "a1", "original"), item("playlist", "p1", "original"),
+		item("playlist", "p2", "original"), item("playlist", "p3", "original")}}
+	res := map[string][]subsonic.Song{"album:a1": {a, b}, "playlist:p1": {a, b}, "playlist:p2": {b, a}, "playlist:p3": {a}}
+	names := map[string]string{"playlist:p1": "Same", "playlist:p2": "Order", "playlist:p3": "New"}
+	if p := Compute(sel, res, names, m, root, big); p.PlaylistsChanged != 3 || len(p.Add) != 0 {
+		t.Fatalf("changed %d, add %d", p.PlaylistsChanged, len(p.Add))
+	}
+}

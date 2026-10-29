@@ -409,7 +409,7 @@ func (d *daemon) toggle(ctx context.Context, cl *subsonic.Client, arg string) q2
 	kind, id := parseKey(arg)
 	sel, err := d.selection()
 	if err != nil {
-		return q2spot.Fail(q2spot.Error, "Couldn't read the selection")
+		return q2spot.Fail(q2spot.Error, selDamaged)
 	}
 	if kind != selection.KindLibrary && sel.Has(selection.KindLibrary, "all") {
 		return q2spot.Reply{Message: "Included via Entire Library"}
@@ -504,7 +504,7 @@ func (d *daemon) quality(arg string) q2spot.Reply {
 	kind, id := parseKey(arg)
 	sel, err := d.selection()
 	if err != nil {
-		return q2spot.Fail(q2spot.Error, "Couldn't read the selection")
+		return q2spot.Fail(q2spot.Error, selDamaged)
 	}
 	for _, it := range sel.Items {
 		if it.Kind == kind && it.ID == id {

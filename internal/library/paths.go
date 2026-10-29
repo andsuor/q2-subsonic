@@ -118,6 +118,12 @@ func MetaKey(s subsonic.Song, quality string) string {
 	return hex.EncodeToString(h[:])
 }
 
+// PlaylistSum is a short digest of a playlist's song paths, in order.
+func PlaylistSum(paths []string) string {
+	h := sha1.Sum([]byte(strings.Join(paths, "\n")))
+	return hex.EncodeToString(h[:8])
+}
+
 // PlaylistFile is <root>/_explaylist_data/<name>.m3u, the name the Q2's Import playlist shows.
 func PlaylistFile(root, name string) string {
 	return filepath.Join(root, "_explaylist_data", SafeName(name)+".m3u")

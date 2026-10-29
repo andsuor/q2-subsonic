@@ -33,6 +33,9 @@ type Manifest struct {
 	// "add", which never touches a playlist the user made. A file stays here after it is removed,
 	// as its playlist stays on the Q2.
 	Imported map[string]bool
+	// PlaylistSums holds, per playlist name, the PlaylistSum of the song paths last written for it:
+	// a playlist whose songs or order changed is written again though no song moves (I10).
+	PlaylistSums map[string]string `json:",omitempty"`
 }
 
 // LoadManifest reads path; a missing file is an empty manifest.
@@ -49,6 +52,9 @@ func LoadManifest(path string) (*Manifest, error) {
 	}
 	if m.Playlists == nil {
 		m.Playlists = map[string]string{}
+	}
+	if m.PlaylistSums == nil {
+		m.PlaylistSums = map[string]string{}
 	}
 	if m.Imported == nil { // an older manifest: its playlists were imported by name-replacing requests
 		m.Imported = map[string]bool{}

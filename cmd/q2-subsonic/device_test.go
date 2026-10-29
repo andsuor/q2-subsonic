@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -41,6 +42,9 @@ type nav struct {
 	dup              bool          // each playlist holds its first song twice, last too
 	artists          int           // getArtists lists this many more artists, ar2.., with no albums
 	listErr          int           // getAlbumList2 fails with this code from offset 50 on
+	sameAlbums       bool          // getAlbumList2 ignores offset: every page is the first
+	holdAlbum        chan struct{} // getAlbum waits for it
+	albumGaveUp      atomic.Int32  // getAlbum requests the client cancelled while waiting
 }
 
 func (n *nav) song(al, j int) map[string]any {
@@ -116,6 +120,9 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		off, _ := strconv.Atoi(q.Get("offset"))
 		size, _ := strconv.Atoi(q.Get("size"))
+		if n.sameAlbums {
+			off = 0
+		}
 		var al []map[string]any
 		for i := off; i < n.albums && i < off+size; i++ {
 			al = append(al, n.album(i))
@@ -123,6 +130,14 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ok("albumList2", map[string]any{"album": al})
 	case "getAlbum":
 		n.albumReqs.Add(1)
+		if n.holdAlbum != nil {
+			select {
+			case <-n.holdAlbum:
+			case <-r.Context().Done():
+				n.albumGaveUp.Add(1)
+				return
+			}
+		}
 		if q.Get("id") == n.failID {
 			json.NewEncoder(w).Encode(map[string]any{"subsonic-response": map[string]any{"status": "failed",
 				"error": map[string]any{"code": 70, "message": "Album not found"}}})
@@ -634,7 +649,8 @@ func TestSyncNowRowKeepsPagingWhole(t *testing.T) {
 func TestLibraryHelpCopy(t *testing.T) {
 	d := newTestDaemon(t, &nav{}, "", true)
 	got := strings.Join(titles(d.do("library")), "|")
-	for _, w := range []string{"Run after the sync has finished", "Import playlist only applies to synced playlists"} {
+	for _, w := range []string{"Stop Streaming Services", "Run after the sync has finished and Subsonic is closed",
+		"Import playlist only applies to synced playlists"} {
 		if !strings.Contains(got, w) {
 			t.Errorf("missing %q in %q", w, got)
 		}
@@ -1444,5 +1460,199 @@ func TestItemPageUnderLibrary(t *testing.T) {
 		if r.Rows[0].Kind != "info" || r.Rows[0].Title != "Included via Entire Library" {
 			t.Errorf("%s: %+v", a, r.Rows[0])
 		}
+	}
+}
+
+// A synced song whose file was deleted from the card (by hand, or the folder after removing the
+// app) is planned again, not taken as on the card (I9).
+func TestDeletedFileFetchedAgain(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 2}, "", true)
+	d.do("toggle", "album:al0")
+	d.syncOK(t)
+	for _, e := range d.manifest().Songs {
+		os.Remove(e.Path)
+		break
+	}
+	d.do("check")
+	r := d.preview(t)
+	if _, ok := find(r, "+1 song · "); !ok {
+		t.Fatalf("preview %q", titles(r))
+	}
+	if n := len(d.manifest().Songs); n != 1 {
+		t.Errorf("%d songs recorded", n)
+	}
+}
+
+// A playlist change that moves no song still syncs: a new one whose songs are on the card, and one
+// taken out whose songs stay (I10).
+func TestPlaylistOnlyChangeSyncs(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 2}, "library", true)
+	mix := filepath.Join(d.card, "_explaylist_data", "Mix.m3u")
+	d.do("toggle", "album:al0")
+	d.syncOK(t)
+	seq, _ := d.libReq(t)
+	d.answer(seq + " ok")
+	d.tick()
+	d.do("toggle", "playlist:pl1")
+	d.do("check")
+	r := d.preview(t)
+	if _, ok := find(r, "Update 1 playlist"); !ok {
+		t.Fatalf("preview %q", titles(r))
+	}
+	d.do("start")
+	eventually(t, "the sync", func() bool { return d.runner.Snapshot().State == "done" })
+	if !exists(mix) {
+		t.Fatal("Mix.m3u not written")
+	}
+	if _, lines := d.libReq(t); strings.Join(lines, "|") != "scan|add "+mix {
+		t.Errorf("library request %q", lines)
+	}
+	d.do("check")
+	if r := d.preview(t); r.Rows[0].Title != "Everything is up to date" {
+		t.Fatalf("after the sync %q", titles(r))
+	}
+	d.do("toggle", "playlist:pl1")
+	d.do("check")
+	if _, ok := find(d.preview(t), "Update 1 playlist"); !ok {
+		t.Fatal("taking it out is not offered")
+	}
+	d.do("start")
+	eventually(t, "the sync", func() bool { return d.runner.Snapshot().State == "done" && !exists(mix) })
+}
+
+// A server that ignores the album list's offset ends Entire Library's listing once a page brings
+// nothing new, instead of growing it until the memory runs out (M10).
+func TestEntireLibraryPagingEnds(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 500, songsPer: 1, sameAlbums: true}, "", true)
+	d.do("toggle", "library:all")
+	d.preview(t)
+	if n := len(d.daemon.preview.plan.Add); n != 500 {
+		t.Errorf("Add %d, want 500", n)
+	}
+}
+
+// Sign Out and Check Again cancel a preview still fetching (M11).
+func TestPreviewCancelled(t *testing.T) {
+	for _, op := range []string{"signout", "check"} {
+		t.Run(op, func(t *testing.T) {
+			n := &nav{albums: 1, songsPer: 1, holdAlbum: make(chan struct{})}
+			d := newTestDaemon(t, n, "", true)
+			sel := selection.Set{Version: 1}
+			sel.Toggle(selection.Item{Kind: selection.KindAlbum, ID: "al0", Name: "Album 000", Quality: "original"})
+			sel.Save(filepath.Join(d.dir, "selection.json"))
+			d.do("sync")
+			eventually(t, "the preview's request", func() bool { return n.albumReqs.Load() == 1 })
+			d.do(op)
+			eventually(t, "the request cancelled", func() bool { return n.albumGaveUp.Load() == 1 })
+			close(n.holdAlbum)
+		})
+	}
+}
+
+// Sign Out cancels the sync: a later sign-in, maybe to another server, never resumes the old
+// account's plan (M12).
+func TestSignOutCancelsSync(t *testing.T) {
+	n := &nav{albums: 1, songsPer: 2, block: make(chan struct{})}
+	d := newTestDaemon(t, n, "", true)
+	t.Cleanup(func() { close(n.block) })
+	d.do("toggle", "album:al0")
+	d.preview(t)
+	d.do("start")
+	eventually(t, "the sync to run", d.runner.Busy)
+	d.do("signout")
+	eventually(t, "the sync to stop", func() bool { return !d.runner.Busy() })
+	if st := d.runner.Snapshot().State; st != "idle" {
+		t.Fatalf("state %q", st)
+	}
+}
+
+// A damaged selection.json says so, with Reset Selection, instead of reading as empty (M21).
+func TestDamagedSelection(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 1}, "", true)
+	os.WriteFile(filepath.Join(d.dir, "selection.json"), []byte(`{"items":[{"kind":`), 0o644)
+	for _, op := range []string{"onq2", "sync"} {
+		r := d.do(op)
+		if r.Rows[0].Title != "Selection file is damaged" {
+			t.Fatalf("%s: %q", op, titles(r))
+		}
+	}
+	if r := d.do("toggle", "album:al0"); !strings.Contains(r.Message, "Selection file is damaged") {
+		t.Errorf("toggle %q", r.Message)
+	}
+	reset, ok := find(d.do("onq2"), "Reset Selection")
+	if !ok || reset.Kind != "action" {
+		t.Fatalf("reset %+v", reset)
+	}
+	d.do(reset.URI, reset.Context)
+	if _, err := os.Stat(filepath.Join(d.dir, "selection.json.bad")); err != nil {
+		t.Fatal("damaged file not kept aside")
+	}
+	if r := d.do("onq2"); r.Rows[0].Title != "Nothing chosen yet" {
+		t.Fatalf("after reset %q", titles(r))
+	}
+}
+
+// A song in the way of the one-time move to Subsonic/ is named, with what to do and Try Again (M23).
+func TestMigrateInTheWay(t *testing.T) {
+	card, _ := legacyCard(t)
+	m, _ := library.LoadManifest(filepath.Join(card, ".subsonic", "manifest.json"))
+	var e *library.Entry
+	for _, x := range m.Songs {
+		e = x
+		break
+	}
+	block := strings.Replace(e.Path, "/Navidrome/", "/Subsonic/", 1)
+	os.MkdirAll(filepath.Dir(block), 0o755)
+	os.WriteFile(block, []byte("mine"), 0o644)
+	d := newTestDaemonOn(t, card, &nav{albums: 1, songsPer: 2}, "", true)
+	r := d.do("sync")
+	rel := strings.TrimPrefix(block, card+"/")
+	if _, ok := find(r, rel+" is in the way"); !ok {
+		t.Fatalf("rows %q", titles(r))
+	}
+	again, ok := find(r, "Try Again")
+	if !ok || again.Kind != "action" {
+		t.Fatalf("rows %q", titles(r))
+	}
+	os.Remove(block)
+	d.do(again.URI, again.Context)
+	if r := d.do("sync"); r.Rows[0].Title != "Checking server…" {
+		t.Fatalf("after Try Again %q", titles(r))
+	}
+}
+
+// A sync stopped by a card error says what it means in a sentence, with Details (M34).
+func TestSyncStoppedDetails(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 1}, "", true)
+	d.do("toggle", "album:al0")
+	d.preview(t)
+	os.WriteFile(filepath.Join(d.card, ".subsonic", "manifest.json"), []byte("{"), 0o644)
+	d.do("start")
+	eventually(t, "the sync to stop", func() bool { return d.runner.Snapshot().State == "error" })
+	r := d.do("sync")
+	if r.Rows[0].Title != "Sync stopped · Couldn't read the sync records on the card" {
+		t.Errorf("rows %q", titles(r))
+	}
+	if _, ok := find(r, "Details"); !ok {
+		t.Errorf("no Details: %q", titles(r))
+	}
+	if got := d.stopMessage(&os.PathError{Op: "write", Path: "x", Err: syscall.ENOSPC}); got != "The card is full" {
+		t.Errorf("ENOSPC: %q", got)
+	}
+}
+
+// Choosing something while a sync runs keeps its summary for when it ends (M38).
+func TestDonePageKeptAfterChoosingDuringSync(t *testing.T) {
+	n := &nav{albums: 2, songsPer: 2, block: make(chan struct{})}
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", "album:al0")
+	d.preview(t)
+	d.do("start")
+	eventually(t, "the sync to run", d.runner.Busy)
+	d.do("toggle", "album:al1")
+	close(n.block)
+	eventually(t, "the sync", func() bool { return d.runner.Snapshot().State == "done" })
+	if r := d.do("sync"); !strings.HasPrefix(r.Rows[0].Title, "Sync complete") {
+		t.Fatalf("rows %q", titles(r))
 	}
 }

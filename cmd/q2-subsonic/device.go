@@ -137,6 +137,10 @@ func (d *daemon) reply(req q2spot.Request) q2spot.Reply {
 		return d.settingsOp(req.Op)
 	case "onq2":
 		return d.onQ2(req.Arg(0))
+	case "resetsel":
+		return d.resetSelection()
+	case "migrate":
+		return d.migrate()
 	case "signin":
 		d.signin.start(d.signinPort)
 		return q2spot.Reply{Message: "Scan the code with your phone"}
@@ -258,14 +262,18 @@ func (d *daemon) menu() q2spot.Reply {
 		d.signin.stop()
 	}
 	d.state.Write(nil) // the QR page's last words, once it is left
-	sel, _ := d.selection()
+	sel, serr := d.selection()
 	m := d.manifest()
 	var bytes int64
 	for _, e := range m.Songs {
 		bytes += e.Size
 	}
+	onq2 := plural(len(sel.Items), "item") + " · " + size(bytes)
+	if serr != nil {
+		onq2 = "Selection file is damaged"
+	}
 	rows := []q2spot.Row{d.libraryRow(sel), list("sync", "Sync", d.syncSubtitle(cl), ""),
-		list("onq2", "On This Q2", plural(len(sel.Items), "item")+" · "+size(bytes), ""),
+		list("onq2", "On This Q2", onq2, ""),
 		list("playlists", "Playlists", "", ""), list("albums", "Albums", "", ""), list("artists", "Artists", "", ""),
 		q2spot.Row{Kind: "search", Title: "Search"}, list("settings", "Settings", "", "")}
 	// Last, so the rows above keep their places under the cursor (M33).
@@ -354,6 +362,9 @@ func (d *daemon) libraryRow(sel selection.Set) q2spot.Row {
 // Library is switched from the root; here it shows only while on, as one of the items. Entire
 // Library and a song, which have no page of their own, have their Quality here (I25).
 func (d *daemon) onQ2(cursor string) q2spot.Reply {
+	if _, err := d.selection(); err != nil {
+		return damagedSelection()
+	}
 	v := d.view()
 	var rows []q2spot.Row
 	if len(v.sel.Items) == 0 {

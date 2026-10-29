@@ -97,11 +97,12 @@ func (s *stateKeys) flush() error {
 }
 
 type preview struct {
-	gen  int
-	at   time.Time
-	done bool
-	plan *plan.Plan
-	err  error
+	gen    int
+	at     time.Time
+	done   bool
+	plan   *plan.Plan
+	err    error
+	cancel context.CancelFunc // stops its fetches (dropPreview)
 }
 
 type libJob struct {
@@ -186,9 +187,7 @@ func newDaemon(dir, card, tmp string) *daemon {
 	d.stream.moving = d.runner.Moving
 	d.stream.clean("") // a stream an earlier run left (M26)
 	d.state.Write(nil)
-	if err := library.Migrate(card, lg.Printf); err != nil {
-		d.migrateErr = err
-	}
+	d.migrateErr = library.Migrate(card, lg.Printf)
 	return d
 }
 
@@ -231,14 +230,16 @@ func (d *daemon) hostName() string {
 }
 
 // signOut forgets the sign-in at once; the sync and stream stop in the background (R27: a reply
-// never waits for a download to notice its cancel).
+// never waits for a download to notice its cancel). The sync is cancelled, not paused: a later
+// sign-in, maybe to another server, never resumes this account's plan (M12). Finished songs stay.
 func (d *daemon) signOut() {
 	creds.Remove(d.dir)
 	d.mu.Lock()
-	d.cl, d.pinged, d.preview = nil, false, nil
+	d.cl, d.pinged = nil, false
+	d.dropPreview()
 	d.playSeq++ // a play still waiting for playMu is dropped
 	d.mu.Unlock()
-	d.spawn(d.runner.Pause)
+	d.spawn(d.runner.Cancel)
 	d.spawn(func() { // under playMu, so a start already running finishes first and is then stopped
 		d.playMu.Lock()
 		defer d.playMu.Unlock()
@@ -297,14 +298,39 @@ func (d *daemon) selPath() string { return filepath.Join(d.dir, "selection.json"
 
 func (d *daemon) selection() (selection.Set, error) { return selection.Load(d.selPath()) }
 
+// saveSelection writes s. The finished sync's page gives way to the new preview, but not while a
+// sync runs or is paused: its summary is still to come (M38).
 func (d *daemon) saveSelection(s selection.Set) error {
 	err := s.Save(d.selPath())
+	st := d.runner.Snapshot().State
 	d.mu.Lock()
 	d.gen++
-	d.showDone = false
+	if st != "running" && st != "paused" {
+		d.showDone = false
+	}
 	d.mu.Unlock()
 	return err
 }
+
+// resetSelection puts a damaged selection.json aside as selection.json.bad, so the user can start
+// again on the Q2 (M21).
+func (d *daemon) resetSelection() q2spot.Reply {
+	if err := os.Rename(d.selPath(), d.selPath()+".bad"); err != nil && !errors.Is(err, os.ErrNotExist) {
+		d.log.Printf("selection: %v", err)
+		return q2spot.Fail(q2spot.Error, "Couldn't reset the selection")
+	}
+	d.mu.Lock()
+	d.gen++
+	d.mu.Unlock()
+	return q2spot.Reply{Message: "Selection reset"}
+}
+
+// damagedSelection is a page when selection.json can't be read (M21).
+func damagedSelection() q2spot.Reply {
+	return q2spot.Reply{Rows: []q2spot.Row{info("Selection file is damaged"), act("resetsel", "Reset Selection", "")}}
+}
+
+const selDamaged = "Selection file is damaged: reset it in On This Q2"
 
 func (d *daemon) settings() settings {
 	var s settings

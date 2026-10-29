@@ -71,6 +71,7 @@ func Migrate(root string, logf func(string, ...any)) error {
 	}
 
 	moved, failed := 0, 0
+	var first error // the first song that couldn't move, which the error names
 	for id, e := range m.Songs {
 		if !under(e.Path) {
 			continue
@@ -83,6 +84,9 @@ func Migrate(root string, logf func(string, ...any)) error {
 		if err != nil {
 			logf("migrate: %s: %v", e.Path, err)
 			failed++
+			if first == nil {
+				first = err
+			}
 			continue
 		}
 		if _, err := os.Stat(e.Path + ".part"); err == nil {
@@ -101,14 +105,15 @@ func Migrate(root string, logf func(string, ...any)) error {
 	pruneEmpty(old)
 	logf("migrate: moved %d songs from Navidrome/ into the existing Subsonic/, %d left", moved, failed)
 	if failed > 0 {
-		return fmt.Errorf("%d songs left in Navidrome/", failed)
+		return fmt.Errorf("%d songs left in Navidrome/: %w", failed, first)
 	}
 	return nil
 }
 
 // moveOwned renames from (which must be inside the legacy Navidrome/ tree, symlinks resolved) to
-// to (which must be Owned, so inside Subsonic/), never over a file. A missing from is
-// os.ErrNotExist, so the caller can tell a move that already happened.
+// to (which must be Owned, so inside Subsonic/), never over a file: one there already is a
+// *PathError for to with os.ErrExist. A missing from is os.ErrNotExist, so the caller can tell a
+// move that already happened.
 func moveOwned(root, from, to string) error {
 	top := resolve(filepath.Join(root, "Navidrome"))
 	if rf := resolve(from); filepath.Clean(from) != from || !strings.HasPrefix(rf, top+string(filepath.Separator)) {
@@ -121,7 +126,7 @@ func moveOwned(root, from, to string) error {
 		return err
 	}
 	if _, err := os.Lstat(to); err == nil {
-		return errors.New("already exists: " + to)
+		return &os.PathError{Op: "move", Path: to, Err: os.ErrExist}
 	}
 	if err := os.MkdirAll(filepath.Dir(to), 0o755); err != nil {
 		return err

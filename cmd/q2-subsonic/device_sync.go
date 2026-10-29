@@ -3,14 +3,18 @@ package main
 import (
 	"cmp"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/andsuor/q2-subsonic/internal/fw"
@@ -28,9 +32,11 @@ const planMargin = 16 << 20 // plan.Compute's headroom on top of what a sync nee
 // syncPage is the Sync screen: the running sync, the one just finished, or the preview, computed
 // in the background while the page refreshes.
 func (d *daemon) syncPage(cl *subsonic.Client) q2spot.Reply {
-	if d.migrateErr != nil { // the old manifest and both folders are intact; a sync now would copy everything again
-		return q2spot.Reply{Rows: []q2spot.Row{info("Couldn't move Navidrome/ to Subsonic/"),
-			list("details", "Details", "", detailsCtx("migrate", 0, 0, time.Now(), ""))}}
+	d.mu.Lock()
+	merr := d.migrateErr
+	d.mu.Unlock()
+	if merr != nil { // the old manifest and both folders are intact; a sync now would copy everything again
+		return d.migrateRows(merr)
 	}
 	snap := d.runner.Snapshot()
 	d.mu.Lock()
@@ -44,18 +50,29 @@ func (d *daemon) syncPage(cl *subsonic.Client) q2spot.Reply {
 	case snap.State == "error" && showDone:
 		msg := "Sync stopped"
 		if snap.Err != nil {
-			msg += " · " + subsonic.Message(snap.Err, d.hostName())
+			msg += " · " + d.stopMessage(snap.Err)
 		}
-		return q2spot.Reply{Rows: []q2spot.Row{info(msg), act("retry", "Retry", ""), act("check", "Check Again", "")}}
+		op, h, code := "sync", 0, 0
+		var ae *subsonic.APIError
+		if errors.As(snap.Err, &ae) {
+			op, h, code = ae.Op, ae.HTTP, ae.Code
+		}
+		return q2spot.Reply{Rows: []q2spot.Row{info(msg), act("retry", "Retry", ""), act("check", "Check Again", ""),
+			list("details", "Details", "", detailsCtx(op, h, code, time.Now(), ""))}}
+	}
+	if _, err := d.selection(); err != nil {
+		return damagedSelection()
 	}
 	checking := q2spot.Reply{Message: "refresh", Rows: []q2spot.Row{info("Checking server…")}}
 	d.mu.Lock()
 	p := d.preview
 	if p == nil || p.gen != d.gen || p.done && time.Since(p.at) > previewTTL {
-		p = &preview{gen: d.gen, at: time.Now()}
+		d.dropPreview()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		p = &preview{gen: d.gen, at: time.Now(), cancel: cancel}
 		d.preview = p
 		d.mu.Unlock()
-		d.spawn(func() { d.computePreview(cl, p) })
+		d.spawn(func() { defer cancel(); d.computePreview(ctx, cl, p) })
 		return checking
 	}
 	done, pl, err := p.done, p.plan, p.err
@@ -72,10 +89,65 @@ func (d *daemon) syncPage(cl *subsonic.Client) q2spot.Reply {
 	return previewRows(pl)
 }
 
+// dropPreview forgets the preview, stopping its fetches if it is still at work (M11). d.mu is held.
+func (d *daemon) dropPreview() {
+	if d.preview != nil && d.preview.cancel != nil {
+		d.preview.cancel()
+	}
+	d.preview = nil
+}
+
+// stopMessage is why a sync stopped, in a sentence: a card error by what it means, never Go's
+// text for it (M34).
+func (d *daemon) stopMessage(err error) string {
+	var se *json.SyntaxError
+	var te *json.UnmarshalTypeError
+	var pe *fs.PathError
+	switch {
+	case errors.Is(err, syscall.ENOSPC):
+		return "The card is full"
+	case errors.Is(err, syscall.EROFS):
+		return "The card is read-only"
+	case errors.Is(err, q2.ErrNoCard):
+		return "Card not available"
+	case errors.As(err, &se) || errors.As(err, &te) || errors.Is(err, io.ErrUnexpectedEOF):
+		return "Couldn't read the sync records on the card"
+	case errors.As(err, &pe):
+		return "Couldn't write to the card"
+	}
+	return subsonic.Message(err, d.hostName())
+}
+
+// migrateRows is the one-time move's failure: the file in its way when that is why, and Try Again
+// once it is moved, rather than a dead end (M23).
+func (d *daemon) migrateRows(err error) q2spot.Reply {
+	rows := []q2spot.Row{info("Couldn't move Navidrome/ to Subsonic/")}
+	var pe *fs.PathError
+	if errors.Is(err, fs.ErrExist) && errors.As(err, &pe) {
+		rows = append(rows, info(strings.TrimPrefix(pe.Path, d.card+"/")+" is in the way"),
+			info("Move it out of Subsonic/, then Try Again"))
+	}
+	return q2spot.Reply{Rows: append(rows, act("migrate", "Try Again", ""),
+		list("details", "Details", "", detailsCtx("migrate", 0, 0, time.Now(), "")))}
+}
+
+// migrate runs the one-time move again (Try Again).
+func (d *daemon) migrate() q2spot.Reply {
+	err := library.Migrate(d.card, d.log.Printf)
+	d.mu.Lock()
+	d.migrateErr = err
+	d.mu.Unlock()
+	if err != nil {
+		return q2spot.Fail(q2spot.Error, "Couldn't move Navidrome/ to Subsonic/")
+	}
+	return q2spot.Reply{Message: "Moved to Subsonic/"}
+}
+
 // computePreview resolves every selected item to its songs, 4 at a time, and plans the sync. Any
-// failure fails the preview: a missing item's songs would otherwise read as removed.
-func (d *daemon) computePreview(cl *subsonic.Client, p *preview) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+// failure fails the preview: a missing item's songs would otherwise read as removed. ctx ends with
+// the preview (dropPreview).
+func (d *daemon) computePreview(ctx context.Context, cl *subsonic.Client, p *preview) {
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	sel, err := d.selection()
 	resolved, names := map[string][]subsonic.Song{}, map[string]string{}
@@ -131,6 +203,10 @@ func (d *daemon) computePreview(cl *subsonic.Client, p *preview) {
 	}
 	var pl plan.Plan
 	if err == nil {
+		// Songs deleted from the card are planned again, not taken as there (I9).
+		if derr := d.runner.DropMissing(); derr != nil && !errors.Is(derr, syncer.ErrBusy) {
+			d.log.Printf("sync: %v", derr)
+		}
 		pl = plan.Compute(sel, resolved, names, d.manifest(), d.card, d.free(d.card))
 		// The items holding songs already on the card, recorded now: an up-to-date preview starts
 		// no sync, and status reads them after a restart (I12). A running sync records its own.
@@ -143,8 +219,13 @@ func (d *daemon) computePreview(cl *subsonic.Client, p *preview) {
 	d.mu.Unlock()
 }
 
+// changes reports whether p has anything to do: a song to move, or a playlist file to write or delete.
+func changes(p plan.Plan) bool {
+	return len(p.Add)+len(p.Replace)+len(p.Rename)+len(p.Remove)+p.PlaylistsChanged > 0 || p.PlaylistsStale
+}
+
 func previewRows(p *plan.Plan) q2spot.Reply {
-	if len(p.Add)+len(p.Replace)+len(p.Rename)+len(p.Remove) == 0 && !p.PlaylistsStale {
+	if !changes(*p) {
 		return q2spot.Reply{Rows: []q2spot.Row{info("Everything is up to date")}}
 	}
 	var rows []q2spot.Row
@@ -172,7 +253,10 @@ func previewRows(p *plan.Plan) q2spot.Reply {
 	if len(p.Rename) > 0 {
 		rows = append(rows, info("Rename "+plural(len(p.Rename), "song")))
 	}
-	if p.PlaylistsStale {
+	switch {
+	case p.PlaylistsChanged > 0:
+		rows = append(rows, info("Update "+plural(p.PlaylistsChanged, "playlist")))
+	case p.PlaylistsStale:
 		rows = append(rows, info("Update playlists"))
 	}
 	rows = append(rows, info("Needs "+size(max(p.NeedBytes, 0))+" · "+size(p.FreeBytes)+" free"))
@@ -332,7 +416,8 @@ func (d *daemon) syncAction(op string) q2spot.Reply {
 		d.mu.Unlock()
 	case "check":
 		d.mu.Lock()
-		d.showDone, d.preview = false, nil
+		d.showDone = false
+		d.dropPreview()
 		d.mu.Unlock()
 	}
 	return q2spot.Reply{}
@@ -341,8 +426,9 @@ func (d *daemon) syncAction(op string) q2spot.Reply {
 // library asks the firmware (F3) to update the library and import the playlists, or says how.
 func (d *daemon) library() q2spot.Reply {
 	if !d.caps.Library {
-		return q2spot.Reply{Rows: []q2spot.Row{info("1. Library → Update Local Music"), info("Run after the sync has finished"),
-			info("2. Library → Playlists → Import playlist"), info("Import playlist only applies to synced playlists")}}
+		return q2spot.Reply{Rows: []q2spot.Row{info("1. Close Subsonic: Streaming → Configuration → Stop Streaming Services"),
+			info("2. Library → Update Local Music"), info("Run after the sync has finished and Subsonic is closed"),
+			info("3. Library → Playlists → Import playlist"), info("Import playlist only applies to synced playlists")}}
 	}
 	d.mu.Lock()
 	j := d.lib
@@ -523,7 +609,7 @@ func (d *daemon) syncDone(p plan.Plan) {
 	d.mu.Lock()
 	d.lastReq = time.Now() // the summary and Failed Songs stay as long as after a press (I15)
 	d.mu.Unlock()
-	if !d.caps.Library || len(p.Add)+len(p.Replace)+len(p.Rename)+len(p.Remove) == 0 && !p.PlaylistsStale {
+	if !d.caps.Library || !changes(p) {
 		return
 	}
 	d.mu.Lock()
@@ -543,6 +629,8 @@ type libResult struct {
 	playlists []libPlaylist
 }
 
+const maxAlbums = 100_000 // what Entire Library lists at most: past that the server is broken, or the Q2 too small
+
 // resolveLibrary lists every album (500 a page) and every playlist, then fetches each one's songs.
 // Every request takes a slot of sem, so the library never runs more than the preview's 4 at once.
 // Albums keep their listing order; so do playlists.
@@ -551,6 +639,7 @@ func (d *daemon) resolveLibrary(ctx context.Context, cl *subsonic.Client, sem ch
 	defer cancel()
 	slot := func() func() { sem <- struct{}{}; return func() { <-sem } }
 	var albums []subsonic.Album
+	seen := map[string]bool{}
 	for off := 0; ; {
 		release := slot()
 		page, err := cl.Albums(ctx, off, 500)
@@ -558,9 +647,19 @@ func (d *daemon) resolveLibrary(ctx context.Context, cl *subsonic.Client, sem ch
 		if err != nil {
 			return libResult{}, err
 		}
-		albums = append(albums, page...)
-		if len(page) < 500 {
+		n := len(albums)
+		for _, a := range page {
+			if !seen[a.ID] {
+				seen[a.ID] = true
+				albums = append(albums, a)
+			}
+		}
+		// A short page is the last; a page with nothing new is a server that ignores the offset (M10).
+		if len(page) < 500 || len(albums) == n {
 			break
+		}
+		if len(albums) > maxAlbums {
+			return libResult{}, fmt.Errorf("The library has more than %d albums", maxAlbums)
 		}
 		off += len(page)
 	}

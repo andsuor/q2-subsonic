@@ -297,6 +297,40 @@ func (r *Runner) RetryFailed() {
 	}
 }
 
+// DropMissing forgets the songs whose files are gone from the card (deleted by hand, or with the
+// folder after the app was removed), so the next plan fetches them again (I9). The card is read
+// without the lock, which a reply may wait for; nothing is dropped while the card is away, when
+// every file would seem gone. ErrBusy while a sync runs.
+func (r *Runner) DropMissing() error {
+	if !r.CardMounted() {
+		return q2.ErrNoCard
+	}
+	m, err := library.LoadManifest(r.manifestPath())
+	if err != nil {
+		return err
+	}
+	gone := map[string]string{} // id -> its path
+	for id, e := range m.Songs {
+		if _, err := os.Lstat(e.Path); errors.Is(err, os.ErrNotExist) {
+			gone[id] = e.Path
+		}
+	}
+	if len(gone) == 0 || !r.CardMounted() {
+		return nil
+	}
+	return r.edit(func(m *library.Manifest) (bool, error) {
+		n := 0
+		for id, path := range gone {
+			if e := m.Songs[id]; e != nil && e.Path == path {
+				delete(m.Songs, id)
+				n++
+			}
+		}
+		r.logf("sync: %d songs gone from the card, planned again", n)
+		return n > 0, nil
+	})
+}
+
 // Moving reports whether the plan a sync runs, or holds paused, renames, replaces or removes song
 // id: the streamer then fetches the song rather than queue a path that is about to go (M24).
 func (r *Runner) Moving(id string) bool {
@@ -571,6 +605,7 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 		if err := m.WriteM3U(r.root, f, have); err != nil {
 			return r.cardErr(err)
 		}
+		m.PlaylistSums[name] = library.PlaylistSum(p.Playlists[name]) // what the next plan compares (I10)
 		r.op("playlist", f)
 		if migrating {
 			library.Remove(r.root, library.LegacyPlaylistFile(r.root, name))
@@ -581,6 +616,7 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 			if _, ok := p.Playlists[name]; !ok {
 				if m.Remove(r.root, f) == nil {
 					delete(m.Playlists, name)
+					delete(m.PlaylistSums, name)
 				}
 			}
 		}
