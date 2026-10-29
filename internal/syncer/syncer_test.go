@@ -912,6 +912,14 @@ func TestStopReason(t *testing.T) {
 	if err := stopReason(&subsonic.APIError{Op: "get", HTTP: 404}); err != nil {
 		t.Error("404 is the song's own:", err)
 	}
+	for _, code := range []int{40, 41, 44, 50} { // the account, not the song (R39)
+		if err := stopReason(&subsonic.APIError{Op: "get", HTTP: 200, Code: code}); !errors.Is(err, ErrRefused) || errors.Is(err, ErrOffline) {
+			t.Error(code, err)
+		}
+	}
+	if err := stopReason(&subsonic.APIError{Op: "get", HTTP: 200, Code: 70}); err != nil {
+		t.Error("70 (not found) is the song's own:", err)
+	}
 }
 
 // Removals are dropped from the manifest before their files go, so a stop (Pause, Cancel, the card
@@ -1083,5 +1091,33 @@ func TestRefreshRecords(t *testing.T) {
 	}
 	if e := manifest(t, root).Songs["a"]; e.Path != to || e.Meta != library.MetaKey(moved, "original") {
 		t.Fatalf("%+v", e)
+	}
+}
+
+// refusing is a server that refuses every download for the account (Subsonic error 50: downloads
+// turned off for it).
+type refusing struct{ gets atomic.Int32 }
+
+func (f *refusing) MediaURL(id, q string) string { return "https://h/rest/download?id=" + id }
+func (f *refusing) CoverURL(id string) string    { return "" }
+func (f *refusing) Get(context.Context, string, int64) (*http.Response, error) {
+	f.gets.Add(1)
+	return nil, &subsonic.APIError{Op: "get", HTTP: 200, Code: 50, Msg: "User not authorized"}
+}
+
+// A download the server refuses for the whole account stops the run at its first song, with that
+// reason, instead of failing every song one by one (R39).
+func TestRefusedStopsAtOnce(t *testing.T) {
+	src, root := &refusing{}, t.TempDir()
+	r := New(root, src, nil)
+	r.Backoff, r.CardMounted, r.Net = []time.Duration{time.Millisecond, time.Millisecond}, func() bool { return true }, NewNetSlot()
+	r.Start(plan.Plan{Add: []plan.Want{want(root, "a", "original"), want(root, "bb", "original"), want(root, "ccc", "original")}})
+	s := wait(t, r)
+	var ae *subsonic.APIError
+	if s.State != "paused" || !errors.Is(s.Err, ErrRefused) || !errors.As(s.Err, &ae) || ae.Code != 50 {
+		t.Fatalf("%+v", s)
+	}
+	if n := src.gets.Load(); n != 1 {
+		t.Errorf("%d requests, want 1", n)
 	}
 }

@@ -144,7 +144,7 @@ func (r *Runner) run(ctx context.Context, p plan.Plan, done chan struct{}) {
 		r.state = r.stopAs
 	case errors.Is(err, q2.ErrNoCard):
 		r.state, r.err = "paused", q2.ErrNoCard
-	case errors.Is(err, ErrOffline) || errors.Is(err, ErrCardFull):
+	case errors.Is(err, ErrOffline) || errors.Is(err, ErrCardFull) || errors.Is(err, ErrRefused):
 		r.state, r.err = "paused", err // Resume, or the next Sync, continues once it is back
 		r.logf("sync: paused: %v", err)
 	case err != nil:
@@ -398,10 +398,15 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 			}
 			r.fail(id, w.Song.Title, "download", err)
 			failed = true
-			if stop := stopReason(err); stop == nil {
-				streak = 0
-			} else if streak++; streak >= 2 {
+			switch stop := stopReason(err); {
+			case errors.Is(stop, ErrRefused): // the server's answer for the account: at once
 				return stop
+			case stop == nil:
+				streak = 0
+			default: // a connection or the card can come back: two songs in a row
+				if streak++; streak >= 2 {
+					return stop
+				}
 			}
 			continue
 		}
@@ -573,23 +578,27 @@ const (
 	removeBatch = 100              // removals dropped from the manifest per save
 )
 
-// ErrOffline and ErrCardFull pause a sync: every song would fail the same way.
+// ErrOffline, ErrCardFull and ErrRefused pause a sync: every song would fail the same way.
 var (
 	ErrOffline  = fmt.Errorf("lost the server: %w", subsonic.ErrUnreachable)
 	ErrCardFull = errors.New("the card is full")
+	ErrRefused  = errors.New("the server refused this account") // wraps the server's error: its code says why
 )
 
-// stopReason tells a failure the whole sync shares (the connection, the card) from one of this
-// song's own (an HTTP or Subsonic error for it): ErrOffline (wrapping err when it says more, such as
-// a certificate or a changed password) or ErrCardFull; nil for the song's own.
+// stopReason tells a failure the whole sync shares from one of this song's own (an HTTP error, or
+// a Subsonic one such as 70, not found): ErrOffline (no answer, wrapping err when it says more,
+// such as a certificate), ErrCardFull, or ErrRefused (wrapping err) for an answer about the
+// account: the sign-in (40-44) or downloads turned off for it (50, R39). nil for the song's own.
 func stopReason(err error) error {
 	var ae *subsonic.APIError
 	var ne net.Error
 	switch {
 	case errors.Is(err, syscall.ENOSPC):
 		return ErrCardFull
+	case errors.Is(err, subsonic.ErrAuth) || errors.As(err, &ae) && ae.Code >= 40 && ae.Code <= 50:
+		return fmt.Errorf("%w: %w", ErrRefused, err)
 	case errors.As(err, &ae):
-		if ae.HTTP == 0 || errors.Is(err, subsonic.ErrAuth) {
+		if ae.HTTP == 0 {
 			return fmt.Errorf("%w: %w", ErrOffline, err)
 		}
 		return nil
@@ -706,8 +715,8 @@ func (r *Runner) fetchTries(ctx context.Context, w plan.Want) (int64, error) {
 		if n, err = r.fetch(ctx, w); err == nil {
 			return n, nil
 		}
-		if ctx.Err() != nil || !r.CardMounted() {
-			return 0, err
+		if ctx.Err() != nil || !r.CardMounted() || errors.Is(stopReason(err), ErrRefused) {
+			return 0, err // a refusal for the account is the same on every try
 		}
 		r.logf("sync: %s try %d: %s", w.Song.ID, i+1, err)
 		if i == len(r.Backoff)-1 {

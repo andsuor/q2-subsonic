@@ -211,8 +211,13 @@ func (d *daemon) syncRows(s syncer.Snapshot) q2spot.Reply {
 			rows = append(rows, info("Card not available"))
 		case errors.Is(s.Err, syncer.ErrCardFull):
 			rows = append(rows, info("The card is full"))
-		case errors.Is(s.Err, syncer.ErrOffline):
-			rows = append(rows, info(subsonic.Message(s.Err, d.hostName())))
+		case errors.Is(s.Err, syncer.ErrOffline) || errors.Is(s.Err, syncer.ErrRefused):
+			msg := subsonic.Message(s.Err, d.hostName())
+			var ae *subsonic.APIError
+			if errors.As(s.Err, &ae) && ae.Code == 50 {
+				msg = "Downloads are turned off for this account on the server" // R39
+			}
+			rows = append(rows, info(msg))
 		}
 		rows = append(rows, act("resume", "Resume", ""))
 	} else {
