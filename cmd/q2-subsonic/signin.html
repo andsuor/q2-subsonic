@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in to Navidrome</title>
+<style>
+:root { --bg: #f4f5f7; --panel: #fff; --line: #dfe2e7; --text: #16191d; --muted: #646b75;
+  --accent: #b86e00; --accent-ink: #fff; --accent-soft: #fbecd2; --bad: #c62f3a; --good: #1f8a70; }
+@media (prefers-color-scheme: dark) { :root {
+  --bg: #0f1215; --panel: #171b20; --line: #2a3138; --text: #e9edf1; --muted: #98a2ad;
+  --accent: #f0a73a; --accent-ink: #1d1200; --accent-soft: #3a2a12; --bad: #ff6b74; --good: #3cc49f; } }
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-text-size-adjust: 100%; }
+main { max-width: 440px; margin: 0 auto; padding: calc(24px + env(safe-area-inset-top)) 16px 48px; }
+h1 { font-size: 20px; margin: 0 0 16px; }
+form { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+label { display: block; font-size: 13px; font-weight: 600; color: var(--muted); margin: 12px 0 4px; }
+label:first-of-type { margin-top: 0; }
+input { width: 100%; min-height: 44px; font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; outline: none; }
+input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+button { width: 100%; min-height: 44px; margin-top: 16px; border: 1px solid var(--accent); background: var(--accent); color: var(--accent-ink); border-radius: 10px; font: inherit; font-weight: 650; cursor: pointer; }
+button:disabled { opacity: .45; cursor: default; }
+.note { margin: 12px 0 0; font-size: 13px; color: var(--muted); }
+#msg { margin-top: 12px; min-height: 1.4em; font-weight: 600; }
+#msg.bad { color: var(--bad); } #msg.good { color: var(--good); }
+body[data-auth="1"] #pinbox, body[data-auth="0"] #signbox { display: none; }
+</style>
+</head>
+<body data-auth="1">
+<main>
+  <h1>Sign in to Navidrome</h1>
+  <form id="pinbox" autocomplete="off">
+    <label for="pin">PIN shown on the Q2</label>
+    <input id="pin" inputmode="numeric" pattern="[0-9]*" maxlength="6" autocomplete="one-time-code">
+    <button type="submit">Continue</button>
+  </form>
+  <form id="signbox">
+    <label for="server">Server</label>
+    <input id="server" type="url" value="https://" autocapitalize="off" autocorrect="off" spellcheck="false" required>
+    <label for="user">Username</label>
+    <input id="user" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="username" required>
+    <label for="password">Password</label>
+    <input id="password" type="password" autocomplete="current-password" required>
+    <button type="submit">Sign In</button>
+    <p class="note">Your password is sent once, over your local Wi-Fi, to the Q2. It is checked against your server and kept only on the Q2's card.</p>
+  </form>
+  <div id="msg" role="status"></div>
+</main>
+<script>
+const $ = id => document.getElementById(id), msg = $('msg');
+function say(t, cls) { msg.textContent = t; msg.className = cls || ''; }
+async function post(path, body) {
+  const r = await fetch(path, { method: 'POST', headers: { 'X-Q2': '1', 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  return { status: r.status, body: await r.json().catch(() => ({})) };
+}
+$('pinbox').onsubmit = async e => {
+  e.preventDefault();
+  const r = await post('/api/login', { pin: $('pin').value.trim() });
+  if (r.status === 200) location.reload();
+  else say(r.body.error || 'That is not the PIN on the Q2.', 'bad');
+};
+$('signbox').onsubmit = async e => {
+  e.preventDefault();
+  const b = e.target.querySelector('button'); b.disabled = true; say('Checking…');
+  try {
+    const r = await post('/api/signin', { server: $('server').value.trim(), user: $('user').value.trim(), password: $('password').value });
+    if (r.status === 200) { say(r.body.message, r.body.ok ? 'good' : 'bad'); if (r.body.ok) $('password').value = ''; else b.disabled = false; }
+    else { say(r.body.error || 'Sign-in is closed. Open it again on the Q2.', 'bad'); b.disabled = false; }
+  } catch (_) { say('Sign-in is closed. Open it again on the Q2.', 'bad'); }
+};
+</script>
+</body>
+</html>
