@@ -850,3 +850,31 @@ func TestAccountSaysKeyOrPassword(t *testing.T) {
 		t.Fatalf("key sign-in: %q", titles(r))
 	}
 }
+
+// I24: a failed phone sign-in shows on the root after the QR page is left (which restarts sign-in),
+// and stays until the next try.
+func TestSigninFailureShownOnRoot(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "", false)
+	d.do("menu")
+	d.signin.mu.Lock()
+	addr, key := d.signin.ln.Addr().String(), d.signin.key
+	d.signin.mu.Unlock()
+	req, _ := http.NewRequest("POST", "http://"+addr+"/api/signin",
+		strings.NewReader(`{"server":"https://127.0.0.1:1","user":"andreas","password":"x"}`))
+	req.Header.Set("X-Q2", "1")
+	req.AddCookie(&http.Cookie{Name: signinCookie, Value: key})
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	d.mu.Lock()
+	d.lastMenu = time.Now().Add(-2 * qrLeftAfter) // the QR page was open: no refresh
+	d.mu.Unlock()
+	for i := 0; i < 2; i++ {
+		r := d.do("menu")
+		if r.Rows[0].Kind != "remote" || r.Rows[0].Subtitle != "Can't reach 127.0.0.1:1" {
+			t.Fatalf("menu %d: %+v", i, r.Rows[0])
+		}
+	}
+}

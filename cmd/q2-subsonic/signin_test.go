@@ -260,20 +260,18 @@ func TestSigninTimeout(t *testing.T) {
 	}
 	r.clk.add(2 * time.Second)
 	// stop() clears ln first and the state keys just after, so wait for both (generous: loaded CI).
-	keys := []string{"addr=", "pin=", "qr=", "qrsize=", "note="}
+	// M31: the QR page, if still open, says it timed out (beside the code, as it draws notes only
+	// there) rather than "Connect the Q2 to Wi-Fi"; the PIN is gone.
 	var st []byte
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		st, _ = os.ReadFile(filepath.Join(r.dir, "state"))
-		gone := !r.s.active()
-		for _, k := range keys {
-			gone = gone && !strings.Contains(string(st), k)
-		}
+		done := !r.s.active() && strings.Contains(string(st), "note=Sign-in timed out · Press Return")
 		if conn, err := net.DialTimeout("tcp", r.addr, time.Second); err == nil {
 			conn.Close()
-			gone = false
+			done = false
 		}
-		if gone || time.Now().After(deadline) {
+		if done || time.Now().After(deadline) {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -281,10 +279,9 @@ func TestSigninTimeout(t *testing.T) {
 	if r.s.active() {
 		t.Fatal("still active after 10 min")
 	}
-	for _, k := range keys {
-		if strings.Contains(string(st), k) {
-			t.Errorf("state still has %q", k)
-		}
+	if !strings.Contains(string(st), "note=Sign-in timed out · Press Return") || !strings.Contains(string(st), "addr=") ||
+		!strings.Contains(string(st), "qrsize=") || strings.Contains(string(st), "pin=") {
+		t.Errorf("state after the timeout:\n%s", st)
 	}
 	if conn, err := net.DialTimeout("tcp", r.addr, time.Second); err == nil {
 		conn.Close()
@@ -360,5 +357,72 @@ func TestSigninAPIKeySavesOnlyKey(t *testing.T) {
 	if b, _ := os.ReadFile(filepath.Join(r.dir, "credentials")); !ok || cr.APIKey != "KEY" || cr.Password != "" ||
 		cr.User != "andreas" || strings.Contains(string(b), "Password") {
 		t.Fatalf("saved %s", b)
+	}
+}
+
+// I24: a failed phone sign-in shows on the Q2's QR page too, with the code and PIN kept for a retry.
+func TestSigninFailureOnQRPage(t *testing.T) {
+	r := newRig(t)
+	c := r.login(t)
+	r.post(t, "/api/signin", `{"server":"`+r.nd.URL+`","user":"x","password":"bad"}`, true, c)
+	st, _ := os.ReadFile(filepath.Join(r.dir, "state"))
+	for _, k := range []string{"note=Wrong username or password", "pin=" + r.s.pin, "addr=", "qrsize="} {
+		if !strings.Contains(string(st), k) {
+			t.Errorf("state lacks %q:\n%s", k, st)
+		}
+	}
+}
+
+// M32: a submit after the Q2 restarted sign-in (new key) says what happened and what to do.
+func TestSigninRestartedCopy(t *testing.T) {
+	r := newRig(t)
+	resp, body := r.post(t, "/api/signin", `{}`, true, &http.Cookie{Name: signinCookie, Value: "an-old-key"})
+	if resp.StatusCode != 401 || !strings.Contains(body, "Sign-in was restarted on the Q2. Open Sign In from Your Phone again and scan the new code.") {
+		t.Fatalf("%d %s", resp.StatusCode, body)
+	}
+}
+
+// M3: the sign-in server caps header size and open connections, and has a read timeout, so a LAN
+// host can't pin the Q2's memory or file descriptors while it listens.
+func TestSigninServerLimits(t *testing.T) {
+	r := newRig(t)
+	if r.s.srv.ReadTimeout == 0 || r.s.srv.MaxHeaderBytes == 0 || r.s.srv.MaxHeaderBytes > 16<<10 {
+		t.Fatalf("ReadTimeout %v MaxHeaderBytes %d", r.s.srv.ReadTimeout, r.s.srv.MaxHeaderBytes)
+	}
+	req, _ := http.NewRequest("GET", r.base+"/", nil)
+	req.Header.Set("X-Big", strings.Repeat("a", 64<<10))
+	if resp, err := noRedirect().Do(req); err == nil && resp.StatusCode != http.StatusRequestHeaderFieldsTooLarge {
+		t.Fatalf("64 KiB header: %d", resp.StatusCode)
+	}
+	var held []net.Conn
+	defer func() {
+		for _, c := range held {
+			c.Close()
+		}
+	}()
+	for i := 0; i < signinConns; i++ {
+		c, err := net.Dial("tcp", r.addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		held = append(held, c)
+	}
+	time.Sleep(50 * time.Millisecond) // let the server accept them
+	extra, err := net.Dial("tcp", r.addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer extra.Close()
+	extra.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := extra.Read(make([]byte, 1)); err == nil || os.IsTimeout(err) {
+		t.Fatalf("connection past the cap kept open: %v", err)
+	}
+	for _, c := range held {
+		c.Close()
+	}
+	held = nil
+	time.Sleep(50 * time.Millisecond)
+	if resp, err := noRedirect().Get(r.base + "/"); err != nil || resp.StatusCode != 401 {
+		t.Fatalf("after the held ones closed: %v %v", resp, err)
 	}
 }
