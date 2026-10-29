@@ -178,6 +178,47 @@ func (r *Runner) Refresh(keep []plan.Want) error {
 	return r.edit(func(m *library.Manifest) (bool, error) { return applyKeep(m, keep), nil })
 }
 
+// Imported takes the firmware's answer to a library request that named sent and skipped exists
+// (R35). The rest of sent are now Q2 playlists the app made, so later requests replace them by
+// name. A skipped file still under its playlist's own name met a playlist the user made: it is
+// renamed "<name> (Subsonic).m3u" and returned in again, to add once more. One skipped under that
+// name too is a clash. ErrBusy while a sync runs.
+func (r *Runner) Imported(sent, exists []string) (again, clash []string, err error) {
+	err = r.edit(func(m *library.Manifest) (bool, error) {
+		skipped := map[string]bool{}
+		for _, f := range exists {
+			skipped[f] = true
+		}
+		changed := false
+		for _, f := range sent {
+			if !skipped[f] && !m.Imported[f] {
+				m.Imported[f], changed = true, true
+			}
+		}
+		names := make([]string, 0, len(m.Playlists))
+		for name := range m.Playlists {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			f := m.Playlists[name]
+			switch {
+			case !skipped[f]:
+			case f != library.PlaylistFile(r.root, name):
+				clash = append(clash, f)
+			default:
+				to := r.freePlaylistFile(m, name, true)
+				if err := m.MovePlaylist(r.root, name, to); err != nil {
+					return changed, err
+				}
+				again, changed = append(again, to), true
+			}
+		}
+		return changed, nil
+	})
+	return again, clash, err
+}
+
 // edit changes the manifest while no sync runs: a run holds it in memory and saves it whole.
 func (r *Runner) edit(f func(*library.Manifest) (bool, error)) error {
 	r.mu.Lock()

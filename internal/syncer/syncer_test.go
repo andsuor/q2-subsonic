@@ -1140,3 +1140,27 @@ func TestRenameCarriesCover(t *testing.T) {
 		t.Error("old album folder left")
 	}
 }
+
+// The firmware's answer to a library request (R35): the files it imported become the app's own; an
+// added file it skipped because the Q2 has a playlist of that name (the user's) is renamed
+// "<name> (Subsonic).m3u", to add again; one skipped under that name as well is a clash.
+func TestImported(t *testing.T) {
+	_, r, root := setup(t)
+	mix, rock, fav := library.PlaylistFile(root, "Mix"), library.PlaylistFile(root, "Rock"), root+"/_explaylist_data/Fav (Subsonic).m3u"
+	for _, f := range []string{mix, rock, fav} {
+		put(t, f, "#EXTM3U\n")
+	}
+	(&library.Manifest{Playlists: map[string]string{"Mix": mix, "Rock": rock, "Fav": fav}, Imported: map[string]bool{}}).Save(root, root+"/.subsonic/manifest.json")
+	again, clash, err := r.Imported([]string{mix, rock, fav}, []string{rock, fav})
+	rockS := root + "/_explaylist_data/Rock (Subsonic).m3u"
+	if err != nil || !reflect.DeepEqual(again, []string{rockS}) || !reflect.DeepEqual(clash, []string{fav}) {
+		t.Fatal(again, clash, err)
+	}
+	m := manifest(t, root)
+	if !m.Imported[mix] || m.Imported[rock] || m.Imported[fav] || m.Playlists["Rock"] != rockS {
+		t.Fatalf("%+v %+v", m.Imported, m.Playlists)
+	}
+	if _, err := os.Stat(rockS); err != nil {
+		t.Fatal(err)
+	}
+}

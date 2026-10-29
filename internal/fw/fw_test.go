@@ -40,7 +40,7 @@ func TestRequestLibraryFormat(t *testing.T) {
 	tmpdir := t.TempDir()
 	libfile := filepath.Join(tmpdir, "library")
 
-	err := RequestLibrary(libfile, 7, []string{"/mnt/mmc/_explaylist_data/Mix.m3u"})
+	err := RequestLibrary(libfile, 7, true, []string{"/mnt/mmc/_explaylist_data/Mix.m3u"}, nil)
 	if err != nil {
 		t.Fatalf("RequestLibrary: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestRequestLibraryBadPaths(t *testing.T) {
 			tmpdir := t.TempDir()
 			libfile := filepath.Join(tmpdir, "library")
 
-			err := RequestLibrary(libfile, 7, []string{tt.path})
+			err := RequestLibrary(libfile, 7, true, []string{tt.path}, nil)
 
 			if (err != nil) != tt.wantErr {
 				t.Errorf("RequestLibrary error: got %v, want error=%v", err, tt.wantErr)
@@ -120,7 +120,7 @@ func TestLibraryDoneParsesError(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	done, ok, msg := LibraryDone(donefile, 7)
+	done, ok, msg, _ := LibraryDone(donefile, 7)
 	if !done {
 		t.Errorf("done: got false, want true")
 	}
@@ -141,7 +141,7 @@ func TestLibraryDoneOldSeq(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	done, _, _ := LibraryDone(donefile, 7)
+	done, _, _, _ := LibraryDone(donefile, 7)
 	if done {
 		t.Errorf("done with old seq: got true, want false")
 	}
@@ -156,7 +156,7 @@ func TestLibraryDoneSuccess(t *testing.T) {
 		t.Fatalf("WriteFile: %v", err)
 	}
 
-	done, ok, msg := LibraryDone(donefile, 7)
+	done, ok, msg, _ := LibraryDone(donefile, 7)
 	if !done {
 		t.Errorf("done: got false, want true")
 	}
@@ -173,7 +173,7 @@ func TestLibraryDoneMissing(t *testing.T) {
 	tmpdir := t.TempDir()
 	donefile := filepath.Join(tmpdir, "nonexistent")
 
-	done, ok, msg := LibraryDone(donefile, 7)
+	done, ok, msg, _ := LibraryDone(donefile, 7)
 	if done {
 		t.Errorf("done: got true, want false")
 	}
@@ -182,5 +182,47 @@ func TestLibraryDoneMissing(t *testing.T) {
 	}
 	if msg != "" {
 		t.Errorf("msg: got %q, want %q", msg, "")
+	}
+}
+
+// R35: "import" for playlists the app owns (a same-named one is replaced), "add" for the rest
+// (skipped when the Q2 has one of that name); a follow-up request has no scan.
+func TestRequestLibraryAddLines(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "library")
+	a, b := "/mnt/mmc/_explaylist_data/Mix.m3u", "/mnt/mmc/_explaylist_data/Rock.m3u"
+	if err := RequestLibrary(f, 7, true, []string{a}, []string{b}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(f); string(got) != "7\nscan\nimport "+a+"\nadd "+b+"\n" {
+		t.Fatalf("%q", got)
+	}
+	if seq, m3us := ReadRequest(f); seq != 7 || len(m3us) != 2 || m3us[0] != a || m3us[1] != b {
+		t.Fatal(seq, m3us)
+	}
+	if err := RequestLibrary(f, 8, false, nil, []string{b}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(f); string(got) != "8\nadd "+b+"\n" {
+		t.Fatalf("%q", got)
+	}
+	if err := RequestLibrary(f, 9, false, nil, []string{"/mnt/mmc/_explaylist_data/Wait... What.m3u"}); err == nil {
+		t.Fatal("bad add path taken")
+	}
+	if seq, _ := ReadRequest(filepath.Join(t.TempDir(), "none")); seq != 0 {
+		t.Fatal(seq)
+	}
+}
+
+// After line 1, "exists <path>" lines name the adds the firmware skipped (R35).
+func TestLibraryDoneExists(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "done")
+	os.WriteFile(f, []byte("7 ok\nexists /mnt/mmc/_explaylist_data/A.m3u\nexists /mnt/mmc/_explaylist_data/B.m3u\n"), 0o644)
+	done, ok, msg, exists := LibraryDone(f, 7)
+	if !done || !ok || msg != "" || len(exists) != 2 || exists[1] != "/mnt/mmc/_explaylist_data/B.m3u" {
+		t.Fatal(done, ok, msg, exists)
+	}
+	os.WriteFile(f, []byte("7 error Couldn't import A\nexists /mnt/mmc/_explaylist_data/B.m3u\n"), 0o644)
+	if done, ok, msg, _ := LibraryDone(f, 7); !done || ok || msg != "Couldn't import A" {
+		t.Fatal(done, ok, msg)
 	}
 }

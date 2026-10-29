@@ -377,13 +377,24 @@ func (d *daemon) libFailedRows(msg string, at time.Time) []q2spot.Row {
 	return []q2spot.Row{info(msg), list("details", "Details", "", detailsCtx("library", 0, 0, at, ""))}
 }
 
-// sendLibrary writes a new library request (seq = UnixNano, never reused, even across restarts) for
-// the playlist files the last sync recorded; the user's own playlists are never imported.
-// ponytail: imports every recorded playlist file, not only the ones this sync rewrote; re-importing an
-// unchanged playlist is harmless (the import replaces by name). d.mu is held.
+// sendLibrary asks the firmware (F3) to scan and import the playlist files the app has recorded;
+// the user's own playlists are never named (R35). A file whose playlist the app made before
+// (manifest Imported) is sent as "import", which replaces the Q2 playlist of that name; any other as
+// "add", which the firmware skips when the Q2 has a playlist of that name (one the user made). One
+// request at a time: while one awaits its answer, the next is sent once that comes (libPoll), so no
+// answer is lost. seq = UnixNano, never reused, even across restarts.
+// ponytail: names every recorded playlist file, not only the ones this sync rewrote; replacing an
+// unchanged playlist is harmless. d.mu is held.
 func (d *daemon) sendLibrary() (*libJob, error) {
-	seq := time.Now().UnixNano()
-	var m3us []string
+	d.libPoll()
+	if seq, _ := fw.ReadRequest(d.libReq()); seq != 0 && seq != d.libTaken { // still awaiting its answer
+		d.libAgain = true
+		if d.lib == nil || d.lib.seq != seq {
+			d.lib = &libJob{seq: seq}
+		}
+		return d.lib, nil
+	}
+	var imports, adds []string
 	if m, _ := library.LoadManifest(filepath.Join(d.card, ".subsonic", "manifest.json")); m != nil {
 		for _, f := range m.Playlists {
 			if _, err := os.Stat(f); err != nil || !library.ValidPlaylistFile(d.card, f) {
@@ -393,11 +404,22 @@ func (d *daemon) sendLibrary() (*libJob, error) {
 				d.log.Printf("library: skipping %s: the firmware refuses \"..\" in a name", f)
 				continue
 			}
-			m3us = append(m3us, f)
+			if m.Imported[f] {
+				imports = append(imports, f)
+			} else {
+				adds = append(adds, f)
+			}
 		}
-		sort.Strings(m3us)
+		sort.Strings(imports)
+		sort.Strings(adds)
 	}
-	if err := fw.RequestLibrary(d.libReq(), seq, m3us); err != nil {
+	return d.writeLibrary(true, imports, adds)
+}
+
+// writeLibrary writes a request, the one the Sync page follows from now. d.mu is held.
+func (d *daemon) writeLibrary(scan bool, imports, adds []string) (*libJob, error) {
+	seq := time.Now().UnixNano()
+	if err := fw.RequestLibrary(d.libReq(), seq, scan, imports, adds); err != nil {
 		return nil, err
 	}
 	d.lib = &libJob{seq: seq}
@@ -406,15 +428,59 @@ func (d *daemon) sendLibrary() (*libJob, error) {
 
 func (d *daemon) libReq() string { return filepath.Join(d.tmp, "q2-subsonic.library") }
 
-// libState polls the firmware's reply for the pending request. d.mu is held, d.lib is not nil.
+// libState is the followed request's state, once any answer is taken. d.mu is held, d.lib is not nil.
 func (d *daemon) libState() (done, ok bool, msg string, at time.Time) {
+	d.libPoll()
 	j := d.lib
-	if !j.done {
-		if done, ok, msg := fw.LibraryDone(d.libReq()+".done", j.seq); done {
-			j.done, j.ok, j.msg, j.doneAt = true, ok, msg, time.Now()
+	return j.done, j.ok, j.msg, j.doneAt
+}
+
+// libPoll takes the firmware's answer to the request on file, once (R35). The playlists it imported
+// become the app's own. One it skipped because the Q2 has a playlist of that name (the user's) is
+// renamed "<name> (Subsonic).m3u" and added in a follow-up request; skipped again under that name,
+// it is an error. The request file says what was sent, so an answer that comes after a restart is
+// taken too (taking one twice changes nothing). Called every second (tick) and by the pages that
+// show it. d.mu is held.
+func (d *daemon) libPoll() {
+	seq, sent := fw.ReadRequest(d.libReq())
+	if seq == 0 || seq == d.libTaken {
+		return
+	}
+	done, ok, msg, exists := fw.LibraryDone(d.libReq()+".done", seq)
+	if !done {
+		return
+	}
+	if ok {
+		again, clash, err := d.runner.Imported(sent, exists)
+		switch {
+		case errors.Is(err, syncer.ErrBusy):
+			return // a sync holds the manifest: taken once it ends
+		case err != nil:
+			d.log.Printf("library: %v", err)
+			ok, msg = false, "Couldn't record the imported playlists"
+		case len(clash) > 0:
+			ok, msg = false, "Couldn't import "+strings.TrimSuffix(filepath.Base(clash[0]), ".m3u")+
+				": a playlist with that name is already on the Q2"
+		case len(again) > 0:
+			d.libTaken = seq
+			_, err := d.writeLibrary(false, nil, again)
+			if err == nil {
+				return // the follow-up is the request followed now
+			}
+			d.log.Printf("library: %v", err)
+			ok, msg = false, "Couldn't ask for a library update"
 		}
 	}
-	return j.done, j.ok, j.msg, j.doneAt
+	d.libTaken = seq
+	if j := d.lib; j != nil && j.seq == seq {
+		j.done, j.ok, j.msg, j.doneAt = true, ok, msg, time.Now()
+	}
+	if d.libAgain {
+		d.libAgain = false
+		if _, err := d.sendLibrary(); err != nil {
+			d.log.Printf("library: %v", err)
+		}
+	}
 }
 
 // syncDone is the runner's OnDone: with cap library, a sync that changed anything asks the firmware

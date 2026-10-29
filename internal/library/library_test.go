@@ -335,3 +335,44 @@ func TestInSongs(t *testing.T) {
 		}
 	}
 }
+
+// The playlists an older manifest recorded were imported by name-replacing requests (or stock's
+// Import playlist, which also replaces), so they count as the app's own (R35); a manifest that
+// records Imported keeps exactly that.
+func TestImportedLegacy(t *testing.T) {
+	dir := t.TempDir()
+	p := dir + "/manifest.json"
+	os.WriteFile(p, []byte(`{"Songs":{},"Playlists":{"Mix":"/r/_explaylist_data/Mix.m3u"}}`), 0o644)
+	if m, _ := LoadManifest(p); !m.Imported["/r/_explaylist_data/Mix.m3u"] {
+		t.Fatal(m.Imported)
+	}
+	os.WriteFile(p, []byte(`{"Songs":{},"Playlists":{"Mix":"/r/_explaylist_data/Mix.m3u"},"Imported":{}}`), 0o644)
+	if m, _ := LoadManifest(p); m.Imported == nil || len(m.Imported) != 0 {
+		t.Fatal(m.Imported)
+	}
+}
+
+// MovePlaylist renames a recorded playlist file to a free one in _explaylist_data/ and records it.
+func TestMovePlaylist(t *testing.T) {
+	root := t.TempDir()
+	from, to := PlaylistFile(root, "Mix"), root+"/_explaylist_data/Mix (Subsonic).m3u"
+	mk(t, from)
+	m := &Manifest{Playlists: map[string]string{"Mix": from}}
+	for _, bad := range []string{root + "/Music/x.m3u", root + "/_explaylist_data/sub/x.m3u", from} {
+		if err := m.MovePlaylist(root, "Mix", bad); err == nil {
+			t.Error("moved to", bad)
+		}
+	}
+	if err := m.MovePlaylist(root, "Mix", to); err != nil || m.Playlists["Mix"] != to {
+		t.Fatal(err, m.Playlists)
+	}
+	if _, err := os.Stat(to); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(from); !os.IsNotExist(err) {
+		t.Fatal("old file left")
+	}
+	if err := (&Manifest{Playlists: map[string]string{}}).MovePlaylist(root, "None", to+"x.m3u"); err == nil {
+		t.Fatal("moved an unrecorded playlist")
+	}
+}

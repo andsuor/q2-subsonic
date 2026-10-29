@@ -28,6 +28,11 @@ type Manifest struct {
 	// PlaylistsStale: the recorded .m3u files hold old paths (after a folder migration), so the next
 	// sync rewrites every one even when no song changes. The syncer clears it.
 	PlaylistsStale bool `json:",omitempty"`
+	// Imported holds the playlist files the firmware confirmed importing (R35): the Q2 playlist of
+	// that name is the app's, so later requests replace it ("import"); any other file is sent as
+	// "add", which never touches a playlist the user made. A file stays here after it is removed,
+	// as its playlist stays on the Q2.
+	Imported map[string]bool
 }
 
 // LoadManifest reads path; a missing file is an empty manifest.
@@ -45,7 +50,36 @@ func LoadManifest(path string) (*Manifest, error) {
 	if m.Playlists == nil {
 		m.Playlists = map[string]string{}
 	}
+	if m.Imported == nil { // an older manifest: its playlists were imported by name-replacing requests
+		m.Imported = map[string]bool{}
+		for _, f := range m.Playlists {
+			m.Imported[f] = true
+		}
+	}
 	return m, err
+}
+
+// MovePlaylist renames the .m3u recorded for playlist name to to, a free file directly in
+// <root>/_explaylist_data/, and records it there.
+func (m *Manifest) MovePlaylist(root, name, to string) error {
+	from, ok := m.Playlists[name]
+	if !ok {
+		return errors.New("no playlist file recorded for " + name)
+	}
+	if err := checkOwned(root, from, m); err != nil {
+		return err
+	}
+	if !ValidPlaylistFile(root, to) {
+		return errors.New("refusing playlist path: " + to)
+	}
+	if _, err := os.Lstat(to); err == nil {
+		return errors.New("already exists: " + to)
+	}
+	if err := os.Rename(from, to); err != nil {
+		return err
+	}
+	m.Playlists[name] = to
+	return nil
 }
 
 // Save writes the manifest atomically.

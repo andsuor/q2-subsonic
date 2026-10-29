@@ -137,6 +137,8 @@ type daemon struct {
 	preview            *preview
 	showDone           bool // the finished sync's page, until the selection changes or Check Again
 	lib                *libJob
+	libTaken           int64                      // the library request whose answer was taken last (libPoll)
+	libAgain           bool                       // a request was wanted while one awaited its answer: sent once that comes
 	resolved           map[string][]subsonic.Song // selection key -> its songs, as last fetched
 	libCount           [2]int                     // albums, playlists of the Entire Library, as last resolved
 	playSeq            int                        // the latest play request; an older one still waiting is dropped
@@ -298,9 +300,15 @@ func (d *daemon) saveSettings(s settings) error {
 	return q2.WriteFile(filepath.Join(d.dir, "settings.json"), b)
 }
 
-// tick keeps the state file's hold=1 while files move, the phone page is open or a stream plays.
+// tick keeps the state file's hold=1 while files move, the phone page is open or a stream plays,
+// and takes the firmware's answer to a library request as soon as it comes.
 func (d *daemon) tick() {
 	d.state.setHold(d.runner.Busy() || d.signin.active() || d.stream.active())
+	if d.caps.Library {
+		d.mu.Lock()
+		d.libPoll()
+		d.mu.Unlock()
+	}
 }
 
 func (d *daemon) idle(now time.Time) bool {

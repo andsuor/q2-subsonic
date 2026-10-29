@@ -57,7 +57,7 @@ Newer Q2 Pod firmware offers extensions to card apps. Without them everything st
 
 | Extension | With it | Without it |
 |---|---|---|
-| `library` | After a sync the Q2 updates its library and imports the playlists itself (it waits while music is playing). | Run **Library → Update Local Music**, then **Playlists → Import playlist** yourself. The sync page's **Update Your Library** row reminds you. |
+| `library` | After a sync the Q2 updates its library and imports the playlists itself (it waits while music is playing). A playlist you made on the Q2 is never replaced: a server playlist with the same name arrives as "<name> (Subsonic)". | Run **Library → Update Local Music**, then **Playlists → Import playlist** yourself. The sync page's **Update Your Library** row reminds you. |
 | `progress` | A real progress bar. | A text bar such as `[#####-----] 47 %`. |
 | `playlist` | Streaming plays the synced songs from the card inside a playlist, and streams every format the Q2 plays as it is. | Everything in the list streams, synced or not, and only FLAC and MP3 stream as they are (others as MP3 320). |
 

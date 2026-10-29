@@ -922,3 +922,112 @@ func TestCompilationOneFolder(t *testing.T) {
 		}
 	}
 }
+
+// syncPlaylist runs a sync of playlist Mix to done on a daemon with cap library.
+func syncPlaylist(t *testing.T) *tdaemon {
+	t.Helper()
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 2}, "library", true)
+	d.do("toggle", "playlist:pl1")
+	d.preview(t)
+	d.do("start")
+	eventually(t, "the sync to finish", func() bool { return d.runner.Snapshot().State == "done" })
+	return d
+}
+
+// libReq is the library request on file: its seq and its other lines.
+func (d *tdaemon) libReq(t *testing.T) (string, []string) {
+	t.Helper()
+	d.libReqSeq(t)
+	b, _ := os.ReadFile(filepath.Join(d.tmp, "q2-subsonic.library"))
+	lines := strings.Split(strings.TrimSuffix(string(b), "\n"), "\n")
+	return lines[0], lines[1:]
+}
+
+func (d *tdaemon) answer(seq string, lines ...string) {
+	os.WriteFile(filepath.Join(d.tmp, "q2-subsonic.library.done"), []byte(strings.Join(append([]string{seq}, lines...), "\n")+"\n"), 0o644)
+}
+
+// R35: a playlist the app hasn't imported yet is sent as "add", which never replaces a playlist
+// the user made; once the firmware confirms it, it is the app's own and later requests replace it.
+func TestLibraryAddsThenImports(t *testing.T) {
+	d := syncPlaylist(t)
+	mix := filepath.Join(d.card, "_explaylist_data", "Mix.m3u")
+	seq, lines := d.libReq(t)
+	if strings.Join(lines, "|") != "scan|add "+mix {
+		t.Fatalf("request %q", lines)
+	}
+	d.answer(seq + " ok")
+	if _, ok := find(d.do("sync"), "Library updated"); !ok {
+		t.Fatalf("%q", titles(d.do("sync")))
+	}
+	if !d.manifest().Imported[mix] {
+		t.Fatal("not recorded as imported")
+	}
+	d.syncDone(plan.Plan{PlaylistsStale: true})
+	if seq2, lines := d.libReq(t); seq2 == seq || strings.Join(lines, "|") != "scan|import "+mix {
+		t.Fatalf("next request %s %q", seq2, lines)
+	}
+}
+
+// R35: a playlist of the same name already on the Q2 (the user's own) is never replaced: the file
+// is renamed "Mix (Subsonic).m3u" and added again; a second clash is an error with Details.
+func TestLibraryExistsRenamesThenClash(t *testing.T) {
+	d := syncPlaylist(t)
+	dir := filepath.Join(d.card, "_explaylist_data")
+	mix, mixS := filepath.Join(dir, "Mix.m3u"), filepath.Join(dir, "Mix (Subsonic).m3u")
+	seq, _ := d.libReq(t)
+	d.answer(seq+" ok", "exists "+mix)
+	if _, ok := find(d.do("sync"), "Updating Library…"); !ok {
+		t.Fatalf("%q", titles(d.do("sync")))
+	}
+	seq2, lines := d.libReq(t)
+	if seq2 == seq || strings.Join(lines, "|") != "add "+mixS {
+		t.Fatalf("follow-up %s %q", seq2, lines)
+	}
+	if _, err := os.Stat(mix); !os.IsNotExist(err) {
+		t.Error("Mix.m3u kept")
+	}
+	if m := d.manifest(); m.Playlists["Mix"] != mixS || m.Imported[mix] {
+		t.Fatalf("%+v %+v", m.Playlists, m.Imported)
+	}
+	d.answer(seq2+" ok", "exists "+mixS)
+	r := d.do("sync")
+	if _, ok := find(r, "Couldn't import Mix (Subsonic)"); !ok {
+		t.Fatalf("%q", titles(r))
+	}
+	if _, ok := find(r, "Details"); !ok {
+		t.Fatalf("no Details: %q", titles(r))
+	}
+}
+
+// One request at a time: one wanted while another awaits its answer is sent once that comes, so
+// no answer (and no import to record) is lost.
+func TestLibraryOneRequestAtATime(t *testing.T) {
+	d := syncPlaylist(t)
+	seq, _ := d.libReq(t)
+	d.syncDone(plan.Plan{PlaylistsStale: true})
+	if seq2, _ := d.libReq(t); seq2 != seq {
+		t.Fatal("request replaced before its answer")
+	}
+	d.answer(seq + " ok")
+	d.tick()
+	if seq2, lines := d.libReq(t); seq2 == seq || !strings.Contains(strings.Join(lines, "|"), "import ") {
+		t.Fatalf("next request %s %q", seq2, lines)
+	}
+}
+
+// The answer is taken without the Sync page, and by a later run of the app (the request on file
+// says what was sent).
+func TestLibraryAnswerTakenByTick(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "library", true)
+	mix := filepath.Join(d.card, "_explaylist_data", "Mix.m3u")
+	os.MkdirAll(filepath.Dir(mix), 0o755)
+	os.WriteFile(mix, []byte("#EXTM3U\n"), 0o644)
+	(&library.Manifest{Playlists: map[string]string{"Mix": mix}, Imported: map[string]bool{}}).Save(d.card, filepath.Join(d.card, ".subsonic", "manifest.json"))
+	os.WriteFile(filepath.Join(d.tmp, "q2-subsonic.library"), []byte("41\nscan\nadd "+mix+"\n"), 0o644)
+	d.answer("41 ok")
+	d.tick()
+	if !d.manifest().Imported[mix] {
+		t.Fatal("answer not taken")
+	}
+}
