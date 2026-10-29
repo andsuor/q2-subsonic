@@ -351,6 +351,8 @@ type libResult struct {
 // Every request takes a slot of sem, so the library never runs more than the preview's 4 at once.
 // Albums keep their listing order; so do playlists.
 func (d *daemon) resolveLibrary(ctx context.Context, cl *subsonic.Client, sem chan struct{}) (libResult, error) {
+	ctx, cancel := context.WithCancel(ctx) // the first failure stops the queued fetches
+	defer cancel()
 	slot := func() func() { sem <- struct{}{}; return func() { <-sem } }
 	var albums []subsonic.Album
 	for off := 0; ; {
@@ -382,10 +384,14 @@ func (d *daemon) resolveLibrary(ctx context.Context, cl *subsonic.Client, sem ch
 		go func() {
 			defer wg.Done()
 			defer slot()()
+			if ctx.Err() != nil {
+				return
+			}
 			if e := f(); e != nil {
 				mu.Lock()
 				first = cmp.Or(first, e)
 				mu.Unlock()
+				cancel()
 			}
 		}()
 	}

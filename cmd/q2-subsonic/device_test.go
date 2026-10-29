@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,6 +31,7 @@ type nav struct {
 	errCode          int           // every API call fails with this Subsonic code
 	block            chan struct{} // downloads wait for it
 	failID           string        // getAlbum fails for this album only
+	albumReqs        atomic.Int32  // getAlbum calls served
 	playlists        int           // playlists pl1..plN ("Mix", "Mix 2"…); 0 means 1. pl<k> holds al<k-1>'s songs
 	empty            bool          // every list reply is empty
 }
@@ -96,6 +98,7 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		ok("albumList2", map[string]any{"album": al})
 	case "getAlbum":
+		n.albumReqs.Add(1)
 		if q.Get("id") == n.failID {
 			json.NewEncoder(w).Encode(map[string]any{"subsonic-response": map[string]any{"status": "failed",
 				"error": map[string]any{"code": 70, "message": "Album not found"}}})
@@ -632,12 +635,15 @@ func TestEntireLibraryResolvesAlbumsAndPlaylists(t *testing.T) {
 func TestEntireLibraryIncludedVia(t *testing.T) {
 	d := newTestDaemon(t, &nav{albums: 3, songsPer: 2}, "", true)
 	d.do("toggle", "library:all")
-	for _, key := range []string{"album:al1", "playlist:pl1", "artist:ar1", "song:al0.1"} {
+	sel := selection.Set{Version: 1, Items: d.selected(t)}
+	sel.Toggle(selection.Item{Kind: selection.KindAlbum, ID: "al2", Name: "Album 002"})
+	sel.Save(filepath.Join(d.dir, "selection.json"))
+	for _, key := range []string{"album:al2", "album:al1", "playlist:pl1", "artist:ar1", "song:al0.1"} {
 		if r := d.do("toggle", key); r.Message != "Included via Entire Library" {
 			t.Errorf("%s: toast %q", key, r.Message)
 		}
 	}
-	if it := d.selected(t); len(it) != 1 || it[0].Kind != selection.KindLibrary {
+	if it := d.selected(t); len(it) != 2 || it[0].Kind != selection.KindLibrary || it[1].ID != "al2" {
 		t.Fatalf("selection changed: %+v", it)
 	}
 }
@@ -665,5 +671,18 @@ func TestEntireLibraryPagesPast500Albums(t *testing.T) {
 	d.preview(t)
 	if n := len(d.daemon.preview.plan.Add); n != 501 {
 		t.Errorf("Add %d, want 501", n)
+	}
+}
+
+func TestEntireLibraryFailsFast(t *testing.T) {
+	n := &nav{albums: 400, songsPer: 1, failID: "al0"}
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", "library:all")
+	r := d.preview(t)
+	if _, ok := find(r, "Start Sync"); ok {
+		t.Fatalf("preview should fail: %q", titles(r))
+	}
+	if got := n.albumReqs.Load(); got > 50 {
+		t.Errorf("%d of 400 album requests made after the first failure", got)
 	}
 }

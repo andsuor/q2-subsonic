@@ -297,6 +297,9 @@ func (d *daemon) toggle(ctx context.Context, cl *subsonic.Client, arg string) q2
 	if err != nil {
 		return q2spot.Fail(q2spot.Error, "Couldn't read the selection")
 	}
+	if kind != selection.KindLibrary && sel.Has(selection.KindLibrary, "all") {
+		return q2spot.Reply{Message: "Included via Entire Library"}
+	}
 	if sel.Has(kind, id) {
 		sel.Toggle(selection.Item{Kind: kind, ID: id})
 		if err := d.saveSelection(sel); err != nil {
@@ -310,9 +313,6 @@ func (d *daemon) toggle(ctx context.Context, cl *subsonic.Client, arg string) q2
 			return q2spot.Fail(q2spot.Error, "Couldn't save the selection")
 		}
 		return q2spot.Reply{Message: "Added to Sync · Entire Library"}
-	}
-	if sel.Has(selection.KindLibrary, "all") {
-		return q2spot.Reply{Message: "Included via Entire Library"}
 	}
 	var name string
 	var n int
