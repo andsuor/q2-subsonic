@@ -147,6 +147,14 @@ type daemon struct {
 	manAt              time.Time
 	manSize            int64
 	migrateErr         error // the one-time Navidrome/ -> Subsonic/ move failed; Sync shows it
+
+	bg sync.WaitGroup // the work replies leave running (ping, preview, play, sign-out's stops); tests wait for it
+}
+
+// spawn runs f in the background, counted in d.bg.
+func (d *daemon) spawn(f func()) {
+	d.bg.Add(1)
+	go func() { defer d.bg.Done(); f() }()
 }
 
 func newDaemon(dir, card, tmp string) *daemon {
@@ -226,12 +234,12 @@ func (d *daemon) signOut() {
 	d.cl, d.pinged, d.preview = nil, false, nil
 	d.playSeq++ // a play still waiting for playMu is dropped
 	d.mu.Unlock()
-	go d.runner.Pause()
-	go func() { // under playMu, so a start already running finishes first and is then stopped
+	d.spawn(d.runner.Pause)
+	d.spawn(func() { // under playMu, so a start already running finishes first and is then stopped
 		d.playMu.Lock()
 		defer d.playMu.Unlock()
 		d.stream.stop()
-	}()
+	})
 }
 
 // src lends the current client to the runner and the streamer, which outlive a sign-in.

@@ -266,14 +266,14 @@ func (d *daemon) syncSubtitle(cl *subsonic.Client) string {
 	d.mu.Lock()
 	if !d.pinging && time.Since(d.pingAt) > pingEvery {
 		d.pinging = true
-		go func() {
+		d.spawn(func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			err := cl.Ping(ctx)
 			cancel()
 			d.mu.Lock()
 			d.pinging, d.pinged, d.pingErr, d.pingAt = false, true, err, time.Now()
 			d.mu.Unlock()
-		}()
+		})
 	}
 	pinged, err, host := d.pinged, d.pingErr, d.host
 	d.mu.Unlock()

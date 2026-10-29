@@ -204,6 +204,9 @@ func newTestDaemonOn(t *testing.T, card string, n *nav, caps string, signedIn bo
 		d.runner.Cancel()
 		srv.CloseClientConnections()
 		srv.Close()
+		d.bg.Wait() // a ping or preview still writing log.txt would race the TempDir's removal (M45)
+		d.stream.stop()
+		d.runner.Cancel()
 	})
 	return &tdaemon{d, tmp}
 }

@@ -55,7 +55,7 @@ func (d *daemon) syncPage(cl *subsonic.Client) q2spot.Reply {
 		p = &preview{gen: d.gen, at: time.Now()}
 		d.preview = p
 		d.mu.Unlock()
-		go d.computePreview(cl, p)
+		d.spawn(func() { d.computePreview(cl, p) })
 		return checking
 	}
 	done, pl, err := p.done, p.plan, p.err
@@ -320,11 +320,11 @@ func (d *daemon) syncAction(op string) q2spot.Reply {
 		d.showDone, d.preview = true, nil
 		d.mu.Unlock()
 	case "pause": // R27: stopping waits for the download to notice; the reply doesn't
-		go d.runner.Pause()
+		d.spawn(d.runner.Pause)
 	case "resume":
 		d.runner.Resume()
 	case "cancel":
-		go d.runner.Cancel()
+		d.spawn(d.runner.Cancel)
 	case "retry":
 		d.runner.RetryFailed()
 		d.mu.Lock()

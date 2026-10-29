@@ -442,7 +442,7 @@ func (d *daemon) play(ctx context.Context, cl *subsonic.Client, arg string) q2sp
 	d.playSeq++
 	seq := d.playSeq
 	d.mu.Unlock()
-	go func() {
+	d.spawn(func() {
 		d.playMu.Lock()
 		defer d.playMu.Unlock()
 		d.mu.Lock()
@@ -451,6 +451,6 @@ func (d *daemon) play(ctx context.Context, cl *subsonic.Client, arg string) q2sp
 		if latest {
 			d.stream.start(songs, i)
 		}
-	}()
+	})
 	return q2spot.Reply{Message: "Playing " + songs[i].Title}
 }
