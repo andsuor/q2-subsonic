@@ -400,6 +400,10 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 		}
 	}()
 
+	recorded := map[string]bool{} // every song's file, case-folded: a rename never replaces one
+	for _, e := range m.Songs {
+		recorded[strings.ToLower(e.Path)] = true
+	}
 	for _, mv := range p.Rename {
 		if err := r.check(ctx); err != nil {
 			return err
@@ -408,13 +412,15 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 		if e == nil || e.Path == mv.To {
 			continue
 		}
-		if err := r.rename(e.Path, mv.To); err != nil {
+		if err := r.rename(e.Path, mv.To, !recorded[strings.ToLower(mv.To)]); err != nil {
 			if !r.CardMounted() {
 				return q2.ErrNoCard
 			}
 			r.fail(mv.ID, filepath.Base(mv.To), "rename", err)
 			continue
 		}
+		delete(recorded, strings.ToLower(e.Path))
+		recorded[strings.ToLower(mv.To)] = true
 		e.Path = mv.To // its MetaKey with the rest of p.Keep, after the downloads
 		if err := save(); err != nil {
 			return err
@@ -735,7 +741,9 @@ func owned(root, path string) error {
 	return nil
 }
 
-func (r *Runner) rename(from, to string) error {
+// rename moves a song's file from from to to. A file already at to is replaced only when orphan
+// (no song records it: one the app forgot in a crash window), else the move fails.
+func (r *Runner) rename(from, to string, orphan bool) error {
 	for _, p := range []string{from, to} {
 		if err := owned(r.root, p); err != nil {
 			return err
@@ -751,8 +759,10 @@ func (r *Runner) rename(from, to string) error {
 		return nil
 	case terr == nil && errors.Is(ferr, os.ErrNotExist):
 		return nil // moved already, and cut before the manifest was saved (M13)
-	case terr == nil:
+	case terr == nil && !orphan:
 		return errors.New("rename target exists: " + to)
+	case terr == nil:
+		r.logf("sync: replacing %s, which no song records", to)
 	}
 	if err := os.MkdirAll(filepath.Dir(to), 0o755); err != nil {
 		return err

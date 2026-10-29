@@ -1214,3 +1214,27 @@ func TestImportedTrustsOnlySentAdds(t *testing.T) {
 		t.Fatalf("%+v %+v", m.Imported, m.Playlists)
 	}
 }
+
+// A rename onto a file no song records (one the app forgot in a crash window) replaces it instead
+// of failing on every sync; one that another song records is never touched (review G1, Minor 3).
+func TestRenameReplacesOrphan(t *testing.T) {
+	_, r, root := setup(t)
+	from, to := root+"/Subsonic/A/x/01 - r.flac", root+"/Subsonic/A/y/01 - r.flac"
+	other, taken := root+"/Subsonic/A/z/01 - o.flac", root+"/Subsonic/A/z/01 - p.flac"
+	put(t, from, "r")
+	put(t, to, "orphan")
+	put(t, other, "o")
+	put(t, taken, "p")
+	(&library.Manifest{Songs: map[string]*library.Entry{"r": {ID: "r", Path: from, Quality: "original"},
+		"o": {ID: "o", Path: other, Quality: "original"}, "p": {ID: "p", Path: taken, Quality: "original"}}}).Save(root, root+"/.subsonic/manifest.json")
+	r.Start(plan.Plan{Rename: []plan.Move{{From: from, To: to, ID: "r"}, {From: other, To: taken, ID: "o"}}})
+	if s := wait(t, r); s.State != "done" || s.Failed != 1 || s.Failures[0].SongID != "o" {
+		t.Fatalf("%+v", s)
+	}
+	if b, _ := os.ReadFile(to); string(b) != "r" {
+		t.Errorf("to holds %q", b)
+	}
+	if b, _ := os.ReadFile(taken); string(b) != "p" {
+		t.Errorf("a recorded song's file was replaced: %q", b)
+	}
+}
