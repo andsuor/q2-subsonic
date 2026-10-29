@@ -151,7 +151,7 @@ func (d *daemon) browse(ctx context.Context, cl *subsonic.Client, op, cursor str
 			rows = append(rows, v.item(selection.KindPlaylist, p.ID, p.Name, plural(p.SongCount, "song"), p.SongCount))
 		}
 		if len(rows) == 0 {
-			rows = []q2spot.Row{{Kind: "info", Title: "No playlists", Subtitle: "Playlists must be public in Navidrome to show here"}}
+			rows = []q2spot.Row{{Kind: "info", Title: "No playlists", Subtitle: "Playlists must be public on the server to show here"}}
 		}
 	case "artists":
 		ars, err := cl.Artists(ctx)

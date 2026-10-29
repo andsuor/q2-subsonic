@@ -43,7 +43,7 @@ func isCert(err error) bool {
 func Message(err error, host string) string {
 	var he *APIError
 	if errors.As(err, &he) && he.Code == 0 && he.HTTP != 0 && (he.HTTP < 200 || he.HTTP > 299) && errors.Is(err, ErrUnreachable) {
-		return fmt.Sprintf("Navidrome answered HTTP %d", he.HTTP)
+		return fmt.Sprintf("The server answered HTTP %d", he.HTTP)
 	}
 	switch {
 	case errors.Is(err, ErrAuth):

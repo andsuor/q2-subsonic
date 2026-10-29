@@ -169,7 +169,7 @@ func noParts(t *testing.T, root string) {
 func TestRunDownloadsAndRenames(t *testing.T) {
 	_, r, root := setup(t)
 	a, b := want(root, "a", "original"), want(root, "bb", "mp3-320")
-	old, moved := root+"/Navidrome/Old/x/01 - r.flac", root+"/Navidrome/Art/2000 - Alb/09 - r.flac"
+	old, moved := root+"/Subsonic/Old/x/01 - r.flac", root+"/Subsonic/Art/2000 - Alb/09 - r.flac"
 	os.MkdirAll(filepath.Dir(old), 0o755)
 	os.WriteFile(old, []byte("r"), 0o644)
 	m := &library.Manifest{Songs: map[string]*library.Entry{"r": {ID: "r", Path: old, Quality: "original", Size: 1}}}
@@ -190,7 +190,7 @@ func TestRunDownloadsAndRenames(t *testing.T) {
 	if _, err := os.Stat(moved); err != nil {
 		t.Fatal("not renamed")
 	}
-	if _, err := os.Stat(root + "/Navidrome/Old"); !os.IsNotExist(err) {
+	if _, err := os.Stat(root + "/Subsonic/Old"); !os.IsNotExist(err) {
 		t.Fatal("old album folder left")
 	}
 	if c, err := os.ReadFile(filepath.Dir(a.Path) + "/cover.jpg"); err != nil || string(c) != "jpeg-al-1" {
@@ -323,7 +323,7 @@ func TestRunCardGone(t *testing.T) {
 func TestDeletesAfterDownloads(t *testing.T) {
 	_, r, root := setup(t)
 	a, b := want(root, "a", "original"), want(root, "bb", "original")
-	z := &library.Entry{ID: "z", Path: root + "/Navidrome/Z/z/01 - z.flac", Quality: "original"}
+	z := &library.Entry{ID: "z", Path: root + "/Subsonic/Z/z/01 - z.flac", Quality: "original"}
 	os.MkdirAll(filepath.Dir(z.Path), 0o755)
 	os.WriteFile(z.Path, []byte("z"), 0o644)
 	os.WriteFile(filepath.Dir(z.Path)+"/cover.jpg", []byte("c"), 0o644)
@@ -346,7 +346,7 @@ func TestDeletesAfterDownloads(t *testing.T) {
 	if strings.Join(ops, ",") != "download,download,remove" {
 		t.Fatal(ops)
 	}
-	if _, err := os.Stat(root + "/Navidrome/Z"); !os.IsNotExist(err) {
+	if _, err := os.Stat(root + "/Subsonic/Z"); !os.IsNotExist(err) {
 		t.Fatal("removed song's folder left")
 	}
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
@@ -588,7 +588,7 @@ func TestUserPlaylistNotOverwritten(t *testing.T) {
 	if b, _ := os.ReadFile(user); string(b) != "mine" {
 		t.Fatalf("user file changed: %q", b)
 	}
-	want := root + "/_explaylist_data/Andreas (Navidrome).m3u"
+	want := root + "/_explaylist_data/Andreas (Subsonic).m3u"
 	if _, err := os.Stat(want); err != nil || m.Playlists["Andreas"] != want {
 		t.Fatal(err, m.Playlists)
 	}
@@ -654,14 +654,14 @@ func TestPlaylistWriteFailureKeepsRecords(t *testing.T) {
 	if s := wait(t, r); s.State != "done" {
 		t.Fatalf("%+v", s)
 	}
-	if m, _ := filepath.Glob(root + "/_explaylist_data/*(Navidrome*"); len(m) != 0 {
+	if m, _ := filepath.Glob(root + "/_explaylist_data/*(Subsonic*"); len(m) != 0 {
 		t.Fatal("duplicates:", m)
 	}
 }
 
 func TestBadRecordedPlaylistIgnored(t *testing.T) {
 	root, m := syncPlaylists(t, func(root string) {
-		(&library.Manifest{Playlists: map[string]string{"X": "/etc/passwd", "Y": root + "/Navidrome/y.m3u"}}).Save(root, root+"/.subsonic/manifest.json")
+		(&library.Manifest{Playlists: map[string]string{"X": "/etc/passwd", "Y": root + "/Subsonic/y.m3u"}}).Save(root, root+"/.subsonic/manifest.json")
 	}, "X")
 	if m.Playlists["X"] != library.PlaylistFile(root, "X") || len(m.Playlists) != 1 {
 		t.Fatal(m.Playlists)

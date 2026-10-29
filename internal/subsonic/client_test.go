@@ -239,7 +239,7 @@ func TestHTTP502NotSubsonic(t *testing.T) {
 	if errors.Is(err, ErrNotSubsonic) || !errors.Is(err, ErrUnreachable) || !errors.As(err, &ae) || ae.HTTP != 502 {
 		t.Fatalf("got %v", err)
 	}
-	if m := Message(err, "h"); m != "Navidrome answered HTTP 502" {
+	if m := Message(err, "h"); m != "The server answered HTTP 502" {
 		t.Fatal(m)
 	}
 }

@@ -1,6 +1,6 @@
 // q2-subsonic is a Q2 Pod card app (contrib/shanlingq2/README): a Navidrome (Subsonic API) client for
 // the Shanling Q2 that syncs and streams. It runs from the card's .subsonic folder (copied to /tmp
-// first, so the card is never kept busy) and draws the Q2's Navidrome page over Q2SPOT/1.
+// first, so the card is never kept busy) and draws the Q2's Subsonic page over Q2SPOT/1.
 package main
 
 import (

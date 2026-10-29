@@ -28,6 +28,10 @@ const planMargin = 16 << 20 // plan.Compute's headroom on top of what a sync nee
 // syncPage is the Sync screen: the running sync, the one just finished, or the preview, computed
 // in the background while the page refreshes.
 func (d *daemon) syncPage(cl *subsonic.Client) q2spot.Reply {
+	if d.migrateErr != nil { // the old manifest and both folders are intact; a sync now would copy everything again
+		return q2spot.Reply{Rows: []q2spot.Row{info("Couldn't move Navidrome/ to Subsonic/"),
+			list("details", "Details", "", detailsCtx("migrate", 0, 0, time.Now(), ""))}}
+	}
 	snap := d.runner.Snapshot()
 	d.mu.Lock()
 	showDone := d.showDone
@@ -44,7 +48,7 @@ func (d *daemon) syncPage(cl *subsonic.Client) q2spot.Reply {
 		}
 		return q2spot.Reply{Rows: []q2spot.Row{info(msg), act("retry", "Retry", ""), act("check", "Check Again", "")}}
 	}
-	checking := q2spot.Reply{Message: "refresh", Rows: []q2spot.Row{info("Checking Navidrome…")}}
+	checking := q2spot.Reply{Message: "refresh", Rows: []q2spot.Row{info("Checking server…")}}
 	d.mu.Lock()
 	p := d.preview
 	if p == nil || p.gen != d.gen || p.done && time.Since(p.at) > previewTTL {
@@ -135,7 +139,7 @@ func (d *daemon) computePreview(cl *subsonic.Client, p *preview) {
 }
 
 func previewRows(p *plan.Plan) q2spot.Reply {
-	if len(p.Add)+len(p.Replace)+len(p.Rename)+len(p.Remove) == 0 {
+	if len(p.Add)+len(p.Replace)+len(p.Rename)+len(p.Remove) == 0 && !p.PlaylistsStale {
 		return q2spot.Reply{Rows: []q2spot.Row{info("Everything is up to date")}}
 	}
 	var rows []q2spot.Row
@@ -158,6 +162,9 @@ func previewRows(p *plan.Plan) q2spot.Reply {
 	}
 	if len(p.Rename) > 0 {
 		rows = append(rows, info("Rename "+plural(len(p.Rename), "song")))
+	}
+	if p.PlaylistsStale {
+		rows = append(rows, info("Update playlists"))
 	}
 	rows = append(rows, info("Needs "+size(max(p.NeedBytes, 0))+" · "+size(p.FreeBytes)+" free"))
 	if p.Fits {
@@ -248,7 +255,7 @@ func (d *daemon) removed(cursor string) q2spot.Reply {
 	var rows []q2spot.Row
 	if ready {
 		for _, e := range p.plan.Remove {
-			rows = append(rows, info(strings.TrimPrefix(e.Path, filepath.Join(d.card, "Navidrome")+"/")))
+			rows = append(rows, info(strings.TrimPrefix(e.Path, filepath.Join(d.card, "Subsonic")+"/")))
 		}
 	}
 	if len(rows) == 0 {

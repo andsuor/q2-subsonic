@@ -402,6 +402,7 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 			}
 		}
 	}
+	m.PlaylistsStale = false
 	legacy, _ := filepath.Glob(filepath.Join(r.root, "_explaylist_data", "Navidrome - *.m3u"))
 	for _, f := range legacy {
 		library.Remove(r.root, f)
@@ -424,7 +425,7 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 	return save()
 }
 
-// freePlaylistFile picks <name>.m3u, else <name> (Navidrome).m3u, else <name> (Navidrome 2).m3u...:
+// freePlaylistFile picks <name>.m3u, else <name> (Subsonic).m3u, else <name> (Subsonic 2).m3u...:
 // the first not already on the card (a user's own playlist) nor claimed by another playlist.
 func (r *Runner) freePlaylistFile(m *library.Manifest, name string, used map[string]bool) string {
 	base := strings.TrimSuffix(library.PlaylistFile(r.root, name), ".m3u")
@@ -441,8 +442,8 @@ func (r *Runner) freePlaylistFile(m *library.Manifest, name string, used map[str
 	}
 	f := base + ".m3u"
 	for n := 1; taken(f); n++ {
-		if f = base + " (Navidrome).m3u"; n > 1 {
-			f = fmt.Sprintf("%s (Navidrome %d).m3u", base, n)
+		if f = base + " (Subsonic).m3u"; n > 1 {
+			f = fmt.Sprintf("%s (Subsonic %d).m3u", base, n)
 		}
 	}
 	return f

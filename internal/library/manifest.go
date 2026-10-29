@@ -22,6 +22,9 @@ type Entry struct {
 type Manifest struct {
 	Songs     map[string]*Entry
 	Playlists map[string]string
+	// PlaylistsStale: the recorded .m3u files hold old paths (after a folder migration), so the next
+	// sync rewrites every one even when no song changes. The syncer clears it.
+	PlaylistsStale bool `json:",omitempty"`
 }
 
 // LoadManifest reads path; a missing file is an empty manifest.

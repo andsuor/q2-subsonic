@@ -27,6 +27,7 @@ type Plan struct {
 	Rename               []Move
 	Remove               []*library.Entry
 	Playlists            map[string][]string
+	PlaylistsStale       bool // recorded .m3u files hold old paths: rewrite them all, even with no song change
 	NeedBytes, FreeBytes int64
 	Fits                 bool
 }
@@ -140,6 +141,7 @@ func Compute(sel selection.Set, resolved map[string][]subsonic.Song, playlistNam
 	}
 
 	p.Playlists = map[string][]string{}
+	p.PlaylistsStale = m.PlaylistsStale && len(m.Playlists) > 0
 	for _, it := range sel.Items {
 		if it.Kind != selection.KindPlaylist {
 			continue

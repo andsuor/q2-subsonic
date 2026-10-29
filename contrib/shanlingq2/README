@@ -2,14 +2,14 @@ Shanling Q2 tools
 =================
 
 q2-subsonic runs from the card's .subsonic folder as a Q2 Pod card app (q2-pod's patch/addon.c): a
-Navidrome (Subsonic API) client that syncs and streams. Built from q2-filebrowser's scripts.
+Subsonic (OpenSubsonic API) client that syncs and streams. Built from q2-filebrowser's scripts.
 
   build.sh     static Go for the Q2 and the card files, in target/shanlingq2/.subsonic, zipped as
                target/shanlingq2/q2-subsonic-vX.Y-SHA.zip (unzip that at the card's root)
   package.py   checks the binary (static, MIPS32 little-endian, soft-float ABI), sets the nan2008
                ELF flag the Q2's kernel requires and Go doesn't, and writes the ZIP
   launcher.sh  installed as .subsonic/run: q2-subsonic copied to /tmp and run there in a restart loop
-  q2app        installed as .subsonic/q2app: the card app manifest (name=Navidrome, qr=0)
+  q2app        installed as .subsonic/q2app: the card app manifest (name=Subsonic, qr=0)
   icon.png, icon-40.png
                Streaming's row icon, 52 px (Legacy) and 40 px (iPod); placeholders
   test_launcher.py

@@ -144,6 +144,7 @@ type daemon struct {
 	man                *library.Manifest
 	manAt              time.Time
 	manSize            int64
+	migrateErr         error // the one-time Navidrome/ -> Subsonic/ move failed; Sync shows it
 }
 
 func newDaemon(dir, card, tmp string) *daemon {
@@ -170,6 +171,9 @@ func newDaemon(dir, card, tmp string) *daemon {
 	d.stream.log = lg
 	d.stream.quality = func() string { return d.settings().stream() }
 	d.state.Write(nil)
+	if err := library.Migrate(card, lg.Printf); err != nil {
+		d.migrateErr = err
+	}
 	return d
 }
 
@@ -181,7 +185,7 @@ func freeBytes(path string) int64 {
 	return int64(st.Bavail) * int64(st.Bsize)
 }
 
-// client is the signed-in Navidrome client, loaded from the card's credentials; nil when signed out.
+// client is the signed-in server client, loaded from the card's credentials; nil when signed out.
 func (d *daemon) client() *subsonic.Client {
 	d.mu.Lock()
 	defer d.mu.Unlock()

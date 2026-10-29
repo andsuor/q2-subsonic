@@ -1,5 +1,5 @@
 #!/bin/sh
-# Installed as /mnt/mmc/.subsonic/run. Q2 Pod starts it from Streaming's Navidrome row (a card app,
+# Installed as /mnt/mmc/.subsonic/run. Q2 Pod starts it from Streaming's Subsonic row (a card app,
 # q2-pod's patch/addon.c). It runs from /tmp, never the card: the app and this launcher are
 # copied there first and the card's copy of this script is left at once (exec), so nothing keeps
 # the card busy and USB storage can always take it. The loop restarts the app after a failure,

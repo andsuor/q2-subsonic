@@ -54,7 +54,7 @@ func artistOf(s subsonic.Song) string {
 	return "Unknown Artist"
 }
 
-// SongPath is <root>/Navidrome/<AlbumArtist>/<Year - >Album/<Disc->Track - Title.ext. It is pure;
+// SongPath is <root>/Subsonic/<AlbumArtist>/<Year - >Album/<Disc->Track - Title.ext. It is pure;
 // collisions are resolved by the caller with WithID.
 func SongPath(root string, s subsonic.Song, quality string, multiDisc bool) string {
 	artist := artistOf(s)
@@ -69,7 +69,7 @@ func SongPath(root string, s subsonic.Song, quality string, multiDisc bool) stri
 	if multiDisc {
 		file = fmt.Sprintf("%d-%s", s.Disc, file)
 	}
-	return filepath.Join(root, "Navidrome", SafeName(artist), SafeName(album), SafeName(file)+"."+ext(s, quality))
+	return filepath.Join(root, "Subsonic", SafeName(artist), SafeName(album), SafeName(file)+"."+ext(s, quality))
 }
 
 // WithID inserts " [<id>]" before the extension, cutting the stem so the name stays <=120 bytes.

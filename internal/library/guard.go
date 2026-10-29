@@ -29,7 +29,7 @@ func resolve(p string) string {
 	return filepath.Join(append([]string{dir}, append(rest, base)...)...)
 }
 
-// Owned reports whether path is strictly inside what the app may touch under root: Navidrome/,
+// Owned reports whether path is strictly inside what the app may touch under root: Subsonic/,
 // .subsonic/, and in _explaylist_data/ only the .m3u files recorded in m.Playlists (m may be nil)
 // plus legacy "Navidrome - *.m3u" files, which exist only to be migrated away.
 func Owned(root, path string, m *Manifest) bool {
@@ -39,7 +39,7 @@ func Owned(root, path string, m *Manifest) bool {
 	}
 	parts := strings.Split(rel, string(filepath.Separator))
 	switch parts[0] {
-	case "Navidrome", ".subsonic":
+	case "Subsonic", ".subsonic":
 		return len(parts) > 1
 	case "_explaylist_data":
 		if len(parts) != 2 || !strings.HasSuffix(parts[1], ".m3u") {
@@ -77,7 +77,7 @@ func checkOwned(root, path string, m *Manifest) error {
 }
 
 // Remove is the only way the app deletes: it refuses anything not Owned, treats a missing file
-// as done, and prunes folders left empty under Navidrome/ (never Navidrome/ itself).
+// as done, and prunes folders left empty under Subsonic/ (never Subsonic/ itself).
 func Remove(root, path string) error { return remove(root, path, nil) }
 
 // Remove is the package Remove that also accepts the playlist files recorded in m.
@@ -90,7 +90,7 @@ func remove(root, path string, m *Manifest) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	top := filepath.Join(resolve(root+"/."), "Navidrome")
+	top := filepath.Join(resolve(root+"/."), "Subsonic")
 	for d := filepath.Dir(resolve(path)); strings.HasPrefix(d, top+string(filepath.Separator)); d = filepath.Dir(d) {
 		if os.Remove(d) != nil { // fails while non-empty
 			break

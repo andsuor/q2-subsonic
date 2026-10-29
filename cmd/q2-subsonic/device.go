@@ -372,5 +372,5 @@ func (d *daemon) account() q2spot.Reply {
 	server, user := d.server, d.user
 	d.mu.Unlock()
 	return q2spot.Reply{Rows: []q2spot.Row{info(server), info(user), info("Password is stored on this card"),
-		info("Tip: use a Navidrome user just for the Q2"), act("signout", "Sign Out", "")}}
+		info("Tip: use a server user just for the Q2"), act("signout", "Sign Out", "")}}
 }

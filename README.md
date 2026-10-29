@@ -1,10 +1,10 @@
 # q2-subsonic
 
-A Navidrome client for the **Shanling Q2** running [Q2 Pod](https://github.com/DiamondBond/q2-pod). Pick playlists, albums, artists and songs on the Q2, and it syncs them to the card over Wi-Fi, or streams a song straight from your server. It needs a Q2 Pod build that supports card apps, and a Navidrome server reachable over HTTPS.
+A Subsonic client for the **Shanling Q2** running [Q2 Pod](https://github.com/DiamondBond/q2-pod). Pick playlists, albums, artists and songs on the Q2, and it syncs them to the card over Wi-Fi, or streams a song straight from your server. It needs a Q2 Pod build that supports card apps, and a Subsonic or OpenSubsonic server (Navidrome, for one) reachable over HTTPS.
 
 ## Install
 
-**Over Wi-Fi:** on the Q2, open **System settings → Apps** and press **Navidrome** (once it is listed there).
+**Over Wi-Fi:** on the Q2, open **System settings → Apps** and press **Subsonic** (once it is listed there).
 
 **By hand:**
 
@@ -13,11 +13,11 @@ A Navidrome client for the **Shanling Q2** running [Q2 Pod](https://github.com/D
 3. Unzip the file to the card's root, so the card has `.subsonic/q2-subsonic`, `.subsonic/run`, `.subsonic/q2app` and its icons `.subsonic/icon.png` and `.subsonic/icon-40.png`. The leading dot hides the folder on macOS (Cmd+Shift+. in Finder shows it) and Linux.
 4. Eject the card, put it back in the Q2 and power it on.
 
-**Navidrome** then has a row in **Streaming**.
+**Subsonic** then has a row in **Streaming**.
 
 ## Sign in
 
-1. Open **Streaming → Navidrome**. While signed out, the first row is **Sign In from Your Phone**.
+1. Open **Streaming → Subsonic**. While signed out, the first row is **Sign In from Your Phone**.
 2. Press it. The Q2 shows a QR code and a PIN. Scan the code with your phone on the same Wi-Fi (or open the address and type the PIN) and fill in the server address, user name and password.
 3. The Q2 checks the login and the list opens.
 
@@ -26,7 +26,7 @@ Things to know:
 - The sign-in page only runs while you are signed out, and for at most 10 minutes per start. Leave the page and it stops.
 - The password crosses your local Wi-Fi unencrypted, once, from the phone to the Q2. Do it on a network you trust.
 - The server must be `https://`; `http://` is refused. Certificates are verified.
-- The password is stored on the card, in `.subsonic/credentials`. exFAT has no file permissions, so anyone with the card can read it. **Make a Navidrome user just for the Q2, not an admin.** If the card is lost, delete that user in Navidrome and the card is worthless.
+- The password is stored on the card, in `.subsonic/credentials`. exFAT has no file permissions, so anyone with the card can read it. **Make a server user just for the Q2, not an admin.** If the card is lost, delete that user on the server and the card is worthless.
 - **Settings → Account → Sign Out** removes the stored login. Your music stays on the card.
 
 ## Use
@@ -43,13 +43,13 @@ The list has **Sync**, **On This Q2**, **Playlists**, **Albums**, **Artists**, *
 
 ## Sync rules
 
-- An artist includes albums added to Navidrome later. A playlist follows Navidrome, order and duplicates included. A song reached through several items is stored once.
-- Songs land at `Navidrome/<Album Artist>/<Year> - <Album>/<Disc>-<Track> - <Title>.<ext>`, and each playlist as `_explaylist_data/Navidrome - <name>.m3u`.
+- An artist includes albums added to the server later. A playlist follows the server, order and duplicates included. A song reached through several items is stored once.
+- Songs land at `Subsonic/<Album Artist>/<Year> - <Album>/<Disc>-<Track> - <Title>.<ext>`, and each playlist as `_explaylist_data/<name>.m3u`.
 - Deletions happen only after the downloads have finished, and only for what the sync put there.
 
 ## What it touches
 
-Only `Navidrome/`, `_explaylist_data/Navidrome - *.m3u` and `.subsonic/`. Nothing else on the card is read or changed.
+Only `Subsonic/`, the playlist `.m3u` files it wrote and `.subsonic/`. An older `Navidrome/` folder is moved to `Subsonic/` once, at start-up. Nothing else on the card is read or changed.
 
 ## Library and firmware extensions
 
@@ -69,7 +69,7 @@ A failure shows a short message on screen. Open its **Details** row for the oper
 
 **System settings → Apps** shows **Update** when a newer release is out. By hand, replace the five files in `.subsonic` listed above. Your login, settings and selection are kept.
 
-To remove it, press **Navidrome** twice in **System settings → Apps**, or delete `.subsonic`. Synced music stays in `Navidrome/`; delete that folder to free the space.
+To remove it, press **Subsonic** twice in **System settings → Apps**, or delete `.subsonic`. Synced music stays in `Subsonic/`; delete that folder to free the space.
 
 ## Build
 

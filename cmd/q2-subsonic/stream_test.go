@@ -118,7 +118,7 @@ func TestStreamQueueWrittenOnce(t *testing.T) {
 
 func TestStreamQueueUsesSyncedPaths(t *testing.T) {
 	e := newEnv(t, fw.Caps{Playlist: true})
-	synced := e.root + "/Navidrome/A/b.flac"
+	synced := e.root + "/Subsonic/A/b.flac"
 	e.man.Songs["s1"] = &library.Entry{ID: "s1", Path: synced}
 	e.s.start(songs(3, "flac"), 0)
 	until(t, "play", func() bool { return exists(e.play) })
@@ -166,7 +166,7 @@ func TestStreamTrimsPlayed(t *testing.T) {
 	e := newEnv(t, fw.Caps{})
 	e.s.start(songs(8, "flac"), 0)
 	until(t, "0-2", func() bool { return exists(e.stream(2, "flac")) })
-	synced := e.root + "/Navidrome/keep.flac"
+	synced := e.root + "/Subsonic/keep.flac"
 	os.MkdirAll(filepath.Dir(synced), 0o755)
 	os.WriteFile(synced, []byte("x"), 0o644)
 	os.WriteFile(e.playing, []byte(e.stream(5, "flac")), 0o644)

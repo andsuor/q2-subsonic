@@ -41,7 +41,7 @@ var song = subsonic.Song{ID: "1", Title: "Intro", Album: "Alb", AlbumArtist: "Ar
 
 func TestSongPathSingleDisc(t *testing.T) {
 	got := SongPath("/mnt/mmc", song, "original", false)
-	if want := "/mnt/mmc/Navidrome/Art/1999 - Alb/03 - Intro.flac"; got != want {
+	if want := "/mnt/mmc/Subsonic/Art/1999 - Alb/03 - Intro.flac"; got != want {
 		t.Fatal(got)
 	}
 	if got := SongPath("/mnt/mmc", song, "mp3-320", false); !strings.HasSuffix(got, "03 - Intro.mp3") {
@@ -52,7 +52,7 @@ func TestSongPathSingleDisc(t *testing.T) {
 func TestSongPathMultiDisc(t *testing.T) {
 	s := song
 	s.Disc = 2
-	if got, want := SongPath("/r", s, "original", true), "/r/Navidrome/Art/1999 - Alb/2-03 - Intro.flac"; got != want {
+	if got, want := SongPath("/r", s, "original", true), "/r/Subsonic/Art/1999 - Alb/2-03 - Intro.flac"; got != want {
 		t.Fatal(got)
 	}
 }
@@ -60,7 +60,7 @@ func TestSongPathMultiDisc(t *testing.T) {
 func TestSongPathNoYear(t *testing.T) {
 	s := song
 	s.Year = 0
-	if got, want := SongPath("/r", s, "original", false), "/r/Navidrome/Art/Alb/03 - Intro.flac"; got != want {
+	if got, want := SongPath("/r", s, "original", false), "/r/Subsonic/Art/Alb/03 - Intro.flac"; got != want {
 		t.Fatal(got)
 	}
 }
@@ -99,9 +99,9 @@ func TestRemoveRefusesOutside(t *testing.T) {
 	root := t.TempDir()
 	for _, p := range []string{
 		root + "/Music/x.flac",
-		root + "/Navidrome/../Music/x.flac",
+		root + "/Subsonic/../Music/x.flac",
 		root + "/_explaylist_data/Other.m3u",
-		root + "/Navidrome",
+		root + "/Subsonic",
 	} {
 		mk(t, filepath.Clean(p))
 		if err := Remove(root, p); err == nil {
@@ -115,11 +115,11 @@ func TestRemoveRefusesOutside(t *testing.T) {
 	root = t.TempDir()
 	out := t.TempDir()
 	mk(t, out+"/f.flac")
-	os.MkdirAll(root+"/Navidrome", 0o755)
-	if err := os.Symlink(out, root+"/Navidrome/link"); err != nil {
+	os.MkdirAll(root+"/Subsonic", 0o755)
+	if err := os.Symlink(out, root+"/Subsonic/link"); err != nil {
 		t.Fatal(err)
 	}
-	if err := Remove(root, root+"/Navidrome/link/f.flac"); err == nil {
+	if err := Remove(root, root+"/Subsonic/link/f.flac"); err == nil {
 		t.Fatal("symlink escape allowed")
 	}
 	if _, err := os.Stat(out + "/f.flac"); err != nil {
@@ -135,7 +135,7 @@ func TestOwnedOutsideRoot(t *testing.T) {
 
 func TestOwnedAllows(t *testing.T) {
 	root := t.TempDir()
-	for _, p := range []string{root + "/Navidrome/A/B/1.mp3", root + "/_explaylist_data/Navidrome - X.m3u", root + "/.subsonic/log.txt"} {
+	for _, p := range []string{root + "/Subsonic/A/B/1.mp3", root + "/_explaylist_data/Navidrome - X.m3u", root + "/.subsonic/log.txt"} {
 		if !Owned(root, p, nil) {
 			t.Fatal(p)
 		}
@@ -144,7 +144,7 @@ func TestOwnedAllows(t *testing.T) {
 
 func TestRemovePrunesEmptyAlbum(t *testing.T) {
 	root := t.TempDir()
-	a, b := root+"/Navidrome/Art/1999 - Alb/01 - a.flac", root+"/Navidrome/Art/1999 - Alb/02 - b.flac"
+	a, b := root+"/Subsonic/Art/1999 - Alb/01 - a.flac", root+"/Subsonic/Art/1999 - Alb/02 - b.flac"
 	mk(t, a)
 	mk(t, b)
 	if err := Remove(root, a); err != nil {
@@ -156,10 +156,10 @@ func TestRemovePrunesEmptyAlbum(t *testing.T) {
 	if err := Remove(root, b); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(root + "/Navidrome/Art"); !os.IsNotExist(err) {
+	if _, err := os.Stat(root + "/Subsonic/Art"); !os.IsNotExist(err) {
 		t.Fatal("empty folders left")
 	}
-	if _, err := os.Stat(root + "/Navidrome"); err != nil {
+	if _, err := os.Stat(root + "/Subsonic"); err != nil {
 		t.Fatal("Navidrome itself removed")
 	}
 }
@@ -201,13 +201,13 @@ func TestRemoveSymlinkDotDotRefused(t *testing.T) {
 	root, out := t.TempDir(), t.TempDir()
 	mk(t, filepath.Join(filepath.Dir(out), "f"))
 	defer os.Remove(filepath.Join(filepath.Dir(out), "f"))
-	os.MkdirAll(root+"/Navidrome", 0o755)
-	os.Symlink(out, root+"/Navidrome/link")
-	mk(t, root+"/Navidrome/f")
-	if err := Remove(root, root+"/Navidrome/link/../f"); err == nil {
+	os.MkdirAll(root+"/Subsonic", 0o755)
+	os.Symlink(out, root+"/Subsonic/link")
+	mk(t, root+"/Subsonic/f")
+	if err := Remove(root, root+"/Subsonic/link/../f"); err == nil {
 		t.Fatal("allowed")
 	}
-	for _, p := range []string{filepath.Join(filepath.Dir(out), "f"), root + "/Navidrome/f"} {
+	for _, p := range []string{filepath.Join(filepath.Dir(out), "f"), root + "/Subsonic/f"} {
 		if _, err := os.Stat(p); err != nil {
 			t.Fatal(p, "gone")
 		}

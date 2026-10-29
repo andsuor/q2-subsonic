@@ -158,7 +158,13 @@ type tdaemon struct {
 
 func newTestDaemon(t *testing.T, n *nav, caps string, signedIn bool) *tdaemon {
 	t.Helper()
-	card, tmp := t.TempDir(), t.TempDir()
+	return newTestDaemonOn(t, t.TempDir(), n, caps, signedIn)
+}
+
+// newTestDaemonOn starts the daemon on an existing card folder.
+func newTestDaemonOn(t *testing.T, card string, n *nav, caps string, signedIn bool) *tdaemon {
+	t.Helper()
+	tmp := t.TempDir()
 	if caps != "" {
 		os.WriteFile(filepath.Join(tmp, "q2-addon.caps"), []byte(caps+"\n"), 0o644)
 	}
@@ -283,7 +289,7 @@ func TestStatusSubtitles(t *testing.T) {
 	sel.Save(filepath.Join(d.dir, "selection.json"))
 	m := &library.Manifest{Songs: map[string]*library.Entry{}}
 	add := func(id, key string) {
-		m.Songs[id] = &library.Entry{ID: id, Path: filepath.Join(d.card, "Navidrome", id+".flac"), Size: 1000, Items: []string{key}}
+		m.Songs[id] = &library.Entry{ID: id, Path: filepath.Join(d.card, "Subsonic", id+".flac"), Size: 1000, Items: []string{key}}
 	}
 	for j := 0; j < 3; j++ {
 		add(fmt.Sprintf("al0.%d", j), "album:al0")
@@ -330,7 +336,7 @@ func TestSyncPreviewRefreshThenRows(t *testing.T) {
 	d := newTestDaemon(t, &nav{albums: 2, songsPer: 2}, "", true)
 	d.do("toggle", "album:al0")
 	r := d.do("sync")
-	if r.Message != "refresh" || len(r.Rows) == 0 || r.Rows[0].Title != "Checking Navidrome…" {
+	if r.Message != "refresh" || len(r.Rows) == 0 || r.Rows[0].Title != "Checking server…" {
 		t.Fatalf("first reply %q %q", r.Message, titles(r))
 	}
 	r = d.preview(t)
@@ -545,7 +551,7 @@ func TestNoSyncNowRowWhenUpToDate(t *testing.T) {
 	m := &library.Manifest{Songs: map[string]*library.Entry{}}
 	for j := 0; j < 2; j++ {
 		id := fmt.Sprintf("al0.%d", j)
-		m.Songs[id] = &library.Entry{ID: id, Path: filepath.Join(d.card, "Navidrome", id+".flac"), Size: 1, Items: []string{"album:al0"}}
+		m.Songs[id] = &library.Entry{ID: id, Path: filepath.Join(d.card, "Subsonic", id+".flac"), Size: 1, Items: []string{"album:al0"}}
 	}
 	if err := m.Save(d.card, filepath.Join(d.card, ".subsonic", "manifest.json")); err != nil {
 		t.Fatal(err)
@@ -651,7 +657,7 @@ func TestEntireLibraryIncludedVia(t *testing.T) {
 func TestEmptyStates(t *testing.T) {
 	d := newTestDaemon(t, &nav{empty: true}, "", true)
 	for _, c := range []struct{ op, arg, title, sub string }{
-		{"playlists", "", "No playlists", "Playlists must be public in Navidrome to show here"},
+		{"playlists", "", "No playlists", "Playlists must be public on the server to show here"},
 		{"albums", "", "No albums", ""},
 		{"artists", "", "No artists", ""},
 		{"search", "x", "No results", ""},
