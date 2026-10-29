@@ -16,6 +16,8 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/andsuor/q2-subsonic/internal/applog"
 )
@@ -27,7 +29,8 @@ type Client struct {
 	base *url.URL
 	hc   *http.Client
 	// Log, when set, receives one redacted line per request.
-	Log *applog.Log
+	Log  *applog.Log
+	idle time.Duration // a body Read that waits longer fails; 0 is idleAfter
 }
 
 // New refuses anything but an https server address.
@@ -41,6 +44,7 @@ func New(c Creds, hc *http.Client) (*Client, error) {
 	}
 	h := *hc
 	h.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		req.Header.Del("Referer") // Go sets it to the last URL, token and salt included
 		if req.URL.Scheme != "https" {
 			return ErrInsecure
 		}
@@ -85,10 +89,21 @@ func (c *Client) logf(format string, a ...any) {
 	}
 }
 
-// do sends one GET for u, from byte from when from > 0, and logs it redacted.
+const (
+	// maxBody caps an API answer: decoding takes about twice its size, and the Q2 has about 60 MB.
+	maxBody = 8 << 20
+	// idleAfter fails a body Read that gets no data for this long (a hung transcode or NAS).
+	idleAfter = 30 * time.Second
+)
+
+// do sends one GET for u, from byte from when from > 0, and logs it redacted. Its body fails with
+// ErrUnreachable once one Read waits longer than the idle time, so a stalled server can't hang a
+// download; time between Reads (a consumer yielding to a stream) doesn't count.
 func (c *Client) do(ctx context.Context, op, u string, from int64) (*http.Response, error) {
+	ctx, cancel := context.WithCancel(ctx)
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
+		cancel()
 		return nil, &APIError{Op: op, Msg: applog.Redact(err.Error()), kind: ErrUnreachable}
 	}
 	if from > 0 {
@@ -96,11 +111,46 @@ func (c *Client) do(ctx context.Context, op, u string, from int64) (*http.Respon
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
+		cancel()
 		c.logf("GET %s -> %v", u, err)
 		return nil, &APIError{Op: op, Msg: applog.Redact(err.Error()), kind: transportKind(err)}
 	}
 	c.logf("GET %s -> %d", u, resp.StatusCode)
+	idle := c.idle
+	if idle == 0 {
+		idle = idleAfter
+	}
+	b := &idleBody{ReadCloser: resp.Body, op: op, idle: idle, cancel: cancel}
+	b.t = time.AfterFunc(idle, func() { b.fired.Store(true); cancel() })
+	b.t.Stop()
+	resp.Body = b
 	return resp, nil
+}
+
+// idleBody is a response body whose Reads each get idle to see data; then the request is cancelled.
+type idleBody struct {
+	io.ReadCloser
+	op     string
+	idle   time.Duration
+	t      *time.Timer
+	fired  atomic.Bool
+	cancel context.CancelFunc
+}
+
+func (b *idleBody) Read(p []byte) (int, error) {
+	b.t.Reset(b.idle)
+	n, err := b.ReadCloser.Read(p)
+	b.t.Stop()
+	if err != nil && b.fired.Load() {
+		err = &APIError{Op: b.op, Msg: fmt.Sprintf("no data for %v", b.idle), kind: ErrStalled}
+	}
+	return n, err
+}
+
+func (b *idleBody) Close() error {
+	b.t.Stop()
+	b.cancel()
+	return b.ReadCloser.Close()
 }
 
 // call performs one API request and decodes the subsonic-response object into out (when not nil).
@@ -110,9 +160,20 @@ func (c *Client) call(ctx context.Context, op string, q url.Values, out any) err
 		return err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if err != nil {
+		var ae *APIError
+		if errors.As(err, &ae) {
+			return err
+		}
 		return &APIError{Op: op, HTTP: resp.StatusCode, Msg: applog.Redact(err.Error()), kind: ErrUnreachable}
+	}
+	if len(body) > maxBody {
+		what := "Answer"
+		if op == "getPlaylist" {
+			what = "Playlist"
+		}
+		return &APIError{Op: op, HTTP: resp.StatusCode, Msg: what + " too large for the Q2"}
 	}
 	return decode(op, resp.StatusCode, body, out)
 }

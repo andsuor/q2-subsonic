@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/andsuor/q2-subsonic/internal/applog"
 	"github.com/andsuor/q2-subsonic/internal/tlsroots"
@@ -343,5 +344,85 @@ func TestOriginalFallsBackToStreamRaw(t *testing.T) {
 	resp.Body.Close()
 	if string(b) != "AUDIO" || got.Get("id") != "s1" || got.Get("format") != "raw" || got.Has("maxBitRate") || rng != "bytes=100-" {
 		t.Fatalf("body %q query %v range %q", b, got, rng)
+	}
+}
+
+// M5: an answer past 8 MiB is refused with clear words instead of being decoded (about 3x in RAM).
+func TestResponseCap(t *testing.T) {
+	big := `{"subsonic-response":{"status":"ok","playlist":{"name":"` + strings.Repeat("x", 9<<20) + `"}}}`
+	_, _, err := serveJSON(t, big).Playlist(context.Background(), "p1")
+	if m := Message(err, "h"); m != "Playlist too large for the Q2" {
+		t.Fatalf("%q (%v)", m, err)
+	}
+}
+
+// M2: a redirect to another host doesn't carry the token and salt along as Referer.
+func TestRedirectDropsReferer(t *testing.T) {
+	ref := "unset"
+	dst := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ref = r.Header.Get("Referer")
+		w.Write([]byte(`{"subsonic-response":{"status":"ok"}}`))
+	}))
+	defer dst.Close()
+	src := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, dst.URL+r.URL.RequestURI(), http.StatusFound)
+	}))
+	defer src.Close()
+	c, _ := New(Creds{Server: src.URL, User: "u", Password: "pw"}, src.Client())
+	if err := c.Ping(context.Background()); err != nil || ref != "" {
+		t.Fatalf("err %v, Referer %q", err, ref)
+	}
+}
+
+// M9: a body that stops arriving fails after the idle time, so a stalled server can't hang a sync or
+// hold the network slot; time the reader spends away (the syncer yielding to a stream) doesn't count.
+func TestStalledBodyFails(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "audio/flac")
+		w.Write([]byte("one"))
+		w.(http.Flusher).Flush()
+		time.Sleep(20 * time.Millisecond)
+		w.Write([]byte("two"))
+		w.(http.Flusher).Flush()
+		if r.URL.Query().Get("id") == "stall" {
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+	c, _ := New(Creds{Server: srv.URL, User: "u", Password: "pw"}, srv.Client())
+	c.idle = 200 * time.Millisecond
+	ctx := context.Background()
+
+	resp, err := c.Get(ctx, srv.URL+"/rest/download?id=slow-reader", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 3)
+	io.ReadFull(resp.Body, buf)
+	time.Sleep(500 * time.Millisecond) // away longer than idle; the data is waiting
+	if rest, err := io.ReadAll(resp.Body); err != nil || string(buf)+string(rest) != "onetwo" {
+		t.Fatalf("slow reader: %q %q %v", buf, rest, err)
+	}
+	resp.Body.Close()
+
+	resp, err = c.Get(ctx, srv.URL+"/rest/download?id=stall", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	done := make(chan error, 1)
+	go func() { _, err := io.ReadAll(resp.Body); done <- err }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrUnreachable) || !strings.Contains(Message(err, "h"), "stopped sending") {
+			t.Fatalf("stall: %v (%q)", err, Message(err, "h"))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a stalled body hangs the reader")
 	}
 }

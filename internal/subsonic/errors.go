@@ -14,6 +14,8 @@ var (
 	ErrNotSubsonic = errors.New("not a Subsonic server")
 	ErrInsecure    = errors.New("https required")
 	ErrAuthMethod  = errors.New("sign-in method not accepted")
+	// ErrStalled is a body that stopped arriving; it is ErrUnreachable too.
+	ErrStalled = fmt.Errorf("server stopped sending: %w", ErrUnreachable)
 )
 
 // APIError keeps what the Details row shows. It unwraps to one of the Err values when the
@@ -77,6 +79,8 @@ func Message(err error, host string) string {
 		return "Wrong username or password"
 	case errors.Is(err, ErrCert):
 		return "Certificate not trusted"
+	case errors.Is(err, ErrStalled):
+		return "The server stopped sending"
 	case errors.Is(err, ErrNotSubsonic):
 		return "Not a Subsonic server"
 	case errors.Is(err, ErrUnreachable):
