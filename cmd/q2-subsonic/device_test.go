@@ -1031,3 +1031,62 @@ func TestLibraryAnswerTakenByTick(t *testing.T) {
 		t.Fatal("answer not taken")
 	}
 }
+
+// M1: Account shows the server without a user:password@ part.
+func TestAccountHidesServerPassword(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "", false)
+	if err := creds.Save(d.dir, subsonic.Creds{Server: "https://alice:proxySecret42@music.example/sub", User: "u", Password: "pw"}); err != nil {
+		t.Fatal(err)
+	}
+	r := d.do("account")
+	if len(r.Rows) == 0 || r.Rows[0].Title != "https://music.example/sub" {
+		t.Fatalf("rows %+v", r.Rows)
+	}
+	for _, row := range r.Rows {
+		if strings.Contains(row.Title+row.Subtitle, "proxySecret42") {
+			t.Fatalf("password on screen: %+v", row)
+		}
+	}
+}
+
+// I23: Account says what is on the card: the password, or only an API key.
+func TestAccountSaysKeyOrPassword(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "", true)
+	if _, ok := find(d.do("account"), "Password is stored on this card"); !ok {
+		t.Fatal("password sign-in")
+	}
+	d.signOut()
+	creds.Save(d.dir, subsonic.Creds{Server: "https://music.example", User: "u", APIKey: "k"})
+	r := d.do("account")
+	if _, ok := find(r, "Only an API key is stored on this card"); !ok {
+		t.Fatalf("key sign-in: %q", titles(r))
+	}
+}
+
+// I24: a failed phone sign-in shows on the root after the QR page is left (which restarts sign-in),
+// and stays until the next try.
+func TestSigninFailureShownOnRoot(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "", false)
+	d.do("menu")
+	d.signin.mu.Lock()
+	addr, key := d.signin.ln.Addr().String(), d.signin.key
+	d.signin.mu.Unlock()
+	req, _ := http.NewRequest("POST", "http://"+addr+"/api/signin",
+		strings.NewReader(`{"server":"https://127.0.0.1:1","user":"andreas","password":"x"}`))
+	req.Header.Set("X-Q2", "1")
+	req.AddCookie(&http.Cookie{Name: signinCookie, Value: key})
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	d.mu.Lock()
+	d.lastMenu = time.Now().Add(-2 * qrLeftAfter) // the QR page was open: no refresh
+	d.mu.Unlock()
+	for i := 0; i < 2; i++ {
+		r := d.do("menu")
+		if r.Rows[0].Kind != "remote" || r.Rows[0].Subtitle != "Can't reach 127.0.0.1:1" {
+			t.Fatalf("menu %d: %+v", i, r.Rows[0])
+		}
+	}
+}

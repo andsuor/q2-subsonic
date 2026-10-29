@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/md5"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -260,20 +262,18 @@ func TestSigninTimeout(t *testing.T) {
 	}
 	r.clk.add(2 * time.Second)
 	// stop() clears ln first and the state keys just after, so wait for both (generous: loaded CI).
-	keys := []string{"addr=", "pin=", "qr=", "qrsize=", "note="}
+	// M31: the QR page, if still open, says it timed out (beside the code, as it draws notes only
+	// there) rather than "Connect the Q2 to Wi-Fi"; the PIN is gone.
 	var st []byte
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		st, _ = os.ReadFile(filepath.Join(r.dir, "state"))
-		gone := !r.s.active()
-		for _, k := range keys {
-			gone = gone && !strings.Contains(string(st), k)
-		}
+		done := !r.s.active() && strings.Contains(string(st), "note=Sign-in timed out · Press Return")
 		if conn, err := net.DialTimeout("tcp", r.addr, time.Second); err == nil {
 			conn.Close()
-			gone = false
+			done = false
 		}
-		if gone || time.Now().After(deadline) {
+		if done || time.Now().After(deadline) {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -281,10 +281,9 @@ func TestSigninTimeout(t *testing.T) {
 	if r.s.active() {
 		t.Fatal("still active after 10 min")
 	}
-	for _, k := range keys {
-		if strings.Contains(string(st), k) {
-			t.Errorf("state still has %q", k)
-		}
+	if !strings.Contains(string(st), "note=Sign-in timed out · Press Return") || !strings.Contains(string(st), "addr=") ||
+		!strings.Contains(string(st), "qrsize=") || strings.Contains(string(st), "pin=") {
+		t.Errorf("state after the timeout:\n%s", st)
 	}
 	if conn, err := net.DialTimeout("tcp", r.addr, time.Second); err == nil {
 		conn.Close()
@@ -329,5 +328,144 @@ func TestSigninSetsDateURL(t *testing.T) {
 	}
 	if seen != r.nd.URL {
 		t.Fatalf("date URL before ping %q, want %q", seen, r.nd.URL)
+	}
+}
+
+// keyNavidrome lists apiKeyAuthentication: KEY belongs to "andreas", and token auth takes u/pw.
+func keyNavidrome(t *testing.T) *httptest.Server {
+	nd := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		q := r.URL.Query()
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/getOpenSubsonicExtensions"):
+			w.Write([]byte(`{"subsonic-response":{"status":"ok","openSubsonicExtensions":[{"name":"apiKeyAuthentication","versions":[1]}]}}`))
+		case q.Get("apiKey") == "KEY" && !q.Has("u"):
+			w.Write([]byte(`{"subsonic-response":{"status":"ok","tokenInfo":{"username":"andreas"}}}`))
+		case q.Has("apiKey"):
+			w.Write([]byte(`{"subsonic-response":{"status":"failed","error":{"code":44,"message":"Invalid API key"}}}`))
+		case q.Get("u") == "u" && q.Get("t") == fmt.Sprintf("%x", md5.Sum([]byte("pw"+q.Get("s")))):
+			w.Write([]byte(`{"subsonic-response":{"status":"ok"}}`))
+		default:
+			w.Write([]byte(`{"subsonic-response":{"status":"failed","error":{"code":40,"message":"Wrong username or password"}}}`))
+		}
+	}))
+	t.Cleanup(nd.Close)
+	return nd
+}
+
+func keyRig(t *testing.T, nd *httptest.Server) *rig {
+	return newRig(t, func(s *signin, _ *httptest.Server) {
+		s.newClient = func(c subsonic.Creds) (*subsonic.Client, error) { return subsonic.New(c, nd.Client()) }
+	})
+}
+
+// I23/R38: on a server offering OpenSubsonic API keys, the phone's "password" may be an API key:
+// then only the key is saved (with the server's user name). Both refused says so.
+func TestSigninAPIKeySavesOnlyKey(t *testing.T) {
+	nd := keyNavidrome(t)
+	r := keyRig(t, nd)
+	c := r.login(t)
+	if _, body := r.post(t, "/api/signin", `{"server":"`+nd.URL+`","user":"u","password":"nope"}`, true, c); !strings.Contains(body, "Wrong username, password or API key") {
+		t.Fatal(body)
+	}
+	_, body := r.post(t, "/api/signin", `{"server":"`+nd.URL+`","user":"typed","password":"KEY"}`, true, c)
+	if !strings.Contains(body, "Signed in as andreas") {
+		t.Fatal(body)
+	}
+	cr, ok := creds.Load(r.dir)
+	if b, _ := os.ReadFile(filepath.Join(r.dir, "credentials")); !ok || cr.APIKey != "KEY" || cr.Password != "" ||
+		cr.User != "andreas" || strings.Contains(string(b), "Password") {
+		t.Fatalf("saved %s", b)
+	}
+}
+
+// R38: a password still works on a server offering API keys, and is kept as before.
+func TestSigninPasswordOnKeyServer(t *testing.T) {
+	nd := keyNavidrome(t)
+	r := keyRig(t, nd)
+	_, body := r.post(t, "/api/signin", `{"server":"`+nd.URL+`","user":"u","password":"pw"}`, true, r.login(t))
+	if cr, ok := creds.Load(r.dir); !strings.Contains(body, "Signed in as u") || !ok || cr.Password != "pw" || cr.APIKey != "" {
+		t.Fatalf("%s %+v", body, cr)
+	}
+}
+
+// I24: a failed phone sign-in shows on the Q2's QR page too, with the code and PIN kept for a retry.
+func TestSigninFailureOnQRPage(t *testing.T) {
+	r := newRig(t)
+	c := r.login(t)
+	r.post(t, "/api/signin", `{"server":"`+r.nd.URL+`","user":"x","password":"bad"}`, true, c)
+	st, _ := os.ReadFile(filepath.Join(r.dir, "state"))
+	for _, k := range []string{"note=Wrong username or password", "pin=" + r.s.pin, "addr=", "qrsize="} {
+		if !strings.Contains(string(st), k) {
+			t.Errorf("state lacks %q:\n%s", k, st)
+		}
+	}
+}
+
+// M32: a submit after the Q2 restarted sign-in (new key) says what happened and what to do.
+func TestSigninRestartedCopy(t *testing.T) {
+	r := newRig(t)
+	resp, body := r.post(t, "/api/signin", `{}`, true, &http.Cookie{Name: signinCookie, Value: "an-old-key"})
+	if resp.StatusCode != 401 || !strings.Contains(body, "Sign-in was restarted on the Q2. Open Sign In from Your Phone again and scan the new code.") {
+		t.Fatalf("%d %s", resp.StatusCode, body)
+	}
+}
+
+// M3: the sign-in server caps header size and open connections, and has a read timeout, so a LAN
+// host can't pin the Q2's memory or file descriptors while it listens.
+func TestSigninServerLimits(t *testing.T) {
+	r := newRig(t)
+	if r.s.srv.ReadTimeout == 0 || r.s.srv.MaxHeaderBytes == 0 || r.s.srv.MaxHeaderBytes > 16<<10 {
+		t.Fatalf("ReadTimeout %v MaxHeaderBytes %d", r.s.srv.ReadTimeout, r.s.srv.MaxHeaderBytes)
+	}
+	req, _ := http.NewRequest("GET", r.base+"/", nil)
+	req.Header.Set("X-Big", strings.Repeat("a", 64<<10))
+	if resp, err := noRedirect().Do(req); err != nil || resp.StatusCode != http.StatusRequestHeaderFieldsTooLarge {
+		t.Fatalf("64 KiB header: %v %v", resp, err)
+	}
+	var held []net.Conn
+	defer func() {
+		for _, c := range held {
+			c.Close()
+		}
+	}()
+	for i := 0; i < signinConns; i++ {
+		c, err := net.Dial("tcp", r.addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		held = append(held, c)
+	}
+	r.s.mu.Lock()
+	conns := r.s.conns
+	r.s.mu.Unlock()
+	eventually(t, "the server to take the 16", func() bool { return len(conns) == signinConns })
+	extra, err := net.Dial("tcp", r.addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer extra.Close()
+	extra.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := extra.Read(make([]byte, 1)); err == nil || os.IsTimeout(err) {
+		t.Fatalf("connection past the cap kept open: %v", err)
+	}
+	for _, c := range held {
+		c.Close()
+	}
+	held = nil
+	eventually(t, "the server to let them go", func() bool { return len(conns) == 0 })
+	if resp, err := noRedirect().Get(r.base + "/"); err != nil || resp.StatusCode != 401 {
+		t.Fatalf("after the held ones closed: %v %v", resp, err)
+	}
+}
+
+// Review G2 Minor 1: a server address that doesn't parse is never echoed (it may hold a password),
+// neither to the phone nor to the Q2's QR page.
+func TestSigninBadAddressNotEchoed(t *testing.T) {
+	r := newRig(t)
+	_, body := r.post(t, "/api/signin", `{"server":"https://alice:my pass@host.example","user":"u","password":"pw"}`, true, r.login(t))
+	st, _ := os.ReadFile(filepath.Join(r.dir, "state"))
+	if strings.Contains(body, "my pass") || strings.Contains(string(st), "my pass") || !strings.Contains(body, "the server") {
+		t.Fatalf("phone %s\nstate %s", body, st)
 	}
 }

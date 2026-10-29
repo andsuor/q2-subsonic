@@ -2,6 +2,7 @@ package tlsroots
 
 import (
 	"crypto/x509"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -49,13 +50,13 @@ func TestNowFromDateOverVerifiedTLS(t *testing.T) {
 	defer srv.Close()
 	roots := x509.NewCertPool()
 	roots.AddCert(srv.Certificate())
-	resp, err := (&http.Client{Transport: dateTransport(roots)}).Head(srv.URL)
+	resp, err := (&http.Client{Transport: dateTransport(roots, "127.0.0.1")}).Head(srv.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
 	// a server whose cert is not in the roots is refused even though expiry is ignored
-	if _, err := (&http.Client{Transport: dateTransport(x509.NewCertPool())}).Head(srv.URL); err == nil {
+	if _, err := (&http.Client{Transport: dateTransport(x509.NewCertPool(), "127.0.0.1")}).Head(srv.URL); err == nil {
 		t.Fatal("untrusted certificate accepted")
 	}
 }
@@ -117,5 +118,76 @@ func TestNowBackoff(t *testing.T) {
 func TestPool(t *testing.T) {
 	if len(Pool().Subjects()) < 100 {
 		t.Fatal("pool too small")
+	}
+}
+
+// trustTestCert makes the Date fetch trust srv's certificate (httptest's: 127.0.0.1, ::1, example.com).
+func trustTestCert(t *testing.T, srv *httptest.Server) {
+	roots := x509.NewCertPool()
+	roots.AddCert(srv.Certificate())
+	dateRoots = func() *x509.CertPool { return roots }
+	t.Cleanup(func() { dateRoots = Pool })
+}
+
+// M6: a server given by IP address is checked against the certificate's IPs too: a certificate
+// for other names or IPs can't set the clock.
+func TestDateFetchChecksIPHost(t *testing.T) {
+	fakeClock(t)
+	ln, err := net.Listen("tcp", "127.0.0.2:0") // not in httptest's certificate
+	if err != nil {
+		t.Skip("no 127.0.0.2:", err)
+	}
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Date", "Mon, 01 Jan 2052 00:00:00 GMT")
+	}))
+	srv.Listener.Close()
+	srv.Listener = ln
+	srv.StartTLS()
+	defer srv.Close()
+	trustTestCert(t, srv)
+	SetDateURL(srv.URL)
+	if got := Now(); got.Year() != 2000 {
+		t.Fatalf("Now() = %v from a certificate without 127.0.0.2", got)
+	}
+}
+
+// M7: the Date fetch never follows a redirect (to http:// least of all); the 3xx's own Date is used.
+func TestDateFetchNoRedirect(t *testing.T) {
+	fakeClock(t)
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Date", "Mon, 01 Jan 2052 00:00:00 GMT")
+	}))
+	defer plain.Close()
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Date", "Tue, 27 Oct 2026 10:00:00 GMT")
+		http.Redirect(w, r, plain.URL, http.StatusFound)
+	}))
+	defer srv.Close()
+	trustTestCert(t, srv)
+	SetDateURL(srv.URL)
+	if got := Now(); got.Year() != 2026 {
+		t.Fatalf("Now() = %v", got)
+	}
+}
+
+// M8: while the first Date fetch runs, other callers wait for it rather than get the unset clock
+// (which fails their handshake as "Certificate not trusted").
+func TestNowWaitsForFetch(t *testing.T) {
+	fakeClock(t)
+	got := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(got)
+		time.Sleep(300 * time.Millisecond)
+		w.Header().Set("Date", "Tue, 27 Oct 2026 10:00:00 GMT")
+	}))
+	defer srv.Close()
+	SetDateURL(srv.URL)
+	go Now()
+	<-got
+	if now := Now(); now.Year() != 2026 {
+		t.Fatalf("second caller: %v", now)
+	}
+	if !Known() {
+		t.Fatal("Known() false once the Date was read")
 	}
 }

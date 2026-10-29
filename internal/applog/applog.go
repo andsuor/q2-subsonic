@@ -35,7 +35,13 @@ func (l *Log) Printf(format string, args ...any) {
 	f.Close()
 }
 
-var secret = regexp.MustCompile(`(?i)([?&](?:p|t|s|password)=)[^&\s"]*`)
+var (
+	secret   = regexp.MustCompile(`(?i)([?&](?:p|t|s|password|apikey)=)[^&\s"]*`)
+	userinfo = regexp.MustCompile(`(://[^/@\s":]*:)[^/\s"]*@`)
+)
 
-// Redact replaces the values of the query parameters p, t, s and password with ***.
-func Redact(s string) string { return secret.ReplaceAllString(s, "${1}***") }
+// Redact replaces the values of the query parameters p, t, s, password and apiKey, and the password in a
+// URL's user:password@, with ***.
+func Redact(s string) string {
+	return userinfo.ReplaceAllString(secret.ReplaceAllString(s, "${1}***"), "${1}***@")
+}

@@ -5,6 +5,8 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
+
+	"github.com/andsuor/q2-subsonic/internal/tlsroots"
 )
 
 var (
@@ -13,6 +15,11 @@ var (
 	ErrCert        = errors.New("certificate not trusted")
 	ErrNotSubsonic = errors.New("not a Subsonic server")
 	ErrInsecure    = errors.New("https required")
+	ErrAuthMethod  = errors.New("sign-in method not accepted")
+	// ErrAuthKey is a sign-in refused both as an API key and as a password; it is ErrAuth too.
+	ErrAuthKey = fmt.Errorf("wrong password or API key: %w", ErrAuth)
+	// ErrStalled is a body that stopped arriving; it is ErrUnreachable too.
+	ErrStalled = fmt.Errorf("server stopped sending: %w", ErrUnreachable)
 )
 
 // APIError keeps what the Details row shows. It unwraps to one of the Err values when the
@@ -30,6 +37,32 @@ func (e *APIError) Error() string {
 }
 func (e *APIError) Unwrap() error { return e.kind }
 
+// codeKind is the Err value a Subsonic error code unwraps to: 40 and 44 are wrong credentials,
+// 41-43 a sign-in method the server won't take for this user (an LDAP user, say).
+func codeKind(code int) error {
+	switch code {
+	case 40, 44:
+		return ErrAuth
+	case 41, 42, 43:
+		return ErrAuthMethod
+	}
+	return nil
+}
+
+// codeMsg is the copy for Subsonic error codes whose server message would mislead or blame the
+// wrong side.
+var codeMsg = map[int]string{
+	20: "The server needs a newer version of this app",
+	30: "The server's Subsonic API is too old for this app",
+	41: "This server doesn't allow token sign-in for this user",
+	42: "This server doesn't accept this sign-in method",
+	43: "This server doesn't accept this sign-in method",
+	44: "Invalid API key: create one in your server's settings",
+}
+
+// timeKnown is tlsroots.Known, injectable for tests.
+var timeKnown = tlsroots.Known
+
 // isCert reports whether err is a certificate verification failure.
 func isCert(err error) bool {
 	var ua x509.UnknownAuthorityError
@@ -42,6 +75,15 @@ func isCert(err error) bool {
 // Message maps err to the user-facing sign-in copy.
 func Message(err error, host string) string {
 	var he *APIError
+	if errors.As(err, &he) && he.Code == 50 && he.Op == "download" {
+		return "Downloads are turned off for this account on the server"
+	}
+	if errors.Is(err, ErrAuthKey) {
+		return "Wrong username, password or API key"
+	}
+	if errors.As(err, &he) && codeMsg[he.Code] != "" {
+		return codeMsg[he.Code]
+	}
 	if errors.As(err, &he) && he.Code == 0 && he.HTTP != 0 && (he.HTTP < 200 || he.HTTP > 299) && errors.Is(err, ErrUnreachable) {
 		return fmt.Sprintf("The server answered HTTP %d", he.HTTP)
 	}
@@ -50,6 +92,8 @@ func Message(err error, host string) string {
 		return "Wrong username or password"
 	case errors.Is(err, ErrCert):
 		return "Certificate not trusted"
+	case errors.Is(err, ErrStalled):
+		return "The server stopped sending"
 	case errors.Is(err, ErrNotSubsonic):
 		return "Not a Subsonic server"
 	case errors.Is(err, ErrUnreachable):

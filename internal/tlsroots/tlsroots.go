@@ -10,6 +10,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/url"
 	"sync"
 	"time"
 )
@@ -27,9 +28,11 @@ var (
 	dateURL  string
 	offset   time.Duration // server time minus system time, once learned
 	have     bool
-	fetching bool
+	fetching chan struct{} // closed when the running Date fetch ends; nil when none runs
 	lastTry  time.Time
 	nowFn    = time.Now // injectable for tests
+
+	dateRoots = Pool // injectable for tests
 
 	transports = map[time.Duration]*http.Transport{}
 )
@@ -54,38 +57,68 @@ func SetDateURL(u string) {
 func DateURL() string { mu.Lock(); defer mu.Unlock(); return dateURL }
 
 // Now is the system time when its year is 2025 or later, else the server's time (cached as an offset
-// from the system clock). Until the server's time is known, and for 30 s after a failed fetch, it
-// is the system time, never a wait. One fetch runs at a time.
+// from the system clock). One fetch runs at a time (at most 5 s), and other callers wait for it. For
+// 30 s after a failed fetch it is the system time, never a wait.
 func Now() time.Time {
 	sys := nowFn()
 	if sys.Year() >= 2025 {
 		return sys
 	}
 	mu.Lock()
-	if have || dateURL == "" || fetching || (!lastTry.IsZero() && sys.Sub(lastTry) < retryAfter) {
+	if wait := fetching; wait != nil && !have {
+		mu.Unlock()
+		select {
+		case <-wait:
+		case <-time.After(6 * time.Second):
+		}
+		mu.Lock()
+		off := offset
+		mu.Unlock()
+		return nowFn().Add(off)
+	}
+	if have || dateURL == "" || (!lastTry.IsZero() && sys.Sub(lastTry) < retryAfter) {
 		off := offset
 		mu.Unlock()
 		return sys.Add(off)
 	}
-	fetching, lastTry = true, sys
+	done := make(chan struct{})
+	fetching, lastTry = done, sys
 	u := dateURL
 	mu.Unlock()
 
 	d, err := fetchDate(u)
 	mu.Lock()
-	fetching = false
+	fetching = nil
 	if err == nil {
 		offset, have = d.Sub(sys), true
 	}
 	off := offset
 	mu.Unlock()
+	close(done)
 	return sys.Add(off)
 }
 
-// fetchDate reads u's Date header. The handshake is fully verified (chain to Pool() and host name);
-// only the validity period is judged at the leaf's own NotBefore, as the time is what is being asked.
+// Known reports whether Now is trustworthy: the system clock is set, or a server's Date was read.
+func Known() bool {
+	if nowFn().Year() >= 2025 {
+		return true
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	return have
+}
+
+// fetchDate reads u's Date header. The handshake is fully verified (chain to the roots, and u's host
+// name or IP address); only the validity period is judged at the leaf's own NotBefore, as the time
+// is what is being asked. A redirect is not followed: the 3xx carries a Date too, and following it
+// could read the Date from plain http.
 func fetchDate(u string) (time.Time, error) {
-	c := &http.Client{Timeout: 5 * time.Second, Transport: dateTransport(Pool())}
+	pu, err := url.Parse(u)
+	if err != nil {
+		return time.Time{}, err
+	}
+	c := &http.Client{Timeout: 5 * time.Second, Transport: dateTransport(dateRoots(), pu.Hostname()),
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	resp, err := c.Head(u)
 	if err != nil {
 		return time.Time{}, err
@@ -94,7 +127,9 @@ func fetchDate(u string) (time.Time, error) {
 	return http.ParseTime(resp.Header.Get("Date"))
 }
 
-func dateTransport(roots *x509.CertPool) *http.Transport {
+// dateTransport verifies the server against roots and host. The handshake's ServerName can't be
+// used: it is empty for an IP address, which would skip the name check.
+func dateTransport(roots *x509.CertPool, host string) *http.Transport {
 	return &http.Transport{
 		DisableKeepAlives: true,
 		TLSClientConfig: &tls.Config{
@@ -112,7 +147,7 @@ func dateTransport(roots *x509.CertPool) *http.Transport {
 					inter.AddCert(c)
 				}
 				_, err := leaf.Verify(x509.VerifyOptions{Roots: roots, Intermediates: inter,
-					DNSName: cs.ServerName, CurrentTime: leaf.NotBefore.Add(time.Second)})
+					DNSName: host, CurrentTime: leaf.NotBefore.Add(time.Second)})
 				return err
 			},
 		},

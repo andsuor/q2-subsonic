@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -143,7 +144,7 @@ func (d *daemon) reply(req q2spot.Request) q2spot.Reply {
 	case "play":
 		return d.play(ctx, cl, req.Arg(0))
 	case "account":
-		return d.account()
+		return d.account(cl)
 	case "signout":
 		d.signOut()
 		return q2spot.Reply{Message: "Signed out"}
@@ -386,10 +387,18 @@ func (d *daemon) settingsOp(op string) q2spot.Reply {
 		act("streamq", "Streaming Quality: "+qualityName(s.stream()), ""), list("account", "Account", user, "")}}
 }
 
-func (d *daemon) account() q2spot.Reply {
+func (d *daemon) account(cl *subsonic.Client) q2spot.Reply {
 	d.mu.Lock()
 	server, user := d.server, d.user
 	d.mu.Unlock()
-	return q2spot.Reply{Rows: []q2spot.Row{info(server), info(user), info("Password is stored on this card"),
+	if u, err := url.Parse(server); err == nil { // never a proxy's user:password@
+		u.User = nil
+		server = u.String()
+	}
+	stored := "Password is stored on this card"
+	if cl.KeyAuth() {
+		stored = "Only an API key is stored on this card"
+	}
+	return q2spot.Reply{Rows: []q2spot.Row{info(server), info(user), info(stored),
 		info("Tip: use a server user just for the Q2"), act("signout", "Sign Out", "")}}
 }

@@ -40,10 +40,10 @@ body[data-auth="1"] #pinbox, body[data-auth="0"] #signbox { display: none; }
     <input id="server" type="url" value="https://" autocapitalize="off" autocorrect="off" spellcheck="false" required>
     <label for="user">Username</label>
     <input id="user" autocapitalize="off" autocorrect="off" spellcheck="false" autocomplete="username" required>
-    <label for="password">Password</label>
+    <label for="password">Password or API key</label>
     <input id="password" type="password" autocomplete="current-password" required>
     <button type="submit">Sign In</button>
-    <p class="note">Your password is sent once, unencrypted, over this Wi-Fi to the Q2. Do this on a network you trust. It is then checked against your server and kept only on the Q2's card.</p>
+    <p class="note">Your password is sent once, unencrypted, over this Wi-Fi to the Q2. Do this on a network you trust. It is then checked against your server and kept only on the Q2's card. If your server offers API keys, enter one instead: only the key is kept.</p>
   </form>
   <div id="msg" role="status"></div>
 </main>

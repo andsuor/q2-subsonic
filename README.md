@@ -26,7 +26,7 @@ Things to know:
 - The sign-in page only runs while you are signed out, and for at most 10 minutes per start. Leave the page and it stops.
 - The password crosses your local Wi-Fi unencrypted, once, from the phone to the Q2. Do it on a network you trust.
 - The server must be `https://`; `http://` is refused. Certificates are verified.
-- The password is stored on the card, in `.subsonic/credentials`. exFAT has no file permissions, so anyone with the card can read it. **Make a server user just for the Q2, not an admin.** If the card is lost, delete that user on the server and the card is worthless.
+- The password is stored on the card, in `.subsonic/credentials`. If your server offers OpenSubsonic API keys (`apiKeyAuthentication`), enter a key from its settings as the password instead: then only the key is stored. exFAT has no file permissions, so anyone with the card can read it. **Make a server user just for the Q2, not an admin.** If the card is lost, delete that user on the server and the card is worthless.
 - **Settings → Account → Sign Out** removes the stored login. Your music stays on the card.
 
 ## Use

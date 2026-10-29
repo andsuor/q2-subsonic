@@ -5,13 +5,18 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/andsuor/q2-subsonic/internal/applog"
 	"github.com/andsuor/q2-subsonic/internal/tlsroots"
@@ -113,7 +118,7 @@ func TestTokenAuth(t *testing.T) {
 	}
 	sum := md5.Sum([]byte("pw" + q.Get("s")))
 	if q.Get("u") != "u" || q.Get("t") != hex.EncodeToString(sum[:]) || len(q.Get("s")) != 12 ||
-		q.Get("v") != "1.16.1" || q.Get("c") != "q2-subsonic" || q.Get("f") != "json" || q.Has("p") {
+		q.Get("v") != "1.13.0" || q.Get("c") != "q2-subsonic" || q.Get("f") != "json" || q.Has("p") {
 		t.Fatalf("bad query %v", q)
 	}
 }
@@ -252,5 +257,406 @@ func TestGetNon2xx(t *testing.T) {
 	var ae *APIError
 	if resp != nil || !errors.As(err, &ae) || ae.HTTP != 404 {
 		t.Fatalf("got %v %v", resp, err)
+	}
+}
+
+// serveJSON answers every request with body as application/json.
+func serveJSON(t *testing.T, body string) *Client {
+	t.Helper()
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	c, err := New(Creds{Server: srv.URL, User: "u", Password: "pw"}, srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+func failed(code int) string {
+	return fmt.Sprintf(`{"subsonic-response":{"status":"failed","version":"1.15.0","error":{"code":%d,"message":"m"}}}`, code)
+}
+
+// I22/I23: version and sign-in method errors get their own words; 41-43 are not "wrong password",
+// 40 and 44 are (ErrAuth).
+func TestCodeCopy(t *testing.T) {
+	for code, want := range map[int]string{
+		20: "The server needs a newer version of this app",
+		30: "The server's Subsonic API is too old for this app",
+		40: "Wrong username or password",
+		41: "This server doesn't allow token sign-in for this user",
+		42: "This server doesn't accept this sign-in method",
+		43: "This server doesn't accept this sign-in method",
+		44: "Invalid API key: create one in your server's settings",
+	} {
+		err := serveJSON(t, failed(code)).Ping(context.Background())
+		if m := Message(err, "h"); m != want {
+			t.Errorf("code %d: %q, want %q", code, m, want)
+		}
+		auth, method := errors.Is(err, ErrAuth), errors.Is(err, ErrAuthMethod)
+		switch code {
+		case 40, 44:
+			if !auth || method {
+				t.Errorf("code %d kind: %v", code, err)
+			}
+		case 41, 42, 43:
+			if auth || !method {
+				t.Errorf("code %d kind: %v", code, err)
+			}
+		default:
+			if auth || method {
+				t.Errorf("code %d kind: %v", code, err)
+			}
+		}
+	}
+}
+
+// I8: a 200 answer that is a Subsonic error is an error, never saved as a song or a cover.
+func TestGetRefusesErrorBody(t *testing.T) {
+	ctx := context.Background()
+	c := serveJSON(t, failed(40))
+	for _, u := range []string{c.MediaURL("s1", "original"), c.MediaURL("s1", "mp3-320"), c.CoverURL("c1")} {
+		if resp, err := c.Get(ctx, u, 0); resp != nil || !errors.Is(err, ErrAuth) {
+			t.Fatalf("%s: %v %v", u, resp, err)
+		}
+	}
+	c = serveJSON(t, failed(70))
+	resp, err := c.Get(ctx, c.MediaURL("s1", "mp3-128"), 0)
+	var ae *APIError
+	if resp != nil || !errors.As(err, &ae) || ae.Code != 70 || ae.Op != "stream" {
+		t.Fatalf("code 70: %v %v", resp, err)
+	}
+	c = serveJSON(t, `{"subsonic-response":{"status":"ok"}}`) // not an error, but not the file either
+	if resp, err := c.Get(ctx, c.CoverURL("c1"), 0); resp != nil || err == nil {
+		t.Fatalf("ok envelope as a cover: %v %v", resp, err)
+	}
+}
+
+// M27/R37: sync respects a server that turns downloads off for the account: a refused original is
+// an error with its own words, never fetched another way. Playback opts in to stream?format=raw.
+func TestDownloadsOffAndPlayURL(t *testing.T) {
+	var streamed url.Values
+	var rng string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if path.Base(r.URL.Path) == "download" {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(failed(50)))
+			return
+		}
+		streamed, rng = r.URL.Query(), r.Header.Get("Range")
+		w.Header().Set("Content-Type", "audio/flac")
+		w.Write([]byte("AUDIO"))
+	}))
+	defer srv.Close()
+	c, _ := New(Creds{Server: srv.URL, User: "u", Password: "pw"}, srv.Client())
+	ctx := context.Background()
+
+	resp, err := c.Get(ctx, c.MediaURL("s1", "original"), 0)
+	var ae *APIError
+	if resp != nil || !errors.As(err, &ae) || ae.Op != "download" || ae.Code != 50 ||
+		Message(err, "h") != "Downloads are turned off for this account on the server" || streamed != nil {
+		t.Fatalf("sync: %v %v (%q), streamed %v", resp, err, Message(err, "h"), streamed)
+	}
+
+	if u := c.PlayURL("s1", "mp3-320"); !strings.Contains(u, "/rest/stream?") || !strings.Contains(u, "format=mp3") || !strings.Contains(u, "maxBitRate=320") {
+		t.Fatal(u)
+	}
+	resp, err = c.Get(ctx, c.PlayURL("s1", "original"), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(b) != "AUDIO" || streamed.Get("id") != "s1" || streamed.Get("format") != "raw" || streamed.Has("maxBitRate") || rng != "bytes=100-" {
+		t.Fatalf("play: body %q query %v range %q", b, streamed, rng)
+	}
+}
+
+// M5: an answer past 8 MiB is refused with clear words instead of being decoded (about 3x in RAM).
+func TestResponseCap(t *testing.T) {
+	big := `{"subsonic-response":{"status":"ok","playlist":{"name":"` + strings.Repeat("x", 9<<20) + `"}}}`
+	_, _, err := serveJSON(t, big).Playlist(context.Background(), "p1")
+	if m := Message(err, "h"); m != "Playlist too large for the Q2" {
+		t.Fatalf("%q (%v)", m, err)
+	}
+}
+
+// M2: a redirect to another host doesn't carry the token and salt along as Referer.
+func TestRedirectDropsReferer(t *testing.T) {
+	ref := "unset"
+	dst := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ref = r.Header.Get("Referer")
+		w.Write([]byte(`{"subsonic-response":{"status":"ok"}}`))
+	}))
+	defer dst.Close()
+	src := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, dst.URL+r.URL.RequestURI(), http.StatusFound)
+	}))
+	defer src.Close()
+	c, _ := New(Creds{Server: src.URL, User: "u", Password: "pw"}, src.Client())
+	if err := c.Ping(context.Background()); err != nil || ref != "" {
+		t.Fatalf("err %v, Referer %q", err, ref)
+	}
+}
+
+// M9: a body that stops arriving fails after the idle time, so a stalled server can't hang a sync or
+// hold the network slot; time the reader spends away (the syncer yielding to a stream) doesn't count.
+func TestStalledBodyFails(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "audio/flac")
+		w.Write([]byte("one"))
+		w.(http.Flusher).Flush()
+		time.Sleep(20 * time.Millisecond)
+		w.Write([]byte("two"))
+		w.(http.Flusher).Flush()
+		if r.URL.Query().Get("id") == "stall" {
+			select {
+			case <-release:
+			case <-r.Context().Done():
+			}
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+	c, _ := New(Creds{Server: srv.URL, User: "u", Password: "pw"}, srv.Client())
+	c.idle = 200 * time.Millisecond
+	ctx := context.Background()
+
+	resp, err := c.Get(ctx, srv.URL+"/rest/download?id=slow-reader", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 3)
+	io.ReadFull(resp.Body, buf)
+	time.Sleep(500 * time.Millisecond) // away longer than idle; the data is waiting
+	if rest, err := io.ReadAll(resp.Body); err != nil || string(buf)+string(rest) != "onetwo" {
+		t.Fatalf("slow reader: %q %q %v", buf, rest, err)
+	}
+	resp.Body.Close()
+
+	resp, err = c.Get(ctx, srv.URL+"/rest/download?id=stall", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	done := make(chan error, 1)
+	go func() { _, err := io.ReadAll(resp.Body); done <- err }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrUnreachable) || !strings.Contains(Message(err, "h"), "stopped sending") {
+			t.Fatalf("stall: %v (%q)", err, Message(err, "h"))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("a stalled body hangs the reader")
+	}
+}
+
+// M1: a user:password@ server address works, but its password never reaches log.txt.
+func TestUserinfoNotLogged(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"subsonic-response":{"status":"ok"}}`))
+	}))
+	defer srv.Close()
+	c, err := New(Creds{Server: strings.Replace(srv.URL, "https://", "https://alice:proxySecret42@", 1), User: "u", Password: "pw"}, srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := t.TempDir() + "/l"
+	c.Log = applog.Open(path, 1<<20)
+	if err := c.Ping(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	srv.Close()
+	c.Ping(context.Background())
+	if b, _ := os.ReadFile(path); strings.Contains(string(b), "proxySecret42") || !strings.Contains(string(b), "alice") {
+		t.Fatalf("log: %s", b)
+	}
+}
+
+// M8: with the clock unset and no server Date yet (a failed fetch's 30 s back-off), a certificate
+// that is "not yet valid" means the time couldn't be read, not that the certificate is bad.
+func TestNotYetValidWhileClockUnknown(t *testing.T) {
+	srv, _ := serve(t, "ping.json", nil)
+	hc := srv.Client()
+	tr := hc.Transport.(*http.Transport).Clone()
+	tr.TLSClientConfig.Time = func() time.Time { return time.Date(1960, 1, 1, 0, 0, 0, 0, time.UTC) }
+	hc.Transport = tr
+	c, _ := New(Creds{Server: srv.URL, User: "u", Password: "pw"}, hc)
+	defer func(f func() bool) { timeKnown = f }(timeKnown)
+	timeKnown = func() bool { return false }
+	if err := c.Ping(context.Background()); !errors.Is(err, ErrUnreachable) || errors.Is(err, ErrCert) {
+		t.Fatalf("clock unknown: %v", err)
+	}
+	timeKnown = func() bool { return true }
+	if err := c.Ping(context.Background()); !errors.Is(err, ErrCert) {
+		t.Fatalf("clock known: %v", err)
+	}
+}
+
+// keyServer lists apiKeyAuthentication when offer is set: KEY belongs to "andreas". Token auth with
+// u/pw works too, unless keyOnly (then it is refused with 42, as on LMS). seen gets every request's
+// query, with its endpoint as "_op".
+func keyServer(t *testing.T, offer, keyOnly bool, seen *[]url.Values) *httptest.Server {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		rec := r.URL.Query()
+		rec.Set("_op", path.Base(r.URL.Path))
+		*seen = append(*seen, rec)
+		w.Header().Set("Content-Type", "application/json")
+		ok := func(extra string) {
+			fmt.Fprintf(w, `{"subsonic-response":{"status":"ok","version":"1.16.1","openSubsonic":true%s}}`, extra)
+		}
+		sum := md5.Sum([]byte("pw" + q.Get("s")))
+		switch op := path.Base(r.URL.Path); {
+		case op == "getOpenSubsonicExtensions":
+			if offer {
+				ok(`,"openSubsonicExtensions":[{"name":"formPost","versions":[1]},{"name":"apiKeyAuthentication","versions":[1]}]`)
+			} else {
+				ok(`,"openSubsonicExtensions":[]`)
+			}
+		case q.Has("u") && q.Has("apiKey"):
+			w.Write([]byte(failed(43)))
+		case q.Get("apiKey") == "KEY" && op == "tokenInfo":
+			ok(`,"tokenInfo":{"username":"andreas"}`)
+		case q.Get("apiKey") == "KEY":
+			ok("")
+		case q.Has("apiKey"):
+			w.Write([]byte(failed(44)))
+		case keyOnly:
+			w.Write([]byte(failed(42)))
+		case q.Get("u") == "u" && q.Get("t") == hex.EncodeToString(sum[:]):
+			ok("")
+		default:
+			w.Write([]byte(failed(40)))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// I23/R38: a server offering OpenSubsonic API keys is signed in to with a key (typed as the
+// password), and only the key is kept; the user name is the server's. Nothing secret goes to the
+// extensions call.
+func TestSignInAPIKey(t *testing.T) {
+	var seen []url.Values
+	srv := keyServer(t, true, false, &seen)
+	c, _ := New(Creds{Server: srv.URL, User: "typed", Password: "KEY"}, srv.Client())
+	got, err := c.SignIn(context.Background())
+	if err != nil || got != (Creds{Server: srv.URL, User: "andreas", APIKey: "KEY"}) {
+		t.Fatalf("%+v %v", got, err)
+	}
+	for _, q := range seen {
+		for _, k := range []string{"u", "t", "s", "p", "apiKey"} {
+			if q.Get("_op") == "getOpenSubsonicExtensions" && q.Has(k) {
+				t.Fatalf("extensions call sent %s: %v", k, q)
+			}
+		}
+	}
+	c, _ = New(got, srv.Client())
+	if err := c.Ping(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if q := seen[len(seen)-1]; q.Get("apiKey") != "KEY" || q.Has("u") || q.Has("t") || q.Has("s") || q.Get("v") != "1.13.0" {
+		t.Fatalf("key request %v", q)
+	}
+}
+
+// R38 (amended): on a server offering API keys, a password still works and is kept as before. Token
+// auth goes first, so a correct password never travels in clear as ?apiKey=. When both fail, the
+// words cover both.
+func TestSignInPasswordOnKeyServer(t *testing.T) {
+	var seen []url.Values
+	srv := keyServer(t, true, false, &seen)
+	c, _ := New(Creds{Server: srv.URL, User: "u", Password: "pw"}, srv.Client())
+	if got, err := c.SignIn(context.Background()); err != nil || got != (Creds{Server: srv.URL, User: "u", Password: "pw"}) {
+		t.Fatalf("password: %+v %v", got, err)
+	}
+	for _, q := range seen {
+		for k, vs := range q {
+			if k == "apiKey" || slices.Contains(vs, "pw") {
+				t.Fatalf("a correct password went out in clear: %v", q)
+			}
+		}
+	}
+	c, _ = New(Creds{Server: srv.URL, User: "u", Password: "nope"}, srv.Client())
+	_, err := c.SignIn(context.Background())
+	if !errors.Is(err, ErrAuth) || Message(err, "h") != "Wrong username, password or API key" {
+		t.Fatalf("both fail: %v (%q)", err, Message(err, "h"))
+	}
+	// a server taking only keys (token auth refused with 42): the key was the problem
+	srv = keyServer(t, true, true, &seen)
+	c, _ = New(Creds{Server: srv.URL, User: "u", Password: "nope"}, srv.Client())
+	if _, err := c.SignIn(context.Background()); Message(err, "h") != "Invalid API key: create one in your server's settings" {
+		t.Fatalf("key-only server: %v (%q)", err, Message(err, "h"))
+	}
+}
+
+// Without the extension, sign-in is token auth with the password, as before; 42 keeps its copy.
+func TestSignInToken(t *testing.T) {
+	var seen []url.Values
+	srv := keyServer(t, false, false, &seen)
+	c, _ := New(Creds{Server: srv.URL, User: "u", Password: "pw"}, srv.Client())
+	if got, err := c.SignIn(context.Background()); err != nil || got != (Creds{Server: srv.URL, User: "u", Password: "pw"}) {
+		t.Fatalf("%+v %v", got, err)
+	}
+	srv = keyServer(t, false, true, &seen)
+	c, _ = New(Creds{Server: srv.URL, User: "u", Password: "pw"}, srv.Client())
+	if _, err := c.SignIn(context.Background()); Message(err, "h") != "This server doesn't accept this sign-in method" {
+		t.Fatalf("42 without the extension: %v", err)
+	}
+	// a server without getOpenSubsonicExtensions at all (plain Subsonic) signs in the same way
+	_, c = serve(t, "ping.json", nil)
+	if _, err := c.SignIn(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// R38: the extensions call failing in transport is reported as such, not as a wrong password.
+func TestSignInExtensionsUnreachable(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if path.Base(r.URL.Path) == "getOpenSubsonicExtensions" {
+			conn, _, _ := w.(http.Hijacker).Hijack()
+			conn.Close()
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(failed(40)))
+	}))
+	defer srv.Close()
+	c, _ := New(Creds{Server: srv.URL, User: "u", Password: "KEY"}, srv.Client())
+	if _, err := c.SignIn(context.Background()); errors.Is(err, ErrAuth) || !errors.Is(err, ErrUnreachable) {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// Review G2 Minor 2: an error envelope with a missing or wrong Content-Type (a proxy) is still caught
+// by its first bytes; real media passes untouched.
+func TestGetSniffsErrorBody(t *testing.T) {
+	var body string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	c, _ := New(Creds{Server: srv.URL, User: "u", Password: "pw"}, srv.Client())
+	for _, b := range []string{"\n " + failed(70),
+		`<?xml version="1.0" encoding="UTF-8"?><subsonic-response xmlns="http://subsonic.org/restapi" status="failed"><error code="70"/></subsonic-response>`} {
+		body = b
+		if resp, err := c.Get(context.Background(), c.MediaURL("s1", "mp3-320"), 0); resp != nil || err == nil {
+			t.Fatalf("%q: %v %v", b, resp, err)
+		}
+	}
+	body = "fLaC" + strings.Repeat("\x00", 200)
+	resp, err := c.Get(context.Background(), c.MediaURL("s1", "original"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(got) != body {
+		t.Fatalf("media changed: %d bytes", len(got))
 	}
 }

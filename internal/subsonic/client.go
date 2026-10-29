@@ -2,30 +2,44 @@
 package subsonic
 
 import (
+	"bufio"
+	"bytes"
+	"cmp"
 	"context"
 	"crypto/md5"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/andsuor/q2-subsonic/internal/applog"
 )
 
-type Creds struct{ Server, User, Password string }
+// Creds is a sign-in: a password for token auth, or an OpenSubsonic API key (then Password is empty).
+type Creds struct {
+	Server, User string
+	Password     string `json:",omitempty"`
+	APIKey       string `json:",omitempty"`
+}
 
 type Client struct {
 	c    Creds
 	base *url.URL
 	hc   *http.Client
 	// Log, when set, receives one redacted line per request.
-	Log *applog.Log
+	Log  *applog.Log
+	idle time.Duration // a body Read that waits longer fails; 0 is idleAfter
 }
 
 // New refuses anything but an https server address.
@@ -39,6 +53,7 @@ func New(c Creds, hc *http.Client) (*Client, error) {
 	}
 	h := *hc
 	h.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		req.Header.Del("Referer") // Go sets it to the last URL, token and salt included
 		if req.URL.Scheme != "https" {
 			return ErrInsecure
 		}
@@ -50,17 +65,23 @@ func New(c Creds, hc *http.Client) (*Client, error) {
 	return &Client{c: c, base: u, hc: &h}, nil
 }
 
-// auth returns the query values common to every request: a fresh salt and token each time.
+// auth returns the query values common to every request: the API key, or a token with a fresh salt
+// each time. A client with neither user nor key sends no credentials at all.
 func (c *Client) auth() url.Values {
-	b := make([]byte, 6)
-	rand.Read(b)
-	salt := hex.EncodeToString(b)
-	sum := md5.Sum([]byte(c.c.Password + salt))
 	v := url.Values{}
-	v.Set("u", c.c.User)
-	v.Set("t", hex.EncodeToString(sum[:]))
-	v.Set("s", salt)
-	v.Set("v", "1.16.1")
+	switch {
+	case c.c.APIKey != "":
+		v.Set("apiKey", c.c.APIKey) // u must not be sent with it (code 43)
+	case c.c.User != "" || c.c.Password != "":
+		b := make([]byte, 6)
+		rand.Read(b)
+		salt := hex.EncodeToString(b)
+		sum := md5.Sum([]byte(c.c.Password + salt))
+		v.Set("u", c.c.User)
+		v.Set("t", hex.EncodeToString(sum[:]))
+		v.Set("s", salt)
+	}
+	v.Set("v", "1.13.0") // token auth's version; a higher one makes Airsonic refuse every request (code 30)
 	v.Set("c", "q2-subsonic")
 	v.Set("f", "json")
 	return v
@@ -83,69 +104,198 @@ func (c *Client) logf(format string, a ...any) {
 	}
 }
 
-// call performs one API request and returns the inner subsonic-response object.
-func (c *Client) call(ctx context.Context, op string, q url.Values) (json.RawMessage, error) {
-	u := c.endpoint(op, q)
+const (
+	// maxBody caps an API answer: decoding takes about twice its size, and the Q2 has about 60 MB.
+	maxBody = 8 << 20
+	// idleAfter fails a body Read that gets no data for this long (a hung transcode or NAS).
+	idleAfter = 30 * time.Second
+)
+
+// do sends one GET for u, from byte from when from > 0, and logs it redacted. Its body fails with
+// ErrUnreachable once one Read waits longer than the idle time, so a stalled server can't hang a
+// download; time between Reads (a consumer yielding to a stream) doesn't count.
+func (c *Client) do(ctx context.Context, op, u string, from int64) (*http.Response, error) {
+	ctx, cancel := context.WithCancel(ctx)
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
+		cancel()
 		return nil, &APIError{Op: op, Msg: applog.Redact(err.Error()), kind: ErrUnreachable}
+	}
+	if from > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", from))
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
+		cancel()
 		c.logf("GET %s -> %v", u, err)
 		return nil, &APIError{Op: op, Msg: applog.Redact(err.Error()), kind: transportKind(err)}
 	}
-	defer resp.Body.Close()
 	c.logf("GET %s -> %d", u, resp.StatusCode)
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
-	if err != nil {
-		return nil, &APIError{Op: op, HTTP: resp.StatusCode, Msg: applog.Redact(err.Error()), kind: ErrUnreachable}
+	idle := c.idle
+	if idle == 0 {
+		idle = idleAfter
 	}
-	var env struct {
-		R json.RawMessage `json:"subsonic-response"`
-	}
-	if json.Unmarshal(body, &env) != nil || env.R == nil {
-		if resp.StatusCode < 200 || resp.StatusCode > 299 {
-			return nil, &APIError{Op: op, HTTP: resp.StatusCode, Msg: http.StatusText(resp.StatusCode), kind: ErrUnreachable}
-		}
-		return nil, &APIError{Op: op, HTTP: resp.StatusCode, Msg: "not a Subsonic response", kind: ErrNotSubsonic}
-	}
-	var st struct {
-		Status string `json:"status"`
-		Error  struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if json.Unmarshal(env.R, &st) != nil {
-		return nil, &APIError{Op: op, HTTP: resp.StatusCode, Msg: "bad response", kind: ErrNotSubsonic}
-	}
-	if st.Status != "ok" {
-		var kind error
-		if st.Error.Code == 40 || st.Error.Code == 41 {
-			kind = ErrAuth
-		}
-		return nil, &APIError{Op: op, HTTP: resp.StatusCode, Code: st.Error.Code, Msg: st.Error.Message, kind: kind}
-	}
-	return env.R, nil
+	b := &idleBody{ReadCloser: resp.Body, op: op, idle: idle, cancel: cancel}
+	b.t = time.AfterFunc(idle, func() { b.fired.Store(true); cancel() })
+	b.t.Stop()
+	resp.Body = b
+	return resp, nil
 }
 
-// get calls op and decodes the response object into out.
-func (c *Client) get(ctx context.Context, op string, q url.Values, out any) error {
-	raw, err := c.call(ctx, op, q)
+// idleBody is a response body whose Reads each get idle to see data; then the request is cancelled.
+type idleBody struct {
+	io.ReadCloser
+	op     string
+	idle   time.Duration
+	t      *time.Timer
+	fired  atomic.Bool
+	cancel context.CancelFunc
+}
+
+func (b *idleBody) Read(p []byte) (int, error) {
+	b.t.Reset(b.idle)
+	n, err := b.ReadCloser.Read(p)
+	b.t.Stop()
+	if err != nil && b.fired.Load() {
+		err = &APIError{Op: b.op, Msg: fmt.Sprintf("no data for %v", b.idle), kind: ErrStalled}
+	}
+	return n, err
+}
+
+func (b *idleBody) Close() error {
+	b.t.Stop()
+	b.cancel()
+	return b.ReadCloser.Close()
+}
+
+// call performs one API request and decodes the subsonic-response object into out (when not nil).
+func (c *Client) call(ctx context.Context, op string, q url.Values, out any) error {
+	resp, err := c.do(ctx, op, c.endpoint(op, q), 0)
 	if err != nil {
 		return err
 	}
-	if err := json.Unmarshal(raw, out); err != nil {
-		return &APIError{Op: op, Msg: err.Error(), kind: ErrNotSubsonic}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
+	if err != nil {
+		var ae *APIError
+		if errors.As(err, &ae) {
+			return err
+		}
+		return &APIError{Op: op, HTTP: resp.StatusCode, Msg: applog.Redact(err.Error()), kind: ErrUnreachable}
+	}
+	if len(body) > maxBody {
+		what := "Answer"
+		if op == "getPlaylist" {
+			what = "Playlist"
+		}
+		return &APIError{Op: op, HTTP: resp.StatusCode, Msg: what + " too large for the Q2"}
+	}
+	return decode(op, resp.StatusCode, body, out)
+}
+
+// decode reads a subsonic-response: an *APIError for a failed status or a body that isn't one,
+// else nil with out (when not nil) filled. The body is decoded in place, never copied.
+func decode(op string, status int, body []byte, out any) error {
+	var env struct {
+		R *struct {
+			Status string `json:"status"`
+			Error  struct {
+				Code    int    `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		} `json:"subsonic-response"`
+	}
+	if json.Unmarshal(body, &env) != nil || env.R == nil {
+		if status < 200 || status > 299 {
+			return &APIError{Op: op, HTTP: status, Msg: http.StatusText(status), kind: ErrUnreachable}
+		}
+		return &APIError{Op: op, HTTP: status, Msg: "not a Subsonic response", kind: ErrNotSubsonic}
+	}
+	if e := env.R.Error; env.R.Status != "ok" {
+		return &APIError{Op: op, HTTP: status, Code: e.Code, Msg: e.Message, kind: codeKind(e.Code)}
+	}
+	if out != nil {
+		// An interface holding a pointer decodes into what it points at.
+		if err := json.Unmarshal(body, &struct {
+			R any `json:"subsonic-response"`
+		}{out}); err != nil {
+			return &APIError{Op: op, Msg: err.Error(), kind: ErrNotSubsonic}
+		}
 	}
 	return nil
 }
 
-func (c *Client) Ping(ctx context.Context) error {
-	_, err := c.call(ctx, "ping", nil)
-	return err
+// SignIn checks the sign-in and returns what to keep on the card. The password field may hold an
+// OpenSubsonic API key. It is first checked as a password with token auth, which never sends it in
+// clear, and kept as before. Only when that is refused, and the server offers API keys, is it tried
+// as a key; a working key is kept alone, with the user name the server gives for it (R38).
+func (c *Client) SignIn(ctx context.Context) (Creds, error) {
+	tokErr := c.Ping(ctx)
+	if tokErr == nil {
+		return c.c, nil
+	}
+	if !errors.Is(tokErr, ErrAuth) && !errors.Is(tokErr, ErrAuthMethod) {
+		return Creds{}, tokErr // unreachable, certificate, ...
+	}
+	keys, err := c.offers(ctx, "apiKeyAuthentication")
+	if err != nil {
+		return Creds{}, err
+	}
+	if !keys {
+		return Creds{}, tokErr
+	}
+	k := *c
+	k.c = Creds{Server: c.c.Server, APIKey: c.c.Password}
+	var r struct {
+		T struct {
+			Username string `json:"username"`
+		} `json:"tokenInfo"`
+	}
+	keyErr := k.call(ctx, "tokenInfo", nil, &r)
+	switch {
+	case keyErr == nil:
+		k.c.User = cmp.Or(r.T.Username, c.c.User)
+		return k.c, nil
+	case !errors.Is(keyErr, ErrAuth) && !errors.Is(keyErr, ErrAuthMethod):
+		return Creds{}, keyErr
+	case errors.Is(tokErr, ErrAuthMethod): // a server taking only keys: the key was wrong
+		return Creds{}, keyErr
+	}
+	var ae *APIError
+	errors.As(tokErr, &ae)
+	return Creds{}, &APIError{Op: "signin", HTTP: ae.HTTP, Code: ae.Code, Msg: ae.Msg, kind: ErrAuthKey}
 }
+
+// offers reports whether the server lists the OpenSubsonic extension. The call is public, so it
+// carries no credentials. A server without it (plain Subsonic: an error code or status) offers
+// nothing; a transport failure is returned.
+func (c *Client) offers(ctx context.Context, ext string) (bool, error) {
+	anon := *c
+	anon.c = Creds{Server: c.c.Server}
+	var r struct {
+		Ext []struct {
+			Name string `json:"name"`
+		} `json:"openSubsonicExtensions"`
+	}
+	if err := anon.call(ctx, "getOpenSubsonicExtensions", nil, &r); err != nil {
+		var ae *APIError
+		if errors.As(err, &ae) && ae.HTTP == 0 {
+			return false, err
+		}
+		return false, nil
+	}
+	for _, e := range r.Ext {
+		if e.Name == ext {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// KeyAuth reports whether the client signs in with an API key rather than a password.
+func (c *Client) KeyAuth() bool { return c.c.APIKey != "" }
+
+func (c *Client) Ping(ctx context.Context) error { return c.call(ctx, "ping", nil, nil) }
 
 func (c *Client) Playlists(ctx context.Context) ([]Playlist, error) {
 	var r struct {
@@ -157,7 +307,7 @@ func (c *Client) Playlists(ctx context.Context) ([]Playlist, error) {
 			} `json:"playlist"`
 		} `json:"playlists"`
 	}
-	if err := c.get(ctx, "getPlaylists", nil, &r); err != nil {
+	if err := c.call(ctx, "getPlaylists", nil, &r); err != nil {
 		return nil, err
 	}
 	out := make([]Playlist, len(r.Playlists.Playlist))
@@ -177,7 +327,7 @@ func (c *Client) Playlist(ctx context.Context, id string) (Playlist, []Song, err
 			Entry     []wireSong `json:"entry"`
 		} `json:"playlist"`
 	}
-	if err := c.get(ctx, "getPlaylist", url.Values{"id": {id}}, &r); err != nil {
+	if err := c.call(ctx, "getPlaylist", url.Values{"id": {id}}, &r); err != nil {
 		return Playlist{}, nil, err
 	}
 	p := r.Playlist
@@ -191,7 +341,7 @@ func (c *Client) Albums(ctx context.Context, offset, size int) ([]Album, error) 
 		} `json:"albumList2"`
 	}
 	q := url.Values{"type": {"alphabeticalByName"}, "offset": {strconv.Itoa(offset)}, "size": {strconv.Itoa(size)}}
-	if err := c.get(ctx, "getAlbumList2", q, &r); err != nil {
+	if err := c.call(ctx, "getAlbumList2", q, &r); err != nil {
 		return nil, err
 	}
 	return albums(r.L.Album), nil
@@ -204,7 +354,7 @@ func (c *Client) Album(ctx context.Context, id string) (Album, []Song, error) {
 			Song []wireSong `json:"song"`
 		} `json:"album"`
 	}
-	if err := c.get(ctx, "getAlbum", url.Values{"id": {id}}, &r); err != nil {
+	if err := c.call(ctx, "getAlbum", url.Values{"id": {id}}, &r); err != nil {
 		return Album{}, nil, err
 	}
 	return r.Album.album(), songs(r.Album.Song), nil
@@ -218,7 +368,7 @@ func (c *Client) Artists(ctx context.Context) ([]Artist, error) {
 			} `json:"index"`
 		} `json:"artists"`
 	}
-	if err := c.get(ctx, "getArtists", nil, &r); err != nil {
+	if err := c.call(ctx, "getArtists", nil, &r); err != nil {
 		return nil, err
 	}
 	var out []Artist
@@ -235,7 +385,7 @@ func (c *Client) Artist(ctx context.Context, id string) (Artist, []Album, error)
 			Album []wireAlbum `json:"album"`
 		} `json:"artist"`
 	}
-	if err := c.get(ctx, "getArtist", url.Values{"id": {id}}, &r); err != nil {
+	if err := c.call(ctx, "getArtist", url.Values{"id": {id}}, &r); err != nil {
 		return Artist{}, nil, err
 	}
 	return Artist(r.Artist.wireArtist), albums(r.Artist.Album), nil
@@ -256,7 +406,7 @@ func (c *Client) Search(ctx context.Context, q string, offset int) ([]Artist, []
 		v.Set(k+"Count", "50")
 		v.Set(k+"Offset", o)
 	}
-	if err := c.get(ctx, "search3", v, &r); err != nil {
+	if err := c.call(ctx, "search3", v, &r); err != nil {
 		return nil, nil, nil, err
 	}
 	return artists(r.R.Artist), albums(r.R.Album), songs(r.R.Song), nil
@@ -266,7 +416,7 @@ func (c *Client) Song(ctx context.Context, id string) (Song, error) {
 	var r struct {
 		Song wireSong `json:"song"`
 	}
-	if err := c.get(ctx, "getSong", url.Values{"id": {id}}, &r); err != nil {
+	if err := c.call(ctx, "getSong", url.Values{"id": {id}}, &r); err != nil {
 		return Song{}, err
 	}
 	return r.Song.song(), nil
@@ -285,30 +435,60 @@ func (c *Client) MediaURL(id, quality string) string {
 	return c.endpoint("stream", url.Values{"id": {id}, "format": {"mp3"}, "maxBitRate": {rate}, "estimateContentLength": {"true"}})
 }
 
+// PlayURL is MediaURL for playback: an original is streamed untouched (stream?format=raw), which
+// servers allow even when downloads are turned off for the account. Sync uses MediaURL, which keeps
+// to that setting (R37).
+func (c *Client) PlayURL(id, quality string) string {
+	if quality == "original" {
+		return c.endpoint("stream", url.Values{"id": {id}, "format": {"raw"}})
+	}
+	return c.MediaURL(id, quality)
+}
+
 func (c *Client) CoverURL(id string) string {
 	return c.endpoint("getCoverArt", url.Values{"id": {id}})
 }
 
-// Get fetches u, resuming at byte from when from > 0. The caller closes the body.
+// Get fetches u, resuming at byte from when from > 0. The caller closes the body. A Subsonic error
+// sent as the body (servers answer 200 with one) is returned as an error, so it is never saved as
+// a song or a cover.
 func (c *Client) Get(ctx context.Context, u string, from int64) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	op := "get"
+	if pu, err := url.Parse(u); err == nil && pu.Path != "" {
+		op = path.Base(pu.Path)
+	}
+	resp, err := c.do(ctx, op, u, from)
 	if err != nil {
-		return nil, &APIError{Op: "get", Msg: applog.Redact(err.Error()), kind: ErrUnreachable}
+		return nil, err
 	}
-	if from > 0 {
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", from))
-	}
-	resp, err := c.hc.Do(req)
-	if err != nil {
-		c.logf("GET %s -> %v", u, err)
-		return nil, &APIError{Op: "get", Msg: applog.Redact(err.Error()), kind: transportKind(err)}
-	}
-	c.logf("GET %s -> %d", u, resp.StatusCode)
 	if resp.StatusCode != 200 && resp.StatusCode != 206 {
 		resp.Body.Close()
-		return nil, &APIError{Op: "get", HTTP: resp.StatusCode, Msg: http.StatusText(resp.StatusCode), kind: ErrUnreachable}
+		return nil, &APIError{Op: op, HTTP: resp.StatusCode, Msg: http.StatusText(resp.StatusCode), kind: ErrUnreachable}
 	}
-	return resp, nil
+	// An envelope is known by its type, or by its first bytes when a proxy dropped or changed that.
+	br := bufio.NewReaderSize(resp.Body, 512)
+	if mt, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type")); mt != "application/json" && !strings.HasSuffix(mt, "/xml") && !envelope(br) {
+		resp.Body = struct {
+			io.Reader
+			io.Closer
+		}{br, resp.Body}
+		return resp, nil
+	}
+	body, _ := io.ReadAll(io.LimitReader(br, 64<<10))
+	resp.Body.Close()
+	err = decode(op, resp.StatusCode, body, nil)
+	var ae *APIError
+	if !errors.As(err, &ae) || ae.Code == 0 {
+		return nil, &APIError{Op: op, HTTP: resp.StatusCode, Msg: "The server sent an error instead of the file"}
+	}
+	return nil, err
+}
+
+// envelope reports whether the body starts as a subsonic-response (JSON or XML), not as media.
+func envelope(br *bufio.Reader) bool {
+	head, _ := br.Peek(128)
+	t := bytes.TrimLeft(head, " \t\r\n")
+	return len(t) > 0 && (t[0] == '{' || t[0] == '<') && bytes.Contains(head, []byte("subsonic-response"))
 }
 
 func transportKind(err error) error {
@@ -316,6 +496,10 @@ func transportKind(err error) error {
 	case errors.Is(err, ErrInsecure):
 		return ErrInsecure
 	case isCert(err):
+		var ci x509.CertificateInvalidError
+		if errors.As(err, &ci) && ci.Reason == x509.Expired && !timeKnown() {
+			return ErrUnreachable // the clock is unset and the server's time couldn't be read
+		}
 		return ErrCert
 	}
 	return ErrUnreachable

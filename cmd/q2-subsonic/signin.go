@@ -7,6 +7,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -30,6 +31,7 @@ const (
 	pinTries       = 10
 	pinLock        = time.Minute
 	signinTimedOut = "Sign-in timed out"
+	signinConns    = 16 // open connections the sign-in page takes at once
 )
 
 // listenTCP listens on port, or on the next nine when it is taken; port 0 takes any free one.
@@ -66,6 +68,8 @@ type signin struct {
 	lockout  time.Time
 	ok       bool
 	msg      string
+	failed   string            // the last phone sign-in's failure, still shown after a restart until the next try
+	conns    chan struct{}     // one slot per open connection (capListener)
 	shown    map[string]string // the QR page's keys as start wrote them
 }
 
@@ -96,13 +100,17 @@ func (s *signin) start(port int) {
 	s.ln, s.done = ln, make(chan struct{})
 	s.key, s.pin = q2.Key(16), q2.PIN(6)
 	s.deadline = s.clock().Add(signinTimeout)
-	s.fails, s.lockout, s.ok, s.msg = 0, time.Time{}, false, ""
+	s.fails, s.lockout, s.ok, s.msg = 0, time.Time{}, false, s.failed
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.index)
 	mux.HandleFunc("/api/login", s.login)
 	mux.HandleFunc("/api/signin", s.signin)
-	s.srv = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second}
-	go s.srv.Serve(ln)
+	// Any LAN host can reach it: bound the headers, the time to send a request and the open
+	// connections, so none can pin the Q2's memory or file descriptors.
+	s.srv = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 15 * time.Second,
+		IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8 << 10}
+	s.conns = make(chan struct{}, signinConns)
+	go s.srv.Serve(capListener{ln, s.conns})
 	go s.watch(s.done)
 
 	kv := map[string]string{"pin": s.pin, "note": "Scan with your phone"}
@@ -135,7 +143,7 @@ func (s *signin) watch(done chan struct{}) {
 			s.mu.Lock()
 			late := !s.clock().Before(s.deadline)
 			if late {
-				s.ok, s.msg = false, signinTimedOut
+				s.ok, s.msg, s.failed = false, signinTimedOut, ""
 			}
 			s.mu.Unlock()
 			if late {
@@ -156,11 +164,11 @@ func (s *signin) stop() {
 	srv := s.srv
 	s.ln, s.srv = nil, nil
 	close(s.done)
-	// After a success the Q2 may still show the QR page, which draws its note only beside a code
-	// (addon.c qr_refresh; without addr it says "Connect the Q2 to Wi-Fi"): keep the code and
-	// address, drop the PIN and say it worked. The server behind them is closed.
+	// After a success or the timeout the Q2 may still show the QR page, which draws its note only
+	// beside a code (addon.c qr_refresh; without addr it says "Connect the Q2 to Wi-Fi"): keep the
+	// code and address, drop the PIN and say what happened. The server behind them is closed.
 	kv := map[string]string{}
-	if s.ok {
+	if s.ok || s.msg == signinTimedOut {
 		kv = map[string]string{"addr": s.shown["addr"], "qr": s.shown["qr"], "qrsize": s.shown["qrsize"],
 			"note": s.msg + " · Press Return"}
 	}
@@ -276,7 +284,7 @@ func (s *signin) signin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.authed(r) {
-		refuse(w, http.StatusUnauthorized, "sign in")
+		refuse(w, http.StatusUnauthorized, "Sign-in was restarted on the Q2. Open Sign In from Your Phone again and scan the new code.")
 		return
 	}
 	var c subsonic.Creds
@@ -288,11 +296,19 @@ func (s *signin) signin(w http.ResponseWriter, r *http.Request) {
 	c = subsonic.Creds{Server: strings.TrimSpace(body.Server), User: strings.TrimSpace(body.User), Password: body.Password}
 	fin := func(ok bool, msg string) {
 		s.mu.Lock()
-		s.ok, s.msg = ok, msg
+		s.ok, s.msg, s.failed = ok, msg, ""
+		var kv map[string]string
+		if !ok && s.ln != nil { // the QR page says it too, keeping the code and PIN for another try
+			s.failed, kv = msg, maps.Clone(s.shown)
+			kv["note"] = msg
+		}
 		s.mu.Unlock()
+		if kv != nil {
+			s.state.Write(kv)
+		}
 		reply(w, http.StatusOK, map[string]any{"ok": ok, "message": msg})
 	}
-	host := c.Server
+	host := "the server" // never the raw address, which may hold a user:password@
 	if u, err := url.Parse(c.Server); err == nil && u.Host != "" {
 		host = u.Host
 	}
@@ -307,7 +323,7 @@ func (s *signin) signin(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 		defer cancel()
-		err = cl.Ping(ctx)
+		c, err = cl.SignIn(ctx) // with OpenSubsonic API keys, only the key is kept
 	}
 	if err != nil {
 		fin(false, subsonic.Message(err, host))
@@ -319,4 +335,36 @@ func (s *signin) signin(w http.ResponseWriter, r *http.Request) {
 	}
 	fin(true, "Signed in as "+c.User)
 	go s.stop()
+}
+
+// capListener closes connections past its semaphore's size at once.
+type capListener struct {
+	net.Listener
+	sem chan struct{}
+}
+
+func (l capListener) Accept() (net.Conn, error) {
+	for {
+		c, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		select {
+		case l.sem <- struct{}{}:
+			return &capConn{Conn: c, sem: l.sem}, nil
+		default:
+			c.Close()
+		}
+	}
+}
+
+type capConn struct {
+	net.Conn
+	sem  chan struct{}
+	once sync.Once
+}
+
+func (c *capConn) Close() error {
+	c.once.Do(func() { <-c.sem })
+	return c.Conn.Close()
 }
