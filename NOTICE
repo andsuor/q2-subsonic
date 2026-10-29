@@ -1,0 +1,9 @@
+q2-subsonic
+Copyright (c) 2026 the q2-subsonic authors, MIT License (see LICENSE).
+
+internal/q2spot, internal/q2 and internal/qr, and the build and launcher scripts in
+contrib/shanlingq2, come from q2-filebrowser, https://github.com/group-a-study/q2-filebrowser,
+Copyright (c) 2026 the q2-filebrowser authors, MIT License.
+
+internal/tlsroots/cacert.pem is the Mozilla CA certificate bundle as extracted by curl,
+https://curl.se/ca/cacert.pem (MPL-2.0).
