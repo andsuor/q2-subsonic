@@ -1238,3 +1238,23 @@ func TestRenameReplacesOrphan(t *testing.T) {
 		t.Errorf("a recorded song's file was replaced: %q", b)
 	}
 }
+
+// An album folder left with only its cover and a download's leftovers (.part and .part.key of a
+// plan that was replaced) is removed whole (review G1, Minor 7).
+func TestRemovePrunesLeftoverParts(t *testing.T) {
+	_, r, root := setup(t)
+	z := &library.Entry{ID: "z", Path: root + "/Subsonic/Z/z/01 - z.flac", Quality: "original"}
+	dir := filepath.Dir(z.Path)
+	for _, f := range []string{z.Path, dir + "/cover.jpg", dir + "/02 - y.flac.part", dir + "/02 - y.flac.part.key"} {
+		put(t, f, "x")
+	}
+	(&library.Manifest{Songs: map[string]*library.Entry{"z": z}}).Save(root, root+"/.subsonic/manifest.json")
+	r.Start(plan.Plan{Remove: []*library.Entry{z}, Playlists: map[string][]string{}})
+	if s := wait(t, r); s.State != "done" {
+		t.Fatalf("%+v", s)
+	}
+	if _, err := os.Stat(root + "/Subsonic/Z"); !os.IsNotExist(err) {
+		es, _ := os.ReadDir(dir)
+		t.Errorf("album folder left: %v", es)
+	}
+}

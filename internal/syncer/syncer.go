@@ -708,14 +708,25 @@ func (r *Runner) freePlaylistFile(m *library.Manifest, name string, skipBase boo
 }
 
 // remove deletes path through the guard and, when its album folder is left holding only
-// cover.jpg, the cover too, so the guard prunes the folder.
+// cover.jpg and a replaced plan's leftover .part and .part.key files, those too, so the guard
+// prunes the folder.
+// ponytail: a leftover of a song later in this run, paused earlier, is fetched again from the start.
 func (r *Runner) remove(path string) error {
 	if err := library.Remove(r.root, path); err != nil {
 		return err
 	}
 	dir := filepath.Dir(path)
-	if es, err := os.ReadDir(dir); err == nil && len(es) == 1 && es[0].Name() == "cover.jpg" {
-		library.Remove(r.root, filepath.Join(dir, "cover.jpg"))
+	es, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	for _, e := range es {
+		if n := e.Name(); e.IsDir() || n != "cover.jpg" && !strings.HasSuffix(n, ".part") && !strings.HasSuffix(n, ".part.key") {
+			return nil // a song, or something else, still lives here
+		}
+	}
+	for _, e := range es {
+		library.Remove(r.root, filepath.Join(dir, e.Name()))
 	}
 	return nil
 }
