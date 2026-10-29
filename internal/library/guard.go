@@ -46,11 +46,20 @@ func Owned(root, path string) bool {
 	return false
 }
 
+// checkOwned is the gate for every write and delete: path must already be in Clean form (so the
+// OS and the guard read the same path, e.g. no "link/.." tricks) and Owned.
+func checkOwned(root, path string) error {
+	if filepath.Clean(path) != path || !Owned(root, path) {
+		return errors.New("refusing path outside owned trees: " + path)
+	}
+	return nil
+}
+
 // Remove is the only way the app deletes: it refuses anything not Owned, treats a missing file
 // as done, and prunes folders left empty under Navidrome/ (never Navidrome/ itself).
 func Remove(root, path string) error {
-	if !Owned(root, path) {
-		return errors.New("refusing to remove outside owned trees: " + path)
+	if err := checkOwned(root, path); err != nil {
+		return err
 	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err

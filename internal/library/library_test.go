@@ -170,7 +170,7 @@ func TestM3UKeepsDuplicates(t *testing.T) {
 	if p != root+"/_explaylist_data/Navidrome - Mix_ 1.m3u" {
 		t.Fatal(p)
 	}
-	if err := WriteM3U(p, []string{"/mnt/mmc/a.flac", "/mnt/mmc/b.flac", "/mnt/mmc/a.flac"}); err != nil {
+	if err := WriteM3U(root, p, []string{"/mnt/mmc/a.flac", "/mnt/mmc/b.flac", "/mnt/mmc/a.flac"}); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(p)
@@ -181,17 +181,71 @@ func TestM3UKeepsDuplicates(t *testing.T) {
 
 func TestManifestRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	p := dir + "/sub/manifest.json"
+	p := dir + "/.subsonic/manifest.json"
 	m, err := LoadManifest(p)
 	if err != nil || len(m.Songs) != 0 {
 		t.Fatal(err, m)
 	}
 	m.Songs["1"] = &Entry{ID: "1", Path: "/x", Quality: "original", Size: 5, Items: []string{"album:a"}, Meta: "h"}
-	if err := m.Save(p); err != nil {
+	if err := m.Save(dir, p); err != nil {
 		t.Fatal(err)
 	}
 	m2, err := LoadManifest(p)
 	if err != nil || m2.Songs["1"].Meta != "h" || m2.Songs["1"].Items[0] != "album:a" {
 		t.Fatal(err, m2)
+	}
+}
+
+func TestRemoveSymlinkDotDotRefused(t *testing.T) {
+	root, out := t.TempDir(), t.TempDir()
+	mk(t, filepath.Join(filepath.Dir(out), "f"))
+	defer os.Remove(filepath.Join(filepath.Dir(out), "f"))
+	os.MkdirAll(root+"/Navidrome", 0o755)
+	os.Symlink(out, root+"/Navidrome/link")
+	mk(t, root+"/Navidrome/f")
+	if err := Remove(root, root+"/Navidrome/link/../f"); err == nil {
+		t.Fatal("allowed")
+	}
+	for _, p := range []string{filepath.Join(filepath.Dir(out), "f"), root + "/Navidrome/f"} {
+		if _, err := os.Stat(p); err != nil {
+			t.Fatal(p, "gone")
+		}
+	}
+}
+
+func TestMetaKeyArtistFallback(t *testing.T) {
+	a, b := song, song
+	a.AlbumArtist, b.AlbumArtist = "", ""
+	b.Artist = "Someone Else"
+	if MetaKey(a, "original") == MetaKey(b, "original") {
+		t.Fatal("Artist change not detected")
+	}
+}
+
+func TestWritesRefuseOutsideOwned(t *testing.T) {
+	root := t.TempDir()
+	if err := WriteM3U(root, root+"/Music/x.m3u", []string{"a"}); err == nil {
+		t.Fatal("m3u")
+	}
+	if err := WriteM3U(root, root+"/_explaylist_data/Other.m3u", nil); err == nil {
+		t.Fatal("m3u other")
+	}
+	m := &Manifest{Songs: map[string]*Entry{}}
+	if err := m.Save(root, root+"/elsewhere/manifest.json"); err == nil {
+		t.Fatal("save")
+	}
+	for _, d := range []string{"Music", "_explaylist_data", "elsewhere"} {
+		if _, err := os.Stat(root + "/" + d); err == nil {
+			t.Fatal(d, "created")
+		}
+	}
+}
+
+func TestWithIDKeeps120(t *testing.T) {
+	stem := strings.Repeat("é", 59) + "a" // 119 bytes
+	got := WithID("/r/"+stem+".flac", "12345")
+	name := filepath.Base(got)
+	if len(name) > 120 || !utf8.ValidString(name) || !strings.HasSuffix(name, " [12345].flac") {
+		t.Fatal(len(name), name)
 	}
 }

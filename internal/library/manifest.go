@@ -35,7 +35,10 @@ func LoadManifest(path string) (*Manifest, error) {
 }
 
 // Save writes the manifest atomically.
-func (m *Manifest) Save(path string) error {
+func (m *Manifest) Save(root, path string) error {
+	if err := checkOwned(root, path); err != nil {
+		return err
+	}
 	b, err := json.Marshal(m)
 	if err != nil {
 		return err

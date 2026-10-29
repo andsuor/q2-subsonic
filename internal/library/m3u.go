@@ -10,7 +10,10 @@ import (
 
 // WriteM3U writes #EXTM3U and one path per line, duplicates kept, atomically. The paths are
 // written as given (absolute, /mnt/mmc/...). If the device wants relative paths (Task 12), change only this.
-func WriteM3U(path string, paths []string) error {
+func WriteM3U(root, path string, paths []string) error {
+	if err := checkOwned(root, path); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}

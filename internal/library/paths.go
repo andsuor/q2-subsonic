@@ -44,16 +44,20 @@ func ext(s subsonic.Song, quality string) string {
 	return "mp3"
 }
 
+func artistOf(s subsonic.Song) string {
+	if s.AlbumArtist != "" {
+		return s.AlbumArtist
+	}
+	if s.Artist != "" {
+		return s.Artist
+	}
+	return "Unknown Artist"
+}
+
 // SongPath is <root>/Navidrome/<AlbumArtist>/<Year - >Album/<Disc->Track - Title.ext. It is pure;
 // collisions are resolved by the caller with WithID.
 func SongPath(root string, s subsonic.Song, quality string, multiDisc bool) string {
-	artist := s.AlbumArtist
-	if artist == "" {
-		artist = s.Artist
-	}
-	if artist == "" {
-		artist = "Unknown Artist"
-	}
+	artist := artistOf(s)
 	album := s.Album
 	if album == "" {
 		album = "Unknown Album"
@@ -68,15 +72,23 @@ func SongPath(root string, s subsonic.Song, quality string, multiDisc bool) stri
 	return filepath.Join(root, "Navidrome", SafeName(artist), SafeName(album), SafeName(file)+"."+ext(s, quality))
 }
 
-// WithID inserts " [<id>]" before the extension.
+// WithID inserts " [<id>]" before the extension, cutting the stem so the name stays <=120 bytes.
 func WithID(path, id string) string {
 	e := filepath.Ext(path)
-	return strings.TrimSuffix(path, e) + " [" + id + "]" + e
+	dir, stem := filepath.Split(strings.TrimSuffix(path, e))
+	tag := " [" + id + "]"
+	if n := maxComponent - len(e) - len(tag); len(stem) > n && n > 0 {
+		for n > 0 && !utf8.RuneStart(stem[n]) {
+			n--
+		}
+		stem = strings.TrimRight(stem[:n], ". ")
+	}
+	return dir + stem + tag + e
 }
 
 // MetaKey hashes the fields that build the path, so a metadata change is detectable.
 func MetaKey(s subsonic.Song, quality string) string {
-	h := sha1.Sum([]byte(strings.Join([]string{s.AlbumArtist, fmt.Sprint(s.Year), s.Album,
+	h := sha1.Sum([]byte(strings.Join([]string{artistOf(s), fmt.Sprint(s.Year), s.Album,
 		fmt.Sprint(s.Disc), fmt.Sprint(s.Track), s.Title, s.Suffix, quality}, "|")))
 	return hex.EncodeToString(h[:])
 }
