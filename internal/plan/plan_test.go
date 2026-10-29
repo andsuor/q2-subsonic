@@ -2,6 +2,7 @@ package plan
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/andsuor/q2-subsonic/internal/library"
@@ -172,5 +173,71 @@ func TestPlanRepathsDottedNames(t *testing.T) {
 	p := Compute(sel, map[string][]subsonic.Song{"song:s1": {s}}, nil, manifest(&old), root, big)
 	if len(p.Rename) != 1 || p.Rename[0].To != root+"/Subsonic/_38 Special/2020 - Alb/01 - One.flac" {
 		t.Fatalf("plan = %+v", p)
+	}
+}
+
+// The card is FAT/exFAT: paths that differ only in case are one file. A new song whose path is a
+// case variant of a removed song's gets its [id], so neither deletes the other (I5).
+func TestPlanCaseOnlyCollisionGetsID(t *testing.T) {
+	gone, s := song("s1", "One"), song("s2", "One")
+	gone.AlbumArtist = "Abba"
+	s.AlbumArtist = "ABBA"
+	sel := selection.Set{Items: []selection.Item{item("song", "s2", "original")}}
+	p := Compute(sel, map[string][]subsonic.Song{"song:s2": {s}}, nil, manifest(entry(gone, "original", 1000)), root, big)
+	if len(p.Add) != 1 || p.Add[0].Path != library.WithID(library.SongPath(root, s, "original", false), "s2") {
+		t.Fatalf("plan = %+v", p)
+	}
+}
+
+// A new song never plans onto the path of a song that moves away in the same sync: the move's
+// remove of its old file would delete it (M16).
+func TestPlanNoAddOntoMovingPath(t *testing.T) {
+	x, y := song("x", "T"), song("y", "T")
+	sel := selection.Set{Items: []selection.Item{item("song", "x", "original"), item("song", "y", "mp3-320")}}
+	m := manifest(entry(x, "mp3-320", 1000, "song:x")) // x goes from .mp3 to .flac; y wants x's .mp3 path
+	p := Compute(sel, map[string][]subsonic.Song{"song:x": {x}, "song:y": {y}}, nil, m, root, big)
+	for _, w := range p.Add {
+		if w.Song.ID == "y" && strings.EqualFold(w.Path, m.Songs["x"].Path) {
+			t.Fatalf("y planned onto x's old path %s", w.Path)
+		}
+	}
+}
+
+// Two songs whose tags were swapped never move onto each other's current file (I6).
+func TestPlanSwapNeverCrossesPaths(t *testing.T) {
+	x, y := song("x", "Alpha"), song("y", "Beta")
+	x.Track, y.Track = 1, 2
+	ex, ey := entry(x, "original", 1000, "album:a1"), entry(y, "original", 1000, "album:a1")
+	x.Title, x.Track, y.Title, y.Track = "Beta", 2, "Alpha", 1
+	sel := selection.Set{Items: []selection.Item{item("album", "a1", "original")}}
+	p := Compute(sel, map[string][]subsonic.Song{"album:a1": {x, y}}, nil, manifest(ex, ey), root, big)
+	if len(p.Rename) != 2 {
+		t.Fatalf("plan = %+v", p)
+	}
+	for _, mv := range p.Rename {
+		for _, e := range []*library.Entry{ex, ey} {
+			if e.ID != mv.ID && strings.EqualFold(mv.To, e.Path) {
+				t.Errorf("%s moves onto %s's file %s", mv.ID, e.ID, e.Path)
+			}
+		}
+	}
+}
+
+// A new format (same id) is fetched again, never renamed: the old bytes under a .flac name would
+// stay forever (I7). So is an original whose server size changed (a re-rip).
+func TestPlanFormatOrSizeChangeReplaces(t *testing.T) {
+	old, s := song("s1", "One"), song("s1", "One")
+	old.Suffix = "mp3"
+	sel := selection.Set{Items: []selection.Item{item("song", "s1", "original")}}
+	p := Compute(sel, map[string][]subsonic.Song{"song:s1": {s}}, nil, manifest(entry(old, "original", 900, "song:s1")), root, big)
+	if len(p.Replace) != 1 || len(p.Rename) != 0 || !strings.HasSuffix(p.Replace[0].Path, ".flac") {
+		t.Fatalf("format: plan = %+v", p)
+	}
+	e := entry(s, "original", 1000, "song:s1")
+	e.SrcSize = 1000
+	s.Size = 2000
+	p = Compute(sel, map[string][]subsonic.Song{"song:s1": {s}}, nil, manifest(e), root, big)
+	if len(p.Replace) != 1 || p.Replace[0].Path != e.Path || p.NeedBytes != 1000 {
+		t.Fatalf("size: plan = %+v", p)
 	}
 }

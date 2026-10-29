@@ -10,9 +10,12 @@ import (
 )
 
 // Entry is one synced song. Meta is MetaKey at sync time; Items are the selection keys holding it.
+// Size is the bytes on the card; SrcSize, for an original, the server's size of the file it came
+// from (0 when unknown: synced before it was kept), so a re-rip is noticed.
 type Entry struct {
 	ID, Path, Quality string
 	Size              int64
+	SrcSize           int64 `json:",omitempty"`
 	Items             []string
 	Meta              string
 }

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -20,6 +21,7 @@ import (
 	"github.com/andsuor/q2-subsonic/internal/library"
 	"github.com/andsuor/q2-subsonic/internal/plan"
 	"github.com/andsuor/q2-subsonic/internal/q2"
+	"github.com/andsuor/q2-subsonic/internal/selection"
 	"github.com/andsuor/q2-subsonic/internal/subsonic"
 )
 
@@ -169,6 +171,7 @@ func noParts(t *testing.T, root string) {
 func TestRunDownloadsAndRenames(t *testing.T) {
 	_, r, root := setup(t)
 	a, b := want(root, "a", "original"), want(root, "bb", "mp3-320")
+	a.Song.Size = 4242 // the server's size, kept to notice a re-rip (I7)
 	old, moved := root+"/Subsonic/Old/x/01 - r.flac", root+"/Subsonic/Art/2000 - Alb/09 - r.flac"
 	os.MkdirAll(filepath.Dir(old), 0o755)
 	os.WriteFile(old, []byte("r"), 0o644)
@@ -204,7 +207,7 @@ func TestRunDownloadsAndRenames(t *testing.T) {
 		}
 	}
 	if mf.Songs["r"].Path != moved || mf.Songs["a"].Meta != library.MetaKey(a.Song, "original") ||
-		mf.Songs["bb"].Quality != "mp3-320" || mf.Songs["a"].Size != int64(len(data("a"))) {
+		mf.Songs["bb"].Quality != "mp3-320" || mf.Songs["a"].Size != int64(len(data("a"))) || mf.Songs["a"].SrcSize != 4242 {
 		t.Fatalf("%+v %+v", mf.Songs["r"], mf.Songs["a"])
 	}
 	m3u, _ := os.ReadFile(library.PlaylistFile(root, "Mix"))
@@ -721,5 +724,110 @@ func TestDottedPlaylistFileReplaced(t *testing.T) {
 	want := root + "/_explaylist_data/Wait… What.m3u"
 	if _, err := os.Stat(want); err != nil || m.Playlists["Wait... What"] != want {
 		t.Fatal(err, m.Playlists)
+	}
+}
+
+// casefold runs the calling test again in a user namespace with a case-insensitive tmpfs folder as
+// the card (FAT/exFAT are case-insensitive; CI's filesystems are not), and returns that folder in
+// the run inside. The outer run returns "" once the inner one passed. It skips where user
+// namespaces or casefold tmpfs (Linux 6.13+) aren't available.
+func casefold(t *testing.T) string {
+	t.Helper()
+	if d := os.Getenv("Q2_CASEFOLD"); d != "" {
+		return d
+	}
+	dir := t.TempDir()
+	setup := `mount -t tmpfs -o casefold none "$1" && mkdir "$1/card" && chattr +F "$1/card"`
+	if out, err := exec.Command("unshare", "-rm", "sh", "-c", setup, "sh", dir).CombinedOutput(); err != nil {
+		t.Skipf("no casefold tmpfs here: %v %s", err, out)
+	}
+	run := setup + ` && Q2_CASEFOLD="$1/card" exec "$2" -test.run "^$3\$" -test.v`
+	out, err := exec.Command("unshare", "-rm", "sh", "-c", run, "sh", dir, os.Args[0], t.Name()).CombinedOutput()
+	if err != nil || !bytes.Contains(out, []byte("--- PASS: "+t.Name())) {
+		t.Fatalf("on a case-insensitive card: %v\n%s", err, out)
+	}
+	return ""
+}
+
+// On a case-insensitive card, a case-only path change (a) renames, (b) replaces without deleting
+// the new file, and (c) a new song on a removed song's case variant isn't deleted with it (I5).
+func TestCaseInsensitiveCard(t *testing.T) {
+	root := casefold(t)
+	if root == "" {
+		return
+	}
+	_, r0, _ := setup(t)
+	r := New(root, r0.src, nil)
+	r.Backoff, r.CardMounted, r.Net = r0.Backoff, r0.CardMounted, NewNetSlot()
+	mk := func(id, artist, q string) subsonic.Song {
+		return subsonic.Song{ID: id, Title: "T" + id, Album: "Alb", AlbumArtist: artist, Year: 2000, Track: 1, Suffix: "flac", Size: int64(len(data(id)))}
+	}
+	m := &library.Manifest{Songs: map[string]*library.Entry{}}
+	old := map[string]subsonic.Song{"a": mk("a", "Abba", ""), "b": mk("b", "Bee", ""), "c": mk("c", "Cee", "")}
+	old["c"] = subsonic.Song{ID: "c", Title: "Td", Album: "Alb", AlbumArtist: "Cee", Year: 2000, Track: 1, Suffix: "flac"}
+	quality := map[string]string{"a": "original", "b": "mp3-128", "c": "original"}
+	for id, s := range old {
+		p := library.SongPath(root, s, quality[id], false)
+		put(t, p, "old-"+id)
+		m.Songs[id] = &library.Entry{ID: id, Path: p, Quality: quality[id], Size: 5, Items: []string{"song:" + id}, Meta: library.MetaKey(s, quality[id])}
+	}
+	if err := m.Save(root, root+"/.subsonic/manifest.json"); err != nil {
+		t.Fatal(err)
+	}
+	a, b, d := mk("a", "ABBA", ""), mk("b", "BEE", ""), mk("d", "CEE", "")
+	sel := selection.Set{Items: []selection.Item{{Kind: "song", ID: "a", Quality: "original"}, {Kind: "song", ID: "b", Quality: "mp3-320"},
+		{Kind: "song", ID: "d", Quality: "original"}}}
+	p := plan.Compute(sel, map[string][]subsonic.Song{"song:a": {a}, "song:b": {b}, "song:d": {d}}, nil, m, root, 1<<40)
+	if err := r.Start(p); err != nil {
+		t.Fatal(err)
+	}
+	if s := wait(t, r); s.State != "done" || s.Failed != 0 {
+		t.Fatalf("%+v", s)
+	}
+	mf := manifest(t, root)
+	for id, want := range map[string]string{"a": "old-a", "b": string(data("b")), "d": string(data("d"))} {
+		e := mf.Songs[id]
+		if e == nil {
+			t.Fatalf("%s not in the manifest", id)
+		}
+		if got, err := os.ReadFile(e.Path); err != nil || string(got) != want {
+			t.Errorf("%s at %s: %v, %d bytes", id, e.Path, err, len(got))
+		}
+	}
+	if mf.Songs["c"] != nil {
+		t.Error("c kept")
+	}
+}
+
+// A rename cut after the file moved but before the manifest was saved is finished, not failed
+// on every later sync (M13).
+func TestRenameRecoversAfterCrash(t *testing.T) {
+	_, r, root := setup(t)
+	from, to := root+"/Subsonic/A/x/01 - r.flac", root+"/Subsonic/A/y/01 - r.flac"
+	put(t, to, "r") // moved already; the manifest still says from
+	(&library.Manifest{Songs: map[string]*library.Entry{"r": {ID: "r", Path: from, Quality: "original", Size: 1}}}).Save(root, root+"/.subsonic/manifest.json")
+	r.Start(plan.Plan{Rename: []plan.Move{{From: from, To: to, ID: "r"}}})
+	if s := wait(t, r); s.State != "done" || s.Failed != 0 {
+		t.Fatalf("%+v", s)
+	}
+	if e := manifest(t, root).Songs["r"]; e == nil || e.Path != to {
+		t.Fatalf("%+v", e)
+	}
+}
+
+// A playlist names where its song is: after a rename that failed, the song's old path, never the
+// planned one (which may hold nothing, or another song) (I6).
+func TestPlaylistNamesWhereTheSongIs(t *testing.T) {
+	_, r, root := setup(t)
+	from, to := root+"/Subsonic/A/x/01 - r.flac", root+"/Subsonic/A/y/01 - r.flac"
+	put(t, from, "r")
+	put(t, root+"/Subsonic/A/y", "a file where the folder must go: the rename fails")
+	(&library.Manifest{Songs: map[string]*library.Entry{"r": {ID: "r", Path: from, Quality: "original", Size: 1}}}).Save(root, root+"/.subsonic/manifest.json")
+	r.Start(plan.Plan{Rename: []plan.Move{{From: from, To: to, ID: "r"}}, Playlists: map[string][]string{"Mix": {to}}})
+	if s := wait(t, r); s.State != "done" || s.Failed != 1 {
+		t.Fatalf("%+v", s)
+	}
+	if b, _ := os.ReadFile(library.PlaylistFile(root, "Mix")); string(b) != "#EXTM3U\n"+from+"\n" {
+		t.Fatalf("%q", b)
 	}
 }

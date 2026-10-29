@@ -305,7 +305,7 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 		if e == nil || e.Path == mv.To {
 			continue
 		}
-		if err := r.rename(mv); err != nil {
+		if err := r.rename(e.Path, mv.To); err != nil {
 			if !r.CardMounted() {
 				return q2.ErrNoCard
 			}
@@ -347,12 +347,16 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 			continue
 		}
 		old := m.Songs[id]
-		m.Songs[id] = &library.Entry{ID: id, Path: w.Path, Quality: w.Quality, Size: n, Items: w.Items,
+		e := &library.Entry{ID: id, Path: w.Path, Quality: w.Quality, Size: n, Items: w.Items,
 			Meta: library.MetaKey(w.Song, w.Quality)}
+		if w.Quality == "original" {
+			e.SrcSize = w.Song.Size
+		}
+		m.Songs[id] = e
 		if err := save(); err != nil {
 			return err
 		}
-		if old != nil && old.Path != w.Path {
+		if old != nil && !oneFile(old.Path, w.Path) {
 			r.remove(old.Path)
 		}
 		if dir := filepath.Dir(w.Path); !covers[dir] {
@@ -376,6 +380,13 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 	}
 	// Legacy "Navidrome - *.m3u" files are removed only in the sync after the one-time migration
 	// (which sets PlaylistsStale); otherwise a file with that name is the user's own.
+	planned := map[string]string{} // a path the plan gives a song -> its id
+	for _, w := range append(append([]plan.Want(nil), p.Add...), p.Replace...) {
+		planned[w.Path] = w.Song.ID
+	}
+	for _, mv := range p.Rename {
+		planned[mv.To] = mv.ID
+	}
 	migrating := m.PlaylistsStale
 	used := map[string]bool{} // playlist files claimed in this run
 	names := make([]string, 0, len(p.Playlists))
@@ -392,6 +403,9 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 		used[f] = true
 		have := []string{} // songs that failed are left out until they arrive
 		for _, s := range paths {
+			if id, ok := planned[s]; ok && m.Songs[id] != nil {
+				s = m.Songs[id].Path // where the song is: a failed rename or replace left it at its old path
+			}
 			if _, err := os.Stat(s); err == nil {
 				have = append(have, s)
 			}
@@ -482,6 +496,19 @@ func (r *Runner) remove(path string) error {
 	return nil
 }
 
+// oneFile reports whether a and b name one file: on the case-insensitive card, case variants do.
+func oneFile(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ai, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	bi, err := os.Stat(b)
+	return err == nil && os.SameFile(ai, bi)
+}
+
 // owned gates song writes (downloads and renames): only under Subsonic/, never .subsonic/.
 func owned(root, path string) error {
 	if !library.InSongs(root, path) {
@@ -490,22 +517,32 @@ func owned(root, path string) error {
 	return nil
 }
 
-func (r *Runner) rename(mv plan.Move) error {
-	for _, p := range []string{mv.From, mv.To} {
+func (r *Runner) rename(from, to string) error {
+	for _, p := range []string{from, to} {
 		if err := owned(r.root, p); err != nil {
 			return err
 		}
 	}
-	if _, err := os.Lstat(mv.To); err == nil {
-		return errors.New("rename target exists: " + mv.To)
+	fi, ferr := os.Lstat(from)
+	ti, terr := os.Lstat(to)
+	switch {
+	case ferr == nil && terr == nil && os.SameFile(fi, ti):
+		// A case-only change on the case-insensitive card: one file. The rename may keep the old
+		// case (FAT and casefold ignore it), and to reaches the file either way.
+		os.Rename(from, to)
+		return nil
+	case terr == nil && errors.Is(ferr, os.ErrNotExist):
+		return nil // moved already, and cut before the manifest was saved (M13)
+	case terr == nil:
+		return errors.New("rename target exists: " + to)
 	}
-	if err := os.MkdirAll(filepath.Dir(mv.To), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(to), 0o755); err != nil {
 		return err
 	}
-	if err := os.Rename(mv.From, mv.To); err != nil {
+	if err := os.Rename(from, to); err != nil {
 		return err
 	}
-	return r.remove(mv.From) // the file is gone already; this prunes the folders it left empty
+	return r.remove(from) // the file is gone already; this prunes the folders it left empty
 }
 
 // fetchTries fetches w, one try per Backoff entry, waiting that long after each failed try but

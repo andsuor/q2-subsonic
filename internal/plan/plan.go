@@ -3,7 +3,9 @@
 package plan
 
 import (
+	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/andsuor/q2-subsonic/internal/library"
 	"github.com/andsuor/q2-subsonic/internal/selection"
@@ -57,6 +59,11 @@ func estimate(s subsonic.Song, q string) int64 {
 	return s.Size
 }
 
+// resized reports whether an original's server file changed size since it was synced (a re-rip).
+func resized(e *library.Entry, w *Want) bool {
+	return w.Quality == "original" && e.SrcSize > 0 && w.Song.Size > 0 && e.SrcSize != w.Song.Size
+}
+
 // Compute diffs the selection (resolved: item key -> its songs; playlistNames: playlist item key
 // -> display name) against the manifest.
 func Compute(sel selection.Set, resolved map[string][]subsonic.Song, playlistNames map[string]string,
@@ -104,14 +111,15 @@ func Compute(sel selection.Set, resolved map[string][]subsonic.Song, playlistNam
 
 	// unchanged: the song stays as it is on the card.
 	unchanged := func(e *library.Entry, w *Want) bool {
-		return e.Quality == w.Quality && e.Meta == library.MetaKey(w.Song, w.Quality) && !library.StaleName(root, e.Path)
+		return e.Quality == w.Quality && e.Meta == library.MetaKey(w.Song, w.Quality) && !library.StaleName(root, e.Path) &&
+			!resized(e, w)
 	}
-	// Songs staying put own their path; removed entries still occupy theirs until deleted last.
+	// Every song owns its current path, case-folded (the card is FAT/exFAT: case variants are one
+	// file), for this whole sync: nothing new lands on a file that a rename, a replace or the removals
+	// take away, and no rename lands on another song's file (swapped tags get their [id] instead).
 	claim := map[string]string{}
 	for id, e := range m.Songs {
-		if w := wants[id]; w == nil || unchanged(e, w) {
-			claim[e.Path] = id
-		}
+		claim[strings.ToLower(e.Path)] = id
 	}
 
 	var p Plan
@@ -125,17 +133,18 @@ func Compute(sel selection.Set, resolved map[string][]subsonic.Song, playlistNam
 			continue
 		}
 		path := library.SongPath(root, w.Song, w.Quality, multi[w.Song.AlbumID])
-		if owner, ok := claim[path]; ok && owner != id {
+		if owner, ok := claim[strings.ToLower(path)]; ok && owner != id {
 			path = library.WithID(path, id)
 		}
-		claim[path] = id
+		claim[strings.ToLower(path)] = id
 		w.Path, final[id] = path, path
 		w.Bytes = estimate(w.Song, w.Quality)
 		switch {
 		case e == nil:
 			p.Add = append(p.Add, *w)
 			p.NeedBytes += w.Bytes
-		case e.Quality != w.Quality:
+		case e.Quality != w.Quality || !strings.EqualFold(filepath.Ext(e.Path), filepath.Ext(path)) || resized(e, w):
+			// a new format or a re-rip is fetched again, never renamed
 			p.Replace = append(p.Replace, *w)
 			p.NeedBytes += w.Bytes - e.Size
 		case e.Path != path:
