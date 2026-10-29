@@ -223,25 +223,41 @@ func decode(op string, status int, body []byte, out any) error {
 	return nil
 }
 
-// SignIn checks the sign-in and returns what to keep on the card. A server offering OpenSubsonic API
-// keys gets one typed in the password field, and only the key is kept, with the user name the server
-// gives for it; any other server gets the password, checked with token auth.
+// SignIn checks the sign-in and returns what to keep on the card. The password field may hold an
+// OpenSubsonic API key: on a server offering them it is tried as a key first, and a working key is
+// kept alone, with the user name the server gives for it. Otherwise (or when the key is refused) it
+// is the password, checked with token auth and kept as before (R38).
 func (c *Client) SignIn(ctx context.Context) (Creds, error) {
-	if !c.offers(ctx, "apiKeyAuthentication") {
-		return c.c, c.Ping(ctx)
+	var keyErr error
+	if c.offers(ctx, "apiKeyAuthentication") {
+		k := *c
+		k.c = Creds{Server: c.c.Server, APIKey: c.c.Password}
+		var r struct {
+			T struct {
+				Username string `json:"username"`
+			} `json:"tokenInfo"`
+		}
+		keyErr = k.call(ctx, "tokenInfo", nil, &r)
+		if keyErr == nil {
+			k.c.User = cmp.Or(r.T.Username, c.c.User)
+			return k.c, nil
+		}
+		if !errors.Is(keyErr, ErrAuth) && !errors.Is(keyErr, ErrAuthMethod) {
+			return Creds{}, keyErr // not a refused key: unreachable, certificate, ...
+		}
 	}
-	k := *c
-	k.c = Creds{Server: c.c.Server, APIKey: c.c.Password}
-	var r struct {
-		T struct {
-			Username string `json:"username"`
-		} `json:"tokenInfo"`
+	err := c.Ping(ctx)
+	switch {
+	case err == nil:
+		return c.c, nil
+	case keyErr != nil && errors.Is(err, ErrAuthMethod): // a server taking only keys: the key was wrong
+		return Creds{}, keyErr
+	case keyErr != nil && errors.Is(err, ErrAuth):
+		var ae *APIError
+		errors.As(err, &ae)
+		return Creds{}, &APIError{Op: "signin", HTTP: ae.HTTP, Code: ae.Code, Msg: ae.Msg, kind: ErrAuthKey}
 	}
-	if err := k.call(ctx, "tokenInfo", nil, &r); err != nil {
-		return Creds{}, err
-	}
-	k.c.User = cmp.Or(r.T.Username, c.c.User)
-	return k.c, nil
+	return Creds{}, err
 }
 
 // offers reports whether the server lists the OpenSubsonic extension. The call is public, so it
@@ -408,18 +424,27 @@ func (c *Client) MediaURL(id, quality string) string {
 	return c.endpoint("stream", url.Values{"id": {id}, "format": {"mp3"}, "maxBitRate": {rate}, "estimateContentLength": {"true"}})
 }
 
+// PlayURL is MediaURL for playback: an original is streamed untouched (stream?format=raw), which
+// servers allow even when downloads are turned off for the account. Sync uses MediaURL, which keeps
+// to that setting (R37).
+func (c *Client) PlayURL(id, quality string) string {
+	if quality == "original" {
+		return c.endpoint("stream", url.Values{"id": {id}, "format": {"raw"}})
+	}
+	return c.MediaURL(id, quality)
+}
+
 func (c *Client) CoverURL(id string) string {
 	return c.endpoint("getCoverArt", url.Values{"id": {id}})
 }
 
 // Get fetches u, resuming at byte from when from > 0. The caller closes the body. A Subsonic error
 // sent as the body (servers answer 200 with one) is returned as an error, so it is never saved as
-// a song or a cover. An original the server won't let this user download (code 50) is fetched with
-// stream?format=raw instead, which serves the same file untouched.
+// a song or a cover.
 func (c *Client) Get(ctx context.Context, u string, from int64) (*http.Response, error) {
-	op, id := "get", ""
+	op := "get"
 	if pu, err := url.Parse(u); err == nil && pu.Path != "" {
-		op, id = path.Base(pu.Path), pu.Query().Get("id")
+		op = path.Base(pu.Path)
 	}
 	resp, err := c.do(ctx, op, u, from)
 	if err != nil {
@@ -438,9 +463,6 @@ func (c *Client) Get(ctx context.Context, u string, from int64) (*http.Response,
 	var ae *APIError
 	if !errors.As(err, &ae) || ae.Code == 0 {
 		return nil, &APIError{Op: op, HTTP: resp.StatusCode, Msg: "The server sent an error instead of the file"}
-	}
-	if ae.Code == 50 && op == "download" {
-		return c.Get(ctx, c.endpoint("stream", url.Values{"id": {id}, "format": {"raw"}}), from)
 	}
 	return nil, err
 }

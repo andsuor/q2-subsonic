@@ -16,6 +16,8 @@ var (
 	ErrNotSubsonic = errors.New("not a Subsonic server")
 	ErrInsecure    = errors.New("https required")
 	ErrAuthMethod  = errors.New("sign-in method not accepted")
+	// ErrAuthKey is a sign-in refused both as an API key and as a password; it is ErrAuth too.
+	ErrAuthKey = fmt.Errorf("wrong password or API key: %w", ErrAuth)
 	// ErrStalled is a body that stopped arriving; it is ErrUnreachable too.
 	ErrStalled = fmt.Errorf("server stopped sending: %w", ErrUnreachable)
 )
@@ -55,7 +57,7 @@ var codeMsg = map[int]string{
 	41: "This server doesn't allow token sign-in for this user",
 	42: "This server doesn't accept this sign-in method",
 	43: "This server doesn't accept this sign-in method",
-	44: "Invalid API key: enter one from your server as the password",
+	44: "Invalid API key: create one in your server's settings",
 }
 
 // timeKnown is tlsroots.Known, injectable for tests.
@@ -73,6 +75,12 @@ func isCert(err error) bool {
 // Message maps err to the user-facing sign-in copy.
 func Message(err error, host string) string {
 	var he *APIError
+	if errors.As(err, &he) && he.Code == 50 && he.Op == "download" {
+		return "Downloads are turned off for this account on the server"
+	}
+	if errors.Is(err, ErrAuthKey) {
+		return "Wrong username, password or API key"
+	}
 	if errors.As(err, &he) && codeMsg[he.Code] != "" {
 		return codeMsg[he.Code]
 	}

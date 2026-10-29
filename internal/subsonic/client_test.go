@@ -285,7 +285,7 @@ func TestCodeCopy(t *testing.T) {
 		30: "The server's Subsonic API is too old for this app",
 		41: "This server doesn't allow token sign-in for this user",
 		42: "This server doesn't accept this sign-in method",
-		44: "Invalid API key: enter one from your server as the password",
+		44: "Invalid API key: create one in your server's settings",
 	} {
 		err := serveJSON(t, failed(code)).Ping(context.Background())
 		if m := Message(err, "h"); m != want {
@@ -320,9 +320,10 @@ func TestGetRefusesErrorBody(t *testing.T) {
 	}
 }
 
-// M27: an original is fetched with stream?format=raw when the server refuses downloads (code 50).
-func TestOriginalFallsBackToStreamRaw(t *testing.T) {
-	var got url.Values
+// M27/R37: sync respects a server that turns downloads off for the account: a refused original is
+// an error with its own words, never fetched another way. Playback opts in to stream?format=raw.
+func TestDownloadsOffAndPlayURL(t *testing.T) {
+	var streamed url.Values
 	var rng string
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if path.Base(r.URL.Path) == "download" {
@@ -330,20 +331,32 @@ func TestOriginalFallsBackToStreamRaw(t *testing.T) {
 			w.Write([]byte(failed(50)))
 			return
 		}
-		got, rng = r.URL.Query(), r.Header.Get("Range")
+		streamed, rng = r.URL.Query(), r.Header.Get("Range")
 		w.Header().Set("Content-Type", "audio/flac")
 		w.Write([]byte("AUDIO"))
 	}))
 	defer srv.Close()
 	c, _ := New(Creds{Server: srv.URL, User: "u", Password: "pw"}, srv.Client())
-	resp, err := c.Get(context.Background(), c.MediaURL("s1", "original"), 100)
+	ctx := context.Background()
+
+	resp, err := c.Get(ctx, c.MediaURL("s1", "original"), 0)
+	var ae *APIError
+	if resp != nil || !errors.As(err, &ae) || ae.Op != "download" || ae.Code != 50 ||
+		Message(err, "h") != "Downloads are turned off for this account on the server" || streamed != nil {
+		t.Fatalf("sync: %v %v (%q), streamed %v", resp, err, Message(err, "h"), streamed)
+	}
+
+	if u := c.PlayURL("s1", "mp3-320"); !strings.Contains(u, "/rest/stream?") || !strings.Contains(u, "format=mp3") || !strings.Contains(u, "maxBitRate=320") {
+		t.Fatal(u)
+	}
+	resp, err = c.Get(ctx, c.PlayURL("s1", "original"), 100)
 	if err != nil {
 		t.Fatal(err)
 	}
 	b, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if string(b) != "AUDIO" || got.Get("id") != "s1" || got.Get("format") != "raw" || got.Has("maxBitRate") || rng != "bytes=100-" {
-		t.Fatalf("body %q query %v range %q", b, got, rng)
+	if string(b) != "AUDIO" || streamed.Get("id") != "s1" || streamed.Get("format") != "raw" || streamed.Has("maxBitRate") || rng != "bytes=100-" {
+		t.Fatalf("play: body %q query %v range %q", b, streamed, rng)
 	}
 }
 
@@ -469,8 +482,9 @@ func TestNotYetValidWhileClockUnknown(t *testing.T) {
 	}
 }
 
-// keyServer offers OpenSubsonic API keys: KEY belongs to "andreas"; token auth is refused (42).
-func keyServer(t *testing.T, offer bool, seen *[]url.Values) *httptest.Server {
+// keyServer lists apiKeyAuthentication when offer is set: KEY belongs to "andreas". Token auth with
+// u/pw works too, unless keyOnly (then it is refused with 42, as on LMS).
+func keyServer(t *testing.T, offer, keyOnly bool, seen *[]url.Values) *httptest.Server {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
 		*seen = append(*seen, q)
@@ -478,6 +492,7 @@ func keyServer(t *testing.T, offer bool, seen *[]url.Values) *httptest.Server {
 		ok := func(extra string) {
 			fmt.Fprintf(w, `{"subsonic-response":{"status":"ok","version":"1.16.1","openSubsonic":true%s}}`, extra)
 		}
+		sum := md5.Sum([]byte("pw" + q.Get("s")))
 		switch op := path.Base(r.URL.Path); {
 		case op == "getOpenSubsonicExtensions":
 			if offer {
@@ -485,10 +500,6 @@ func keyServer(t *testing.T, offer bool, seen *[]url.Values) *httptest.Server {
 			} else {
 				ok(`,"openSubsonicExtensions":[]`)
 			}
-		case !offer && q.Get("u") == "u" && q.Get("t") != "":
-			ok("")
-		case !offer:
-			w.Write([]byte(failed(40)))
 		case q.Has("u") && q.Has("apiKey"):
 			w.Write([]byte(failed(43)))
 		case q.Get("apiKey") == "KEY" && op == "tokenInfo":
@@ -497,19 +508,24 @@ func keyServer(t *testing.T, offer bool, seen *[]url.Values) *httptest.Server {
 			ok("")
 		case q.Has("apiKey"):
 			w.Write([]byte(failed(44)))
-		default:
+		case keyOnly:
 			w.Write([]byte(failed(42)))
+		case q.Get("u") == "u" && q.Get("t") == hex.EncodeToString(sum[:]):
+			ok("")
+		default:
+			w.Write([]byte(failed(40)))
 		}
 	}))
 	t.Cleanup(srv.Close)
 	return srv
 }
 
-// I23: a server offering OpenSubsonic API keys is signed in to with a key (typed as the password),
-// and only the key is kept; the user name is the server's. Nothing secret goes to the extensions call.
+// I23/R38: a server offering OpenSubsonic API keys is signed in to with a key (typed as the
+// password), and only the key is kept; the user name is the server's. Nothing secret goes to the
+// extensions call.
 func TestSignInAPIKey(t *testing.T) {
 	var seen []url.Values
-	srv := keyServer(t, true, &seen)
+	srv := keyServer(t, true, false, &seen)
 	c, _ := New(Creds{Server: srv.URL, User: "typed", Password: "KEY"}, srv.Client())
 	got, err := c.SignIn(context.Background())
 	if err != nil || got != (Creds{Server: srv.URL, User: "andreas", APIKey: "KEY"}) {
@@ -527,20 +543,42 @@ func TestSignInAPIKey(t *testing.T) {
 	if q := seen[len(seen)-1]; q.Get("apiKey") != "KEY" || q.Has("u") || q.Has("t") || q.Has("s") || q.Get("v") != "1.13.0" {
 		t.Fatalf("key request %v", q)
 	}
-	// a password typed where the key goes
-	c, _ = New(Creds{Server: srv.URL, User: "u", Password: "pw"}, srv.Client())
-	if _, err := c.SignIn(context.Background()); Message(err, "h") != "Invalid API key: enter one from your server as the password" {
-		t.Fatalf("password on a key server: %v", err)
+}
+
+// R38: on a server offering API keys, a password still works (the key try fails, token auth
+// follows) and is kept as before; when both fail, the words cover both.
+func TestSignInPasswordOnKeyServer(t *testing.T) {
+	var seen []url.Values
+	srv := keyServer(t, true, false, &seen)
+	c, _ := New(Creds{Server: srv.URL, User: "u", Password: "pw"}, srv.Client())
+	if got, err := c.SignIn(context.Background()); err != nil || got != (Creds{Server: srv.URL, User: "u", Password: "pw"}) {
+		t.Fatalf("password: %+v %v", got, err)
+	}
+	c, _ = New(Creds{Server: srv.URL, User: "u", Password: "nope"}, srv.Client())
+	_, err := c.SignIn(context.Background())
+	if !errors.Is(err, ErrAuth) || Message(err, "h") != "Wrong username, password or API key" {
+		t.Fatalf("both fail: %v (%q)", err, Message(err, "h"))
+	}
+	// a server taking only keys (token auth refused with 42): the key was the problem
+	srv = keyServer(t, true, true, &seen)
+	c, _ = New(Creds{Server: srv.URL, User: "u", Password: "nope"}, srv.Client())
+	if _, err := c.SignIn(context.Background()); Message(err, "h") != "Invalid API key: create one in your server's settings" {
+		t.Fatalf("key-only server: %v (%q)", err, Message(err, "h"))
 	}
 }
 
-// Without the extension, sign-in is token auth with the password, as before.
+// Without the extension, sign-in is token auth with the password, as before; 42 keeps its copy.
 func TestSignInToken(t *testing.T) {
 	var seen []url.Values
-	srv := keyServer(t, false, &seen)
+	srv := keyServer(t, false, false, &seen)
 	c, _ := New(Creds{Server: srv.URL, User: "u", Password: "pw"}, srv.Client())
 	if got, err := c.SignIn(context.Background()); err != nil || got != (Creds{Server: srv.URL, User: "u", Password: "pw"}) {
 		t.Fatalf("%+v %v", got, err)
+	}
+	srv = keyServer(t, false, true, &seen)
+	c, _ = New(Creds{Server: srv.URL, User: "u", Password: "pw"}, srv.Client())
+	if _, err := c.SignIn(context.Background()); Message(err, "h") != "This server doesn't accept this sign-in method" {
+		t.Fatalf("42 without the extension: %v", err)
 	}
 	// a server without getOpenSubsonicExtensions at all (plain Subsonic) signs in the same way
 	_, c = serve(t, "ping.json", nil)

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"crypto/md5"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -329,9 +331,8 @@ func TestSigninSetsDateURL(t *testing.T) {
 	}
 }
 
-// I23: on a server offering OpenSubsonic API keys, the phone's "password" is an API key, and only
-// the key is saved (with the server's user name); Account says a key, not a password, is on the card.
-func TestSigninAPIKeySavesOnlyKey(t *testing.T) {
+// keyNavidrome lists apiKeyAuthentication: KEY belongs to "andreas", and token auth takes u/pw.
+func keyNavidrome(t *testing.T) *httptest.Server {
 	nd := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		q := r.URL.Query()
@@ -340,15 +341,33 @@ func TestSigninAPIKeySavesOnlyKey(t *testing.T) {
 			w.Write([]byte(`{"subsonic-response":{"status":"ok","openSubsonicExtensions":[{"name":"apiKeyAuthentication","versions":[1]}]}}`))
 		case q.Get("apiKey") == "KEY" && !q.Has("u"):
 			w.Write([]byte(`{"subsonic-response":{"status":"ok","tokenInfo":{"username":"andreas"}}}`))
-		default:
+		case q.Has("apiKey"):
 			w.Write([]byte(`{"subsonic-response":{"status":"failed","error":{"code":44,"message":"Invalid API key"}}}`))
+		case q.Get("u") == "u" && q.Get("t") == fmt.Sprintf("%x", md5.Sum([]byte("pw"+q.Get("s")))):
+			w.Write([]byte(`{"subsonic-response":{"status":"ok"}}`))
+		default:
+			w.Write([]byte(`{"subsonic-response":{"status":"failed","error":{"code":40,"message":"Wrong username or password"}}}`))
 		}
 	}))
-	defer nd.Close()
-	r := newRig(t, func(s *signin, _ *httptest.Server) {
+	t.Cleanup(nd.Close)
+	return nd
+}
+
+func keyRig(t *testing.T, nd *httptest.Server) *rig {
+	return newRig(t, func(s *signin, _ *httptest.Server) {
 		s.newClient = func(c subsonic.Creds) (*subsonic.Client, error) { return subsonic.New(c, nd.Client()) }
 	})
+}
+
+// I23/R38: on a server offering OpenSubsonic API keys, the phone's "password" may be an API key:
+// then only the key is saved (with the server's user name). Both refused says so.
+func TestSigninAPIKeySavesOnlyKey(t *testing.T) {
+	nd := keyNavidrome(t)
+	r := keyRig(t, nd)
 	c := r.login(t)
+	if _, body := r.post(t, "/api/signin", `{"server":"`+nd.URL+`","user":"u","password":"nope"}`, true, c); !strings.Contains(body, "Wrong username, password or API key") {
+		t.Fatal(body)
+	}
 	_, body := r.post(t, "/api/signin", `{"server":"`+nd.URL+`","user":"typed","password":"KEY"}`, true, c)
 	if !strings.Contains(body, "Signed in as andreas") {
 		t.Fatal(body)
@@ -357,6 +376,16 @@ func TestSigninAPIKeySavesOnlyKey(t *testing.T) {
 	if b, _ := os.ReadFile(filepath.Join(r.dir, "credentials")); !ok || cr.APIKey != "KEY" || cr.Password != "" ||
 		cr.User != "andreas" || strings.Contains(string(b), "Password") {
 		t.Fatalf("saved %s", b)
+	}
+}
+
+// R38: a password still works on a server offering API keys, and is kept as before.
+func TestSigninPasswordOnKeyServer(t *testing.T) {
+	nd := keyNavidrome(t)
+	r := keyRig(t, nd)
+	_, body := r.post(t, "/api/signin", `{"server":"`+nd.URL+`","user":"u","password":"pw"}`, true, r.login(t))
+	if cr, ok := creds.Load(r.dir); !strings.Contains(body, "Signed in as u") || !ok || cr.Password != "pw" || cr.APIKey != "" {
+		t.Fatalf("%s %+v", body, cr)
 	}
 }
 
