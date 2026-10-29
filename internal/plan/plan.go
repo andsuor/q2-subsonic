@@ -141,7 +141,7 @@ func Compute(sel selection.Set, resolved map[string][]subsonic.Song, playlistNam
 	}
 
 	p.Playlists = map[string][]string{}
-	p.PlaylistsStale = m.PlaylistsStale && len(m.Playlists) > 0
+	p.PlaylistsStale = m.PlaylistsStale
 	for _, it := range sel.Items {
 		if it.Kind != selection.KindPlaylist {
 			continue

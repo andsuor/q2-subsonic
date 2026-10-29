@@ -114,3 +114,27 @@ func TestGuardSubsonicTree(t *testing.T) {
 		t.Error("removed from the legacy tree")
 	}
 }
+
+func TestMigrateSlowPathRefusesSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	out := t.TempDir()
+	put(t, out+"/x.flac", "outside")
+	os.MkdirAll(root+"/Navidrome", 0o755)
+	if err := os.Symlink(out, root+"/Navidrome/link"); err != nil {
+		t.Fatal(err)
+	}
+	os.MkdirAll(root+"/Subsonic", 0o755)
+	m := &Manifest{Songs: map[string]*Entry{"x": {ID: "x", Path: root + "/Navidrome/link/x.flac"}}}
+	if err := m.Save(root, root+"/.subsonic/manifest.json"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Migrate(root, t.Logf); err == nil {
+		t.Error("no error")
+	}
+	if _, err := os.Stat(out + "/x.flac"); err != nil {
+		t.Error("outside file moved")
+	}
+	if _, err := os.Stat(root + "/Subsonic/link"); !os.IsNotExist(err) {
+		t.Error("destination created")
+	}
+}

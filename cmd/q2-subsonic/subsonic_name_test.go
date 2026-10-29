@@ -136,3 +136,87 @@ func TestMigrateFailureShowsErrorRow(t *testing.T) {
 		t.Error("Navidrome/ lost")
 	}
 }
+
+func TestMigrateRecoversAfterCrash(t *testing.T) {
+	card, _ := legacyCard(t)
+	// the crash: the folder was renamed, the manifest still names Navidrome/
+	if err := os.Rename(filepath.Join(card, "Navidrome"), filepath.Join(card, "Subsonic")); err != nil {
+		t.Fatal(err)
+	}
+	d := newTestDaemonOn(t, card, &nav{albums: 1, songsPer: 2}, "", true)
+	if d.migrateErr != nil {
+		t.Fatal(d.migrateErr)
+	}
+	m, _ := library.LoadManifest(filepath.Join(card, ".subsonic", "manifest.json"))
+	for id, e := range m.Songs {
+		if !strings.HasPrefix(e.Path, card+"/Subsonic/") {
+			t.Errorf("%s at %s", id, e.Path)
+		}
+	}
+	r := d.do("sync")
+	if len(r.Rows) > 0 && strings.HasPrefix(r.Rows[0].Title, "Couldn't") {
+		t.Fatalf("error row %q", titles(r))
+	}
+	d.preview(t)
+	d.do("start")
+	eventually(t, "the sync", func() bool { return d.runner.Snapshot().State == "done" })
+	if n := d.runner.Snapshot().Done; n != 0 {
+		t.Errorf("%d downloads", n)
+	}
+}
+
+func TestMigrateLegacyPlaylistsRewritten(t *testing.T) {
+	card, _ := legacyCard(t)
+	dir := filepath.Join(card, "_explaylist_data")
+	ms, _ := filepath.Glob(filepath.Join(dir, "*.m3u"))
+	legacy := filepath.Join(dir, "Navidrome - Mix.m3u") // an older build: not recorded
+	os.Rename(ms[0], legacy)
+	mp := filepath.Join(card, ".subsonic", "manifest.json")
+	m, _ := library.LoadManifest(mp)
+	m.Playlists = map[string]string{}
+	m.Save(card, mp)
+	d := newTestDaemonOn(t, card, &nav{albums: 1, songsPer: 2}, "", true)
+	r := d.preview(t)
+	if _, ok := find(r, "Start Sync"); !ok {
+		t.Fatalf("no sync offered: %q", titles(r))
+	}
+	d.do("start")
+	eventually(t, "the sync", func() bool { return d.runner.Snapshot().State == "done" })
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Error("legacy playlist kept")
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "Mix.m3u"))
+	if !strings.Contains(string(b), card+"/Subsonic/") || strings.Contains(string(b), "/Navidrome/") {
+		t.Errorf("Mix.m3u:\n%s", b)
+	}
+}
+
+func TestMigratedPartResumes(t *testing.T) {
+	card, _ := legacyCard(t)
+	mp := filepath.Join(card, ".subsonic", "manifest.json")
+	m, _ := library.LoadManifest(mp)
+	var song string
+	for id, e := range m.Songs {
+		song = e.Path
+		delete(m.Songs, id)
+		break
+	}
+	m.Save(card, mp)
+	os.Remove(song)
+	os.WriteFile(song+".part", []byte(strings.Repeat("x", 400)), 0o644) // cut mid-download, old tree
+	n := &nav{albums: 1, songsPer: 2}
+	d := newTestDaemonOn(t, card, n, "", true)
+	r := d.preview(t)
+	if _, ok := find(r, "Start Sync"); !ok {
+		t.Fatalf("no sync offered: %q", titles(r))
+	}
+	d.do("start")
+	eventually(t, "the sync", func() bool { return d.runner.Snapshot().State == "done" })
+	if got, _ := n.lastRange.Load().(string); got != "bytes=400-" {
+		t.Errorf("Range %q", got)
+	}
+	newPath := strings.Replace(song, "/Navidrome/", "/Subsonic/", 1)
+	if st, err := os.Stat(newPath); err != nil || st.Size() != 1000 {
+		t.Errorf("song %v %v", st, err)
+	}
+}

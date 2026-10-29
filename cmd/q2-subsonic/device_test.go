@@ -34,6 +34,7 @@ type nav struct {
 	albumReqs        atomic.Int32  // getAlbum calls served
 	playlists        int           // playlists pl1..plN ("Mix", "Mix 2"…); 0 means 1. pl<k> holds al<k-1>'s songs
 	empty            bool          // every list reply is empty
+	lastRange        atomic.Value  // the Range header of the latest download, a string
 }
 
 func (n *nav) song(al, j int) map[string]any {
@@ -144,6 +145,14 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			case <-r.Context().Done():
 				return
 			}
+		}
+		if rg := r.Header.Get("Range"); strings.HasPrefix(rg, "bytes=") && strings.HasSuffix(rg, "-") {
+			from, _ := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(rg, "bytes="), "-"))
+			n.lastRange.Store(rg)
+			w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-999/1000", from))
+			w.WriteHeader(http.StatusPartialContent)
+			w.Write([]byte(strings.Repeat("x", 1000-from)))
+			return
 		}
 		w.Write([]byte(strings.Repeat("x", 1000)))
 	default:

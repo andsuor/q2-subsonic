@@ -38,7 +38,7 @@ func Migrate(root string, logf func(string, ...any)) error {
 	}
 	rewrite := func(p string) string { return dst + strings.TrimPrefix(p, old) }
 	done := func() error {
-		m.PlaylistsStale = true
+		m.PlaylistsStale = true // also covers unrecorded "Navidrome - *.m3u" from older builds: the sync rewrites and removes them
 		if err := m.Save(root, manPath); err != nil {
 			return err
 		}
@@ -76,8 +76,8 @@ func Migrate(root string, logf func(string, ...any)) error {
 			continue
 		}
 		to := rewrite(e.Path)
-		err := moveOwned(e.Path, to)
-		if errors.Is(err, os.ErrNotExist) { // file gone: just follow the new layout
+		err := moveOwned(root, e.Path, to)
+		if errors.Is(err, os.ErrNotExist) { // already moved (a crash after the rename), or gone: follow the new layout
 			err = nil
 		}
 		if err != nil {
@@ -86,7 +86,7 @@ func Migrate(root string, logf func(string, ...any)) error {
 			continue
 		}
 		if _, err := os.Stat(e.Path + ".part"); err == nil {
-			if err := moveOwned(e.Path+".part", to+".part"); err != nil {
+			if err := moveOwned(root, e.Path+".part", to+".part"); err != nil {
 				logf("migrate: %s.part: %v", e.Path, err)
 			}
 		}
@@ -106,8 +106,20 @@ func Migrate(root string, logf func(string, ...any)) error {
 	return nil
 }
 
-// moveOwned renames from (inside the legacy tree) to to (inside Subsonic/), never over a file.
-func moveOwned(from, to string) error {
+// moveOwned renames from (which must be inside the legacy Navidrome/ tree, symlinks resolved) to
+// to (which must be Owned, so inside Subsonic/), never over a file. A missing from is
+// os.ErrNotExist, so the caller can tell a move that already happened.
+func moveOwned(root, from, to string) error {
+	top := resolve(filepath.Join(root, "Navidrome"))
+	if rf := resolve(from); filepath.Clean(from) != from || !strings.HasPrefix(rf, top+string(filepath.Separator)) {
+		return errors.New("refusing path outside the legacy tree: " + from)
+	}
+	if err := checkOwned(root, to, nil); err != nil {
+		return err
+	}
+	if _, err := os.Lstat(from); err != nil {
+		return err
+	}
 	if _, err := os.Lstat(to); err == nil {
 		return errors.New("already exists: " + to)
 	}
