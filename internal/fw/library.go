@@ -3,6 +3,7 @@ package fw
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -11,15 +12,38 @@ import (
 
 // RequestLibrary writes a library request to path (atomically via q2.WriteFile).
 // Format: <seq>, then "scan", then "import <path>" for each m3u.
-// Each import path must be directly in /mnt/mmc/_explaylist_data/ and end in .m3u.
+// Each import path must be directly in /mnt/mmc/_explaylist_data/ (no nesting, no ".."),
+// end in .m3u, and contain no newline or carriage return (line injection prevention).
+// On any validation error, nothing is written.
 func RequestLibrary(path string, seq int64, m3us []string) error {
 	// Validate all import paths before writing anything
 	for _, m3u := range m3us {
-		if !strings.HasPrefix(m3u, "/mnt/mmc/_explaylist_data/") {
-			return fmt.Errorf("import path not in /mnt/mmc/_explaylist_data/: %s", m3u)
+		// Reject paths containing newline or carriage return
+		if strings.ContainsAny(m3u, "\n\r") {
+			return fmt.Errorf("import path contains newline/carriage return: %q", m3u)
 		}
-		if !strings.HasSuffix(m3u, ".m3u") {
-			return fmt.Errorf("import path does not end in .m3u: %s", m3u)
+
+		// Path must be clean (no ".." or redundant separators)
+		cleanPath := filepath.Clean(m3u)
+		if cleanPath != m3u {
+			return fmt.Errorf("import path is not clean: %s", m3u)
+		}
+
+		// Directory must be exactly /mnt/mmc/_explaylist_data
+		dir := filepath.Dir(m3u)
+		if dir != "/mnt/mmc/_explaylist_data" {
+			return fmt.Errorf("import path not directly in /mnt/mmc/_explaylist_data/: %s", m3u)
+		}
+
+		// Base name must be non-empty, end in .m3u, and have non-empty name part
+		base := filepath.Base(m3u)
+		if base == "" || !strings.HasSuffix(base, ".m3u") {
+			return fmt.Errorf("import path does not have .m3u extension: %s", m3u)
+		}
+		// Reject bare ".m3u" (name part before extension must be non-empty)
+		namePart := strings.TrimSuffix(base, ".m3u")
+		if namePart == "" {
+			return fmt.Errorf("import path must have a name before .m3u extension: %s", m3u)
 		}
 	}
 
@@ -50,7 +74,7 @@ func LibraryDone(path string, seq int64) (done, ok bool, msg string) {
 	}
 
 	line := strings.TrimSpace(string(data))
-	parts := strings.Fields(line)
+	parts := strings.SplitN(line, " ", 3)
 
 	if len(parts) == 0 {
 		return false, false, ""
@@ -77,9 +101,9 @@ func LibraryDone(path string, seq int64) (done, ok bool, msg string) {
 	}
 
 	if parts[1] == "error" {
-		// The rest of the line is the error message
+		// The rest of the line is the error message (preserve verbatim)
 		if len(parts) > 2 {
-			msg = strings.Join(parts[2:], " ")
+			msg = parts[2]
 		}
 		return true, false, msg
 	}

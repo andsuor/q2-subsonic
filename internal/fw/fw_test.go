@@ -2,6 +2,7 @@ package fw
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -15,18 +16,14 @@ func TestCapsMissing(t *testing.T) {
 
 func TestCapsWords(t *testing.T) {
 	// "playlist library\n" should give Playlist and Library, but not Progress
-	tmpfile, err := os.CreateTemp("", "caps")
-	if err != nil {
-		t.Fatalf("CreateTemp: %v", err)
-	}
-	defer os.Remove(tmpfile.Name())
+	tmpdir := t.TempDir()
+	capsfile := filepath.Join(tmpdir, "caps")
 
-	if _, err := tmpfile.WriteString("playlist library\n"); err != nil {
-		t.Fatalf("WriteString: %v", err)
+	if err := os.WriteFile(capsfile, []byte("playlist library\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
 	}
-	tmpfile.Close()
 
-	caps := ReadCaps(tmpfile.Name())
+	caps := ReadCaps(capsfile)
 	if !caps.Playlist {
 		t.Errorf("Playlist: got false, want true")
 	}
@@ -40,19 +37,15 @@ func TestCapsWords(t *testing.T) {
 
 func TestRequestLibraryFormat(t *testing.T) {
 	// RequestLibrary should write exact bytes
-	tmpfile, err := os.CreateTemp("", "library")
-	if err != nil {
-		t.Fatalf("CreateTemp: %v", err)
-	}
-	defer os.Remove(tmpfile.Name())
-	tmpfile.Close()
+	tmpdir := t.TempDir()
+	libfile := filepath.Join(tmpdir, "library")
 
-	err = RequestLibrary(tmpfile.Name(), 7, []string{"/mnt/mmc/_explaylist_data/Navidrome - Mix.m3u"})
+	err := RequestLibrary(libfile, 7, []string{"/mnt/mmc/_explaylist_data/Navidrome - Mix.m3u"})
 	if err != nil {
 		t.Fatalf("RequestLibrary: %v", err)
 	}
 
-	data, err := os.ReadFile(tmpfile.Name())
+	data, err := os.ReadFile(libfile)
 	if err != nil {
 		t.Fatalf("ReadFile: %v", err)
 	}
@@ -63,42 +56,68 @@ func TestRequestLibraryFormat(t *testing.T) {
 	}
 }
 
-func TestRequestLibraryBadImportPath(t *testing.T) {
-	// RequestLibrary should reject paths not in /mnt/mmc/_explaylist_data/ or not ending in .m3u
-	tmpfile, err := os.CreateTemp("", "library")
-	if err != nil {
-		t.Fatalf("CreateTemp: %v", err)
-	}
-	defer os.Remove(tmpfile.Name())
-	tmpfile.Close()
+func TestRequestLibraryBadPaths(t *testing.T) {
+	tests := []struct {
+		name    string
+		path    string
+		wantErr bool
+	}{
+		// Valid path
+		{"valid", "/mnt/mmc/_explaylist_data/Playlist.m3u", false},
 
-	// Path not in /mnt/mmc/_explaylist_data/
-	err = RequestLibrary(tmpfile.Name(), 7, []string{"/home/user/playlist.m3u"})
-	if err == nil {
-		t.Error("RequestLibrary with bad path: got nil, want error")
+		// Invalid: nested path
+		{"nested", "/mnt/mmc/_explaylist_data/subdir/Playlist.m3u", true},
+
+		// Invalid: .. in path
+		{"parent_ref", "/mnt/mmc/_explaylist_data/../Playlist.m3u", true},
+
+		// Invalid: path with newline
+		{"newline", "/mnt/mmc/_explaylist_data/Play\nlist.m3u", true},
+
+		// Invalid: path with carriage return
+		{"carriage_return", "/mnt/mmc/_explaylist_data/Play\rlist.m3u", true},
+
+		// Invalid: bare .m3u (no base name)
+		{"bare_m3u", "/mnt/mmc/_explaylist_data/.m3u", true},
+
+		// Invalid: wrong directory
+		{"wrong_dir", "/home/user/playlist.m3u", true},
+
+		// Invalid: no extension
+		{"no_ext", "/mnt/mmc/_explaylist_data/playlist.txt", true},
 	}
 
-	// Path in right dir but doesn't end in .m3u
-	err = RequestLibrary(tmpfile.Name(), 7, []string{"/mnt/mmc/_explaylist_data/playlist.txt"})
-	if err == nil {
-		t.Error("RequestLibrary with bad extension: got nil, want error")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpdir := t.TempDir()
+			libfile := filepath.Join(tmpdir, "library")
+
+			err := RequestLibrary(libfile, 7, []string{tt.path})
+
+			if (err != nil) != tt.wantErr {
+				t.Errorf("RequestLibrary error: got %v, want error=%v", err, tt.wantErr)
+			}
+
+			// After rejection, file should not exist
+			if tt.wantErr {
+				if _, err := os.Stat(libfile); !os.IsNotExist(err) {
+					t.Errorf("RequestLibrary should not write file on error, but file exists")
+				}
+			}
+		})
 	}
 }
 
 func TestLibraryDoneParsesError(t *testing.T) {
 	// "7 error Card busy" should give (true, false, "Card busy")
-	tmpfile, err := os.CreateTemp("", "done")
-	if err != nil {
-		t.Fatalf("CreateTemp: %v", err)
-	}
-	defer os.Remove(tmpfile.Name())
+	tmpdir := t.TempDir()
+	donefile := filepath.Join(tmpdir, "done")
 
-	if _, err := tmpfile.WriteString("7 error Card busy"); err != nil {
-		t.Fatalf("WriteString: %v", err)
+	if err := os.WriteFile(donefile, []byte("7 error Card busy"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
 	}
-	tmpfile.Close()
 
-	done, ok, msg := LibraryDone(tmpfile.Name(), 7)
+	done, ok, msg := LibraryDone(donefile, 7)
 	if !done {
 		t.Errorf("done: got false, want true")
 	}
@@ -112,18 +131,14 @@ func TestLibraryDoneParsesError(t *testing.T) {
 
 func TestLibraryDoneOldSeq(t *testing.T) {
 	// An old seq means not done for this request
-	tmpfile, err := os.CreateTemp("", "done")
-	if err != nil {
-		t.Fatalf("CreateTemp: %v", err)
-	}
-	defer os.Remove(tmpfile.Name())
+	tmpdir := t.TempDir()
+	donefile := filepath.Join(tmpdir, "done")
 
-	if _, err := tmpfile.WriteString("5 ok"); err != nil {
-		t.Fatalf("WriteString: %v", err)
+	if err := os.WriteFile(donefile, []byte("5 ok"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
 	}
-	tmpfile.Close()
 
-	done, _, _ := LibraryDone(tmpfile.Name(), 7)
+	done, _, _ := LibraryDone(donefile, 7)
 	if done {
 		t.Errorf("done with old seq: got true, want false")
 	}
@@ -131,23 +146,36 @@ func TestLibraryDoneOldSeq(t *testing.T) {
 
 func TestLibraryDoneSuccess(t *testing.T) {
 	// "7 ok" should give (true, true, "")
-	tmpfile, err := os.CreateTemp("", "done")
-	if err != nil {
-		t.Fatalf("CreateTemp: %v", err)
-	}
-	defer os.Remove(tmpfile.Name())
+	tmpdir := t.TempDir()
+	donefile := filepath.Join(tmpdir, "done")
 
-	if _, err := tmpfile.WriteString("7 ok"); err != nil {
-		t.Fatalf("WriteString: %v", err)
+	if err := os.WriteFile(donefile, []byte("7 ok"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
 	}
-	tmpfile.Close()
 
-	done, ok, msg := LibraryDone(tmpfile.Name(), 7)
+	done, ok, msg := LibraryDone(donefile, 7)
 	if !done {
 		t.Errorf("done: got false, want true")
 	}
 	if !ok {
 		t.Errorf("ok: got false, want true")
+	}
+	if msg != "" {
+		t.Errorf("msg: got %q, want %q", msg, "")
+	}
+}
+
+func TestLibraryDoneMissing(t *testing.T) {
+	// Missing file should give not done
+	tmpdir := t.TempDir()
+	donefile := filepath.Join(tmpdir, "nonexistent")
+
+	done, ok, msg := LibraryDone(donefile, 7)
+	if done {
+		t.Errorf("done: got true, want false")
+	}
+	if ok {
+		t.Errorf("ok: got true, want false")
 	}
 	if msg != "" {
 		t.Errorf("msg: got %q, want %q", msg, "")
