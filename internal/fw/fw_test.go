@@ -40,7 +40,7 @@ func TestRequestLibraryFormat(t *testing.T) {
 	tmpdir := t.TempDir()
 	libfile := filepath.Join(tmpdir, "library")
 
-	err := RequestLibrary(libfile, 7, []string{"/mnt/mmc/_explaylist_data/Navidrome - Mix.m3u"})
+	err := RequestLibrary(libfile, 7, []string{"/mnt/mmc/_explaylist_data/Mix.m3u"})
 	if err != nil {
 		t.Fatalf("RequestLibrary: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestRequestLibraryFormat(t *testing.T) {
 		t.Fatalf("ReadFile: %v", err)
 	}
 
-	expected := "7\nscan\nimport /mnt/mmc/_explaylist_data/Navidrome - Mix.m3u\n"
+	expected := "7\nscan\nimport /mnt/mmc/_explaylist_data/Mix.m3u\n"
 	if string(data) != expected {
 		t.Errorf("RequestLibrary bytes: got %q, want %q", string(data), expected)
 	}

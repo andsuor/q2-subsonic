@@ -5,13 +5,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/andsuor/q2-subsonic/internal/fw"
+	"github.com/andsuor/q2-subsonic/internal/library"
 	"github.com/andsuor/q2-subsonic/internal/plan"
 	"github.com/andsuor/q2-subsonic/internal/q2"
 	"github.com/andsuor/q2-subsonic/internal/q2spot"
@@ -304,7 +307,15 @@ func (d *daemon) library() q2spot.Reply {
 	j := d.lib
 	if j == nil || j.done && time.Since(j.doneAt) > 30*time.Second {
 		seq := time.Now().UnixNano() // never reused, even across restarts
-		m3us, _ := filepath.Glob(filepath.Join(d.card, "_explaylist_data", "Navidrome - *.m3u"))
+		var m3us []string            // the files the last sync recorded; the user's own playlists are never imported
+		if m, _ := library.LoadManifest(filepath.Join(d.card, ".subsonic", "manifest.json")); m != nil {
+			for _, f := range m.Playlists {
+				if _, err := os.Stat(f); err == nil {
+					m3us = append(m3us, f)
+				}
+			}
+			sort.Strings(m3us)
+		}
 		if err := fw.RequestLibrary(req, seq, m3us); err != nil {
 			d.mu.Unlock()
 			d.log.Printf("library: %v", err)

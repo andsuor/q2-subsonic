@@ -17,7 +17,12 @@ type Entry struct {
 	Meta              string
 }
 
-type Manifest struct{ Songs map[string]*Entry }
+// Manifest is what the app has put on the card. Playlists maps a playlist name to the absolute
+// path of the .m3u written for it, the only playlist files the app may overwrite or delete.
+type Manifest struct {
+	Songs     map[string]*Entry
+	Playlists map[string]string
+}
 
 // LoadManifest reads path; a missing file is an empty manifest.
 func LoadManifest(path string) (*Manifest, error) {
@@ -31,12 +36,15 @@ func LoadManifest(path string) (*Manifest, error) {
 	if m.Songs == nil {
 		m.Songs = map[string]*Entry{}
 	}
+	if m.Playlists == nil {
+		m.Playlists = map[string]string{}
+	}
 	return m, err
 }
 
 // Save writes the manifest atomically.
 func (m *Manifest) Save(root, path string) error {
-	if err := checkOwned(root, path); err != nil {
+	if err := checkOwned(root, path, m); err != nil {
 		return err
 	}
 	b, err := json.Marshal(m)

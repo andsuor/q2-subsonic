@@ -354,25 +354,44 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 		r.op("download", w.Path)
 	}
 
-	keep := map[string]bool{}
+	used := map[string]bool{} // playlist files claimed in this run
 	for name, paths := range p.Playlists {
-		f := library.PlaylistFile(r.root, name)
-		keep[f] = true
+		f := m.Playlists[name]
+		if f == "" {
+			f = r.freePlaylistFile(m, name, used)
+		}
+		used[f] = true
 		have := []string{} // songs that failed are left out until they arrive
 		for _, s := range paths {
 			if _, err := os.Stat(s); err == nil {
 				have = append(have, s)
 			}
 		}
-		if err := library.WriteM3U(r.root, f, have); err != nil {
+		prev, had := m.Playlists[name]
+		m.Playlists[name] = f // recorded first: the guard only lets us write recorded files
+		if err := m.WriteM3U(r.root, f, have); err != nil {
+			if had {
+				m.Playlists[name] = prev
+			} else {
+				delete(m.Playlists, name)
+			}
 			return r.cardErr(err)
 		}
+		library.Remove(r.root, library.LegacyPlaylistFile(r.root, name)) // migration from "Navidrome - <name>"
 	}
-	stale, _ := filepath.Glob(filepath.Join(r.root, "_explaylist_data", "Navidrome - *.m3u"))
-	for _, f := range stale {
-		if !keep[f] {
-			library.Remove(r.root, f)
+	for name, f := range m.Playlists {
+		if _, ok := p.Playlists[name]; !ok {
+			if m.Remove(r.root, f) == nil {
+				delete(m.Playlists, name)
+			}
 		}
+	}
+	legacy, _ := filepath.Glob(filepath.Join(r.root, "_explaylist_data", "Navidrome - *.m3u"))
+	for _, f := range legacy {
+		library.Remove(r.root, f)
+	}
+	if err := save(); err != nil {
+		return err
 	}
 
 	for _, e := range p.Remove {
@@ -389,6 +408,30 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 	return save()
 }
 
+// freePlaylistFile picks <name>.m3u, else <name> (Navidrome).m3u, else <name> (Navidrome 2).m3u...:
+// the first not already on the card (a user's own playlist) nor claimed by another playlist.
+func (r *Runner) freePlaylistFile(m *library.Manifest, name string, used map[string]bool) string {
+	base := strings.TrimSuffix(library.PlaylistFile(r.root, name), ".m3u")
+	taken := func(f string) bool {
+		if _, err := os.Lstat(f); err == nil || used[f] {
+			return true
+		}
+		for _, o := range m.Playlists {
+			if o == f {
+				return true
+			}
+		}
+		return false
+	}
+	f := base + ".m3u"
+	for n := 1; taken(f); n++ {
+		if f = base + " (Navidrome).m3u"; n > 1 {
+			f = fmt.Sprintf("%s (Navidrome %d).m3u", base, n)
+		}
+	}
+	return f
+}
+
 // remove deletes path through the guard and, when its album folder is left holding only
 // cover.jpg, the cover too, so the guard prunes the folder.
 func (r *Runner) remove(path string) error {
@@ -403,7 +446,7 @@ func (r *Runner) remove(path string) error {
 }
 
 func owned(root, path string) error {
-	if filepath.Clean(path) != path || !library.Owned(root, path) {
+	if filepath.Clean(path) != path || !library.Owned(root, path, nil) {
 		return errors.New("refusing path outside owned trees: " + path)
 	}
 	return nil

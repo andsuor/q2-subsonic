@@ -93,7 +93,12 @@ func MetaKey(s subsonic.Song, quality string) string {
 	return hex.EncodeToString(h[:])
 }
 
-// PlaylistFile is <root>/_explaylist_data/Navidrome - <name>.m3u.
+// PlaylistFile is <root>/_explaylist_data/<name>.m3u, the name the Q2's Import playlist shows.
 func PlaylistFile(root, name string) string {
+	return filepath.Join(root, "_explaylist_data", SafeName(name)+".m3u")
+}
+
+// LegacyPlaylistFile is the old "Navidrome - <name>.m3u", kept only so a sync can migrate it.
+func LegacyPlaylistFile(root, name string) string {
 	return filepath.Join(root, "_explaylist_data", "Navidrome - "+SafeName(name)+".m3u")
 }

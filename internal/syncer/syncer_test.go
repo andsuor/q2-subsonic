@@ -330,7 +330,7 @@ func TestDeletesAfterDownloads(t *testing.T) {
 	stale := library.PlaylistFile(root, "Gone")
 	os.MkdirAll(filepath.Dir(stale), 0o755)
 	os.WriteFile(stale, []byte("#EXTM3U\n"), 0o644)
-	m := &library.Manifest{Songs: map[string]*library.Entry{"z": z}}
+	m := &library.Manifest{Songs: map[string]*library.Entry{"z": z}, Playlists: map[string]string{"Gone": stale}}
 	m.Save(root, root+"/.subsonic/manifest.json")
 	var mu sync.Mutex
 	var ops []string
@@ -550,5 +550,89 @@ func TestLogRedacted(t *testing.T) {
 	if len(b) == 0 || strings.Contains(string(b), "tok123") || strings.Contains(string(b), "salt99") ||
 		strings.Contains(string(b), "pw77") {
 		t.Fatalf("%q", b)
+	}
+}
+
+// syncPlaylists runs a sync of the given playlists (name -> no songs) over a card prepared by prep.
+func syncPlaylists(t *testing.T, prep func(root string), names ...string) (string, *library.Manifest) {
+	t.Helper()
+	_, r, root := setup(t)
+	if prep != nil {
+		prep(root)
+	}
+	pl := map[string][]string{}
+	for _, n := range names {
+		pl[n] = nil
+	}
+	r.Start(plan.Plan{Playlists: pl})
+	if s := wait(t, r); s.State != "done" {
+		t.Fatalf("%+v", s)
+	}
+	return root, manifest(t, root)
+}
+
+func put(t *testing.T, p, body string) {
+	t.Helper()
+	os.MkdirAll(filepath.Dir(p), 0o755)
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUserPlaylistNotOverwritten(t *testing.T) {
+	var user string
+	root, m := syncPlaylists(t, func(root string) {
+		user = library.PlaylistFile(root, "Andreas")
+		put(t, user, "mine")
+	}, "Andreas")
+	if b, _ := os.ReadFile(user); string(b) != "mine" {
+		t.Fatalf("user file changed: %q", b)
+	}
+	want := root + "/_explaylist_data/Andreas (Navidrome).m3u"
+	if _, err := os.Stat(want); err != nil || m.Playlists["Andreas"] != want {
+		t.Fatal(err, m.Playlists)
+	}
+}
+
+func TestRecordedPlaylistRewrittenAndStaleOnlyRecorded(t *testing.T) {
+	var other, gone string
+	root, m := syncPlaylists(t, func(root string) {
+		gone = library.PlaylistFile(root, "Gone")
+		other = library.PlaylistFile(root, "Other")
+		put(t, gone, "x")
+		put(t, other, "user")
+		put(t, library.PlaylistFile(root, "Keep"), "old")
+		mm := &library.Manifest{Playlists: map[string]string{"Gone": gone, "Keep": library.PlaylistFile(root, "Keep")}}
+		mm.Save(root, root+"/.subsonic/manifest.json")
+	}, "Keep")
+	if b, _ := os.ReadFile(other); string(b) != "user" {
+		t.Fatal("unrecorded Other.m3u touched")
+	}
+	if _, err := os.Stat(gone); !os.IsNotExist(err) {
+		t.Fatal("recorded stale file left")
+	}
+	if b, _ := os.ReadFile(library.PlaylistFile(root, "Keep")); string(b) != "#EXTM3U\n" {
+		t.Fatalf("Keep not rewritten in place: %q", b)
+	}
+	if len(m.Playlists) != 1 || m.Playlists["Keep"] != library.PlaylistFile(root, "Keep") {
+		t.Fatal(m.Playlists)
+	}
+}
+
+func TestLegacyPrefixMigrated(t *testing.T) {
+	var legacySel, legacyGone string
+	root, m := syncPlaylists(t, func(root string) {
+		legacySel = library.LegacyPlaylistFile(root, "Mix")
+		legacyGone = library.LegacyPlaylistFile(root, "Old")
+		put(t, legacySel, "#EXTM3U\n")
+		put(t, legacyGone, "#EXTM3U\n")
+	}, "Mix")
+	for _, f := range []string{legacySel, legacyGone} {
+		if _, err := os.Stat(f); !os.IsNotExist(err) {
+			t.Fatal("legacy file left:", f)
+		}
+	}
+	if _, err := os.Stat(library.PlaylistFile(root, "Mix")); err != nil || m.Playlists["Mix"] != library.PlaylistFile(root, "Mix") {
+		t.Fatal(err, m.Playlists)
 	}
 }

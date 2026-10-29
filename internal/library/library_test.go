@@ -128,7 +128,7 @@ func TestRemoveRefusesOutside(t *testing.T) {
 }
 
 func TestOwnedOutsideRoot(t *testing.T) {
-	if Owned(t.TempDir(), "/etc/passwd") {
+	if Owned(t.TempDir(), "/etc/passwd", nil) {
 		t.Fatal("owned")
 	}
 }
@@ -136,7 +136,7 @@ func TestOwnedOutsideRoot(t *testing.T) {
 func TestOwnedAllows(t *testing.T) {
 	root := t.TempDir()
 	for _, p := range []string{root + "/Navidrome/A/B/1.mp3", root + "/_explaylist_data/Navidrome - X.m3u", root + "/.subsonic/log.txt"} {
-		if !Owned(root, p) {
+		if !Owned(root, p, nil) {
 			t.Fatal(p)
 		}
 	}
@@ -167,10 +167,11 @@ func TestRemovePrunesEmptyAlbum(t *testing.T) {
 func TestM3UKeepsDuplicates(t *testing.T) {
 	root := t.TempDir()
 	p := PlaylistFile(root, "Mix: 1")
-	if p != root+"/_explaylist_data/Navidrome - Mix_ 1.m3u" {
+	if p != root+"/_explaylist_data/Mix_ 1.m3u" {
 		t.Fatal(p)
 	}
-	if err := WriteM3U(root, p, []string{"/mnt/mmc/a.flac", "/mnt/mmc/b.flac", "/mnt/mmc/a.flac"}); err != nil {
+	m := &Manifest{Playlists: map[string]string{"Mix: 1": p}}
+	if err := m.WriteM3U(root, p, []string{"/mnt/mmc/a.flac", "/mnt/mmc/b.flac", "/mnt/mmc/a.flac"}); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(p)
@@ -224,10 +225,10 @@ func TestMetaKeyArtistFallback(t *testing.T) {
 
 func TestWritesRefuseOutsideOwned(t *testing.T) {
 	root := t.TempDir()
-	if err := WriteM3U(root, root+"/Music/x.m3u", []string{"a"}); err == nil {
+	if err := (&Manifest{}).WriteM3U(root, root+"/Music/x.m3u", []string{"a"}); err == nil {
 		t.Fatal("m3u")
 	}
-	if err := WriteM3U(root, root+"/_explaylist_data/Other.m3u", nil); err == nil {
+	if err := (&Manifest{}).WriteM3U(root, root+"/_explaylist_data/Other.m3u", nil); err == nil {
 		t.Fatal("m3u other")
 	}
 	m := &Manifest{Songs: map[string]*Entry{}}
@@ -247,5 +248,26 @@ func TestWithIDKeeps120(t *testing.T) {
 	name := filepath.Base(got)
 	if len(name) > 120 || !utf8.ValidString(name) || !strings.HasSuffix(name, " [12345].flac") {
 		t.Fatal(len(name), name)
+	}
+}
+
+func TestPlaylistFileNoPrefix(t *testing.T) {
+	if got := PlaylistFile("/r", "Andreas"); got != "/r/_explaylist_data/Andreas.m3u" {
+		t.Fatal(got)
+	}
+}
+
+func TestOwnedPlaylistsOnlyRecorded(t *testing.T) {
+	root := t.TempDir()
+	rec, other := PlaylistFile(root, "Mine"), PlaylistFile(root, "Other")
+	m := &Manifest{Playlists: map[string]string{"Mine": rec}}
+	if !Owned(root, rec, m) || Owned(root, other, m) || Owned(root, rec, nil) {
+		t.Fatal("recorded only")
+	}
+	if err := Remove(root, other); err == nil {
+		t.Fatal("removed unrecorded")
+	}
+	if err := m.WriteM3U(root, other, nil); err == nil {
+		t.Fatal("wrote unrecorded")
 	}
 }

@@ -29,9 +29,10 @@ func resolve(p string) string {
 	return filepath.Join(append([]string{dir}, append(rest, base)...)...)
 }
 
-// Owned reports whether path is strictly inside one of the three trees the app may touch:
-// Navidrome/, _explaylist_data/Navidrome - *.m3u and .subsonic/ under root.
-func Owned(root, path string) bool {
+// Owned reports whether path is strictly inside what the app may touch under root: Navidrome/,
+// .subsonic/, and in _explaylist_data/ only the .m3u files recorded in m.Playlists (m may be nil)
+// plus legacy "Navidrome - *.m3u" files, which exist only to be migrated away.
+func Owned(root, path string, m *Manifest) bool {
 	rel, err := filepath.Rel(resolve(root+"/."), resolve(path))
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return false
@@ -41,15 +42,27 @@ func Owned(root, path string) bool {
 	case "Navidrome", ".subsonic":
 		return len(parts) > 1
 	case "_explaylist_data":
-		return len(parts) == 2 && strings.HasPrefix(parts[1], "Navidrome - ") && strings.HasSuffix(parts[1], ".m3u")
+		if len(parts) != 2 || !strings.HasSuffix(parts[1], ".m3u") {
+			return false
+		}
+		if strings.HasPrefix(parts[1], "Navidrome - ") {
+			return true
+		}
+		if m != nil {
+			for _, f := range m.Playlists {
+				if filepath.Clean(f) == filepath.Clean(path) {
+					return true
+				}
+			}
+		}
 	}
 	return false
 }
 
 // checkOwned is the gate for every write and delete: path must already be in Clean form (so the
 // OS and the guard read the same path, e.g. no "link/.." tricks) and Owned.
-func checkOwned(root, path string) error {
-	if filepath.Clean(path) != path || !Owned(root, path) {
+func checkOwned(root, path string, m *Manifest) error {
+	if filepath.Clean(path) != path || !Owned(root, path, m) {
 		return errors.New("refusing path outside owned trees: " + path)
 	}
 	return nil
@@ -57,8 +70,13 @@ func checkOwned(root, path string) error {
 
 // Remove is the only way the app deletes: it refuses anything not Owned, treats a missing file
 // as done, and prunes folders left empty under Navidrome/ (never Navidrome/ itself).
-func Remove(root, path string) error {
-	if err := checkOwned(root, path); err != nil {
+func Remove(root, path string) error { return remove(root, path, nil) }
+
+// Remove is the package Remove that also accepts the playlist files recorded in m.
+func (m *Manifest) Remove(root, path string) error { return remove(root, path, m) }
+
+func remove(root, path string, m *Manifest) error {
+	if err := checkOwned(root, path, m); err != nil {
 		return err
 	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
