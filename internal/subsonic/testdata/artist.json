@@ -1,0 +1,1 @@
+{"subsonic-response":{"status":"ok","version":"1.16.1","type":"navidrome","serverVersion":"0.64.2","openSubsonic":true,"artist":{"id":"ar1","name":"Art","albumCount":1,"album":[{"id":"al1","name":"Alb","artist":"Art","year":1999,"songCount":2,"coverArt":"al-al1"}]}}}
