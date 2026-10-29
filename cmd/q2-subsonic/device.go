@@ -237,7 +237,7 @@ func (d *daemon) menu() q2spot.Reply {
 	for _, e := range m.Songs {
 		bytes += e.Size
 	}
-	rows = append(rows, list("sync", "Sync", d.syncSubtitle(cl), ""),
+	rows = append(rows, d.libraryRow(sel), list("sync", "Sync", d.syncSubtitle(cl), ""),
 		list("onq2", "On This Q2", plural(len(sel.Items), "item")+" · "+size(bytes), ""),
 		list("playlists", "Playlists", "", ""), list("albums", "Albums", "", ""), list("artists", "Artists", "", ""),
 		q2spot.Row{Kind: "search", Title: "Search"}, list("settings", "Settings", "", ""))
@@ -297,11 +297,10 @@ func when(t, now time.Time) string {
 	return t.Format("Jan 2 15:04")
 }
 
-// onQ2 is the selection, each with its status and size on the card; a hold takes one out.
-func (d *daemon) onQ2() q2spot.Reply {
-	v := d.view()
+// libraryRow is Sync Entire Library: Off, On, or On with the counts once the preview has resolved it.
+func (d *daemon) libraryRow(sel selection.Set) q2spot.Row {
 	sub := "Off"
-	if v.sel.Has(selection.KindLibrary, "all") {
+	if sel.Has(selection.KindLibrary, "all") {
 		sub = "On"
 		d.mu.Lock()
 		c := d.libCount
@@ -311,8 +310,18 @@ func (d *daemon) onQ2() q2spot.Reply {
 			sub = fmt.Sprintf("On · %s · %s", plural(c[0], "album"), plural(c[1], "playlist"))
 		}
 	}
-	rows := []q2spot.Row{{Kind: "action", URI: "toggle", Title: "Sync Entire Library", Subtitle: sub,
-		Context: "library:all", Position: "toggle"}}
+	return q2spot.Row{Kind: "action", URI: "toggle", Title: "Sync Entire Library", Subtitle: sub,
+		Context: "library:all", Position: "toggle"}
+}
+
+// onQ2 is the selection, each with its status and size on the card; a hold takes one out. Entire
+// Library is switched from the root; here it shows only while on, as one of the items.
+func (d *daemon) onQ2() q2spot.Reply {
+	v := d.view()
+	var rows []q2spot.Row
+	if v.sel.Has(selection.KindLibrary, "all") {
+		rows = append(rows, d.libraryRow(v.sel))
+	}
 	if len(v.sel.Items) == 0 {
 		return q2spot.Reply{Rows: append(rows, q2spot.Row{Kind: "info", Title: "Nothing chosen yet",
 			Subtitle: "Hold Play/Pause on a playlist, album or artist"})}

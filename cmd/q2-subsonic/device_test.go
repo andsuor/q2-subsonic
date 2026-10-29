@@ -244,18 +244,18 @@ func TestRootSignedOut(t *testing.T) {
 func TestRootSignedIn(t *testing.T) {
 	d := newTestDaemon(t, &nav{}, "", true)
 	r := d.do("menu")
-	want := []string{"Sync", "On This Q2", "Playlists", "Albums", "Artists", "Search", "Settings"}
+	want := []string{"Sync Entire Library", "Sync", "On This Q2", "Playlists", "Albums", "Artists", "Search", "Settings"}
 	if got := titles(r); strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("titles %q, want %q", got, want)
 	}
-	kinds := []string{"list", "list", "list", "list", "list", "search", "list"}
+	kinds := []string{"action", "list", "list", "list", "list", "list", "search", "list"}
 	for i, row := range r.Rows {
 		if row.Kind != kinds[i] {
 			t.Errorf("%s kind %q, want %q", row.Title, row.Kind, kinds[i])
 		}
 	}
-	if !strings.HasPrefix(r.Rows[1].Subtitle, "0 items · ") {
-		t.Errorf("On This Q2 subtitle %q", r.Rows[1].Subtitle)
+	if !strings.HasPrefix(r.Rows[2].Subtitle, "0 items · ") {
+		t.Errorf("On This Q2 subtitle %q", r.Rows[2].Subtitle)
 	}
 }
 
@@ -448,8 +448,8 @@ func TestStateHoldDuringSync(t *testing.T) {
 	if st := state(); !strings.Contains(st, "hold=1") || !strings.Contains(st, "version="+version) {
 		t.Fatalf("state during sync:\n%s", st)
 	}
-	if r := d.do("menu"); !strings.HasPrefix(r.Rows[0].Subtitle, "Syncing · ") {
-		t.Errorf("Sync subtitle while running %q", r.Rows[0].Subtitle)
+	if r := d.do("menu"); !strings.HasPrefix(r.Rows[1].Subtitle, "Syncing · ") {
+		t.Errorf("Sync subtitle while running %q", r.Rows[1].Subtitle)
 	}
 	close(n.block)
 	eventually(t, "the sync to finish", func() bool { return d.runner.Snapshot().State == "done" })
@@ -604,11 +604,14 @@ func (d *tdaemon) selected(t *testing.T) []selection.Item {
 
 func TestEntireLibraryRow(t *testing.T) {
 	d := newTestDaemon(t, &nav{albums: 3, songsPer: 2, playlists: 2}, "", true)
-	r := d.do("onq2")
+	r := d.do("menu")
 	row := r.Rows[0]
 	if row.Title != "Sync Entire Library" || row.Subtitle != "Off" || row.URI != "toggle" ||
 		row.Context != "library:all" || row.Position != "toggle" || row.Kind != "action" {
 		t.Fatalf("row %+v", row)
+	}
+	if got := titles(d.do("onq2")); len(got) != 1 || got[0] != "Nothing chosen yet" {
+		t.Fatalf("on this q2 while off %q", got)
 	}
 	if r := d.do(row.URI, row.Context); r.Message != "Added to Sync · Entire Library" {
 		t.Fatalf("toast %q", r.Message)
@@ -616,18 +619,21 @@ func TestEntireLibraryRow(t *testing.T) {
 	if it := d.selected(t); len(it) != 1 || it[0].Name != "Entire Library" || it[0].Quality != "original" {
 		t.Fatalf("selection %+v", it)
 	}
-	if got := d.do("onq2").Rows[0].Subtitle; got != "On" {
+	if got := d.do("menu").Rows[0].Subtitle; got != "On" {
 		t.Fatalf("before resolve %q", got)
 	}
 	d.preview(t)
+	if got := d.do("menu").Rows[0].Subtitle; got != "On · 3 albums · 2 playlists" {
+		t.Fatalf("after resolve %q", got)
+	}
 	r = d.do("onq2")
-	if got := r.Rows[0].Subtitle; got != "On · 3 albums · 2 playlists" || len(r.Rows) != 1 {
-		t.Fatalf("after resolve %q, %q", got, titles(r))
+	if len(r.Rows) != 1 || r.Rows[0].Subtitle != "On · 3 albums · 2 playlists" {
+		t.Fatalf("on this q2 while on %q", titles(r))
 	}
 	if r := d.do("toggle", "library:all"); r.Message != "Removed from Sync" {
 		t.Fatalf("toast %q", r.Message)
 	}
-	if got := d.do("onq2").Rows[0].Subtitle; got != "Off" {
+	if got := d.do("menu").Rows[0].Subtitle; got != "Off" {
 		t.Fatalf("after removal %q", got)
 	}
 }
