@@ -1121,3 +1121,22 @@ func TestRefusedStopsAtOnce(t *testing.T) {
 		t.Errorf("%d requests, want 1", n)
 	}
 }
+
+// Songs moved to a new album folder (a year or album fix) take the album's cover along (M17).
+func TestRenameCarriesCover(t *testing.T) {
+	_, r, root := setup(t)
+	from, to := root+"/Subsonic/Art/1999 - Alb/01 - r.flac", root+"/Subsonic/Art/2000 - Alb/01 - r.flac"
+	put(t, from, "r")
+	put(t, filepath.Dir(from)+"/cover.jpg", "jpeg")
+	(&library.Manifest{Songs: map[string]*library.Entry{"r": {ID: "r", Path: from, Quality: "original", Size: 1}}}).Save(root, root+"/.subsonic/manifest.json")
+	r.Start(plan.Plan{Rename: []plan.Move{{From: from, To: to, ID: "r"}}})
+	if s := wait(t, r); s.State != "done" || s.Failed != 0 {
+		t.Fatalf("%+v", s)
+	}
+	if c, err := os.ReadFile(filepath.Dir(to) + "/cover.jpg"); err != nil || string(c) != "jpeg" {
+		t.Error("cover not carried:", err)
+	}
+	if _, err := os.Stat(filepath.Dir(from)); !os.IsNotExist(err) {
+		t.Error("old album folder left")
+	}
+}

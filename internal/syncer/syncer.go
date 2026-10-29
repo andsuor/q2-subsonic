@@ -702,7 +702,20 @@ func (r *Runner) rename(from, to string) error {
 	if err := os.Rename(from, to); err != nil {
 		return err
 	}
+	r.carryCover(filepath.Dir(from), filepath.Dir(to))
 	return r.remove(from) // the file is gone already; this prunes the folders it left empty
+}
+
+// carryCover copies the album's cover.jpg into a song's new folder when that has none: the old
+// one goes with the old folder's last song, and a renamed song is never downloaded (M17).
+func (r *Runner) carryCover(from, to string) {
+	src, dst := filepath.Join(from, "cover.jpg"), filepath.Join(to, "cover.jpg")
+	if _, err := os.Stat(dst); err == nil || owned(r.root, dst) != nil {
+		return
+	}
+	if b, err := os.ReadFile(src); err == nil {
+		q2.WriteFile(dst, b)
+	}
 }
 
 // fetchTries fetches w, one try per Backoff entry, waiting that long after each failed try but
