@@ -1,0 +1,627 @@
+// Package syncer runs a sync plan: renames, downloads (to .part, fsynced, renamed), covers,
+// playlists, then removals, saving the manifest after each file so the card is consistent at
+// every moment. It pauses when the card goes and continues an identical plan where it stopped.
+package syncer
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/andsuor/q2-subsonic/internal/applog"
+	"github.com/andsuor/q2-subsonic/internal/library"
+	"github.com/andsuor/q2-subsonic/internal/plan"
+	"github.com/andsuor/q2-subsonic/internal/q2"
+	"github.com/andsuor/q2-subsonic/internal/subsonic"
+)
+
+var ErrBusy = errors.New("a sync is already running")
+
+// MediaSource is the part of *subsonic.Client the runner uses.
+type MediaSource interface {
+	MediaURL(id, quality string) string
+	CoverURL(id string) string
+	Get(ctx context.Context, u string, from int64) (*http.Response, error)
+}
+
+type Failure struct {
+	SongID, Title, Op string // Op: download, cover or rename
+	HTTP, Code        int
+	At                time.Time
+	Msg               string // redacted
+}
+
+type Snapshot struct {
+	State                 string // idle, running, paused, done or error
+	Done, Total, Failed   int
+	BytesDone, BytesTotal int64
+	Permille              int
+	ETA                   time.Duration
+	Current               string
+	Err                   error
+	Failures              []Failure
+}
+
+type Runner struct {
+	// Backoff is the wait after each failed try of a song; one try per entry.
+	Backoff     []time.Duration
+	CardMounted func() bool
+	Now         func() time.Time
+	Net         *NetSlot
+
+	root string
+	src  MediaSource
+	log  *applog.Log
+	onOp func(op, path string) // tests: "download" and "remove", in order
+
+	mu                    sync.Mutex
+	plan                  *plan.Plan
+	state, stopAs         string
+	err                   error
+	cancel                context.CancelFunc
+	done                  chan struct{}
+	doneN, total, failedN int
+	bytesDone, bytesTotal int64
+	cur, curMax           int64 // the file in flight: bytes on the card, its planned size
+	current, part         string
+	failures              []Failure
+	meter                 meter
+}
+
+func New(root string, src MediaSource, log *applog.Log) *Runner {
+	return &Runner{Backoff: []time.Duration{2 * time.Second, 8 * time.Second, 30 * time.Second},
+		CardMounted: q2.CardMounted, Now: time.Now, Net: Net, root: root, src: src, log: log, state: "idle"}
+}
+
+func (r *Runner) manifestPath() string { return filepath.Join(r.root, ".subsonic", "manifest.json") }
+func (r *Runner) pendingPath() string  { return filepath.Join(r.root, ".subsonic", "pending.json") }
+
+func (r *Runner) logf(format string, a ...any) {
+	if r.log != nil {
+		r.log.Printf(format, a...)
+	}
+}
+
+// Start runs p in the background. An identical plan to the pending one continues it; files
+// already finished are skipped through the manifest either way.
+func (r *Runner) Start(p plan.Plan) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.state == "running" {
+		return ErrBusy
+	}
+	b, err := json.Marshal(struct {
+		Add, Replace []plan.Want
+		Rename       []plan.Move
+		Remove       []*library.Entry
+		Playlists    map[string][]string
+	}{p.Add, p.Replace, p.Rename, p.Remove, p.Playlists})
+	if err != nil {
+		return err
+	}
+	if old, _ := os.ReadFile(r.pendingPath()); bytes.Equal(old, b) {
+		r.logf("sync: continuing the pending plan")
+	} else {
+		if err := os.MkdirAll(filepath.Dir(r.pendingPath()), 0o755); err != nil {
+			return err
+		}
+		if err := q2.WriteFile(r.pendingPath(), b); err != nil {
+			return err
+		}
+	}
+	r.plan = &p
+	r.launch()
+	return nil
+}
+
+// launch starts a run of r.plan; r.mu is held.
+func (r *Runner) launch() {
+	p := *r.plan
+	ctx, cancel := context.WithCancel(context.Background())
+	r.cancel, r.done = cancel, make(chan struct{})
+	r.state, r.err, r.failures, r.meter = "running", nil, nil, meter{}
+	r.doneN, r.failedN, r.total = 0, 0, len(p.Add)+len(p.Replace)
+	r.bytesDone, r.bytesTotal, r.cur, r.curMax = 0, 0, 0, 0
+	for _, w := range append(append([]plan.Want(nil), p.Add...), p.Replace...) {
+		r.bytesTotal += w.Bytes
+	}
+	go r.run(ctx, p, r.done)
+}
+
+func (r *Runner) run(ctx context.Context, p plan.Plan, done chan struct{}) {
+	defer close(done)
+	err := r.work(ctx, p)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.current = ""
+	switch {
+	case ctx.Err() != nil:
+		r.state = r.stopAs
+	case errors.Is(err, q2.ErrNoCard):
+		r.state, r.err = "paused", q2.ErrNoCard
+	case err != nil:
+		r.state, r.err = "error", err
+		r.logf("sync: %v", err)
+	default:
+		r.state = "done"
+		library.Remove(r.root, r.pendingPath())
+	}
+}
+
+func (r *Runner) stop(as string) {
+	r.mu.Lock()
+	if r.state != "running" {
+		r.mu.Unlock()
+		return
+	}
+	r.stopAs = as
+	r.cancel()
+	done := r.done
+	r.mu.Unlock()
+	<-done
+}
+
+// Pause stops after cutting the file in flight; its .part stays for Resume.
+func (r *Runner) Pause() { r.stop("paused") }
+
+// Resume continues a paused sync (paused by Pause or by the card going away).
+func (r *Runner) Resume() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.state == "paused" && r.plan != nil {
+		r.launch()
+	}
+}
+
+// Cancel stops and forgets the plan. Finished files and their manifest entries stay.
+func (r *Runner) Cancel() {
+	r.stop("idle")
+	r.mu.Lock()
+	r.state, r.err, r.plan, r.current = "idle", nil, nil, ""
+	part := r.part
+	r.part = ""
+	r.mu.Unlock()
+	if part != "" {
+		library.Remove(r.root, part)
+	}
+	library.Remove(r.root, r.pendingPath())
+}
+
+// RetryFailed runs the last plan again once it has ended with failures; finished songs are skipped.
+func (r *Runner) RetryFailed() {
+	r.mu.Lock()
+	p := r.plan
+	ok := p != nil && (r.state == "error" || r.state == "done" && r.failedN > 0)
+	r.mu.Unlock()
+	if ok {
+		r.Start(*p)
+	}
+}
+
+func (r *Runner) Busy() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.state == "running"
+}
+
+func (r *Runner) Snapshot() Snapshot {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	done := r.bytesDone + min(r.cur, r.curMax)
+	s := Snapshot{State: r.state, Done: r.doneN, Total: r.total, Failed: r.failedN, BytesDone: done,
+		BytesTotal: r.bytesTotal, Current: r.current, Err: r.err, Failures: append([]Failure(nil), r.failures...)}
+	switch {
+	case s.State == "done":
+		s.Permille = 1000
+	case r.bytesTotal > 0:
+		s.Permille = permille(done, r.bytesTotal)
+	default:
+		s.Permille = permille(int64(r.doneN), int64(r.total))
+	}
+	if s.State == "running" {
+		s.ETA = r.meter.eta(r.Now(), r.bytesTotal-done)
+	}
+	return s
+}
+
+func (r *Runner) fail(id, title, op string, err error) {
+	f := Failure{SongID: id, Title: title, Op: op, At: r.Now(), Msg: applog.Redact(err.Error())}
+	var ae *subsonic.APIError
+	if errors.As(err, &ae) {
+		f.HTTP, f.Code = ae.HTTP, ae.Code
+	}
+	r.logf("sync: %s %s failed: %s", op, id, f.Msg)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.failures = append(r.failures, f)
+	if op != "cover" {
+		r.failedN++
+	}
+}
+
+func (r *Runner) finished(w plan.Want) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.doneN++
+	r.bytesDone += w.Bytes
+	r.cur, r.curMax = 0, 0
+}
+
+func (r *Runner) op(op, path string) {
+	if r.onOp != nil {
+		r.onOp(op, path)
+	}
+}
+
+// check is the gate before every file: stopped, or the card gone (USB storage took it).
+func (r *Runner) check(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !r.CardMounted() {
+		return q2.ErrNoCard
+	}
+	return nil
+}
+
+// cardErr blames a failed card write on the card when it has gone.
+func (r *Runner) cardErr(err error) error {
+	if err != nil && !r.CardMounted() {
+		return q2.ErrNoCard
+	}
+	return err
+}
+
+func (r *Runner) work(ctx context.Context, p plan.Plan) error {
+	m, err := library.LoadManifest(r.manifestPath())
+	if err != nil {
+		return r.cardErr(err)
+	}
+	save := func() error { return r.cardErr(m.Save(r.root, r.manifestPath())) }
+
+	for _, mv := range p.Rename {
+		if err := r.check(ctx); err != nil {
+			return err
+		}
+		e := m.Songs[mv.ID]
+		if e == nil || e.Path == mv.To {
+			continue
+		}
+		if err := r.rename(mv); err != nil {
+			if !r.CardMounted() {
+				return q2.ErrNoCard
+			}
+			r.fail(mv.ID, filepath.Base(mv.To), "rename", err)
+			continue
+		}
+		// ponytail: e.Meta keeps the old MetaKey (Move has no Song); harmless, as Compute keys on the path.
+		e.Path = mv.To
+		if err := save(); err != nil {
+			return err
+		}
+	}
+
+	covers := map[string]bool{} // album folders whose cover was tried this run
+	for _, w := range append(append([]plan.Want(nil), p.Add...), p.Replace...) {
+		id := w.Song.ID
+		if e := m.Songs[id]; e != nil && e.Path == w.Path && e.Quality == w.Quality && e.Meta == library.MetaKey(w.Song, w.Quality) {
+			r.finished(w)
+			continue
+		}
+		if err := r.check(ctx); err != nil {
+			return err
+		}
+		r.mu.Lock()
+		r.current = w.Song.Title
+		r.mu.Unlock()
+		n, err := r.fetchTries(ctx, w)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if !r.CardMounted() {
+				return q2.ErrNoCard
+			}
+			r.fail(id, w.Song.Title, "download", err)
+			continue
+		}
+		old := m.Songs[id]
+		m.Songs[id] = &library.Entry{ID: id, Path: w.Path, Quality: w.Quality, Size: n, Items: w.Items,
+			Meta: library.MetaKey(w.Song, w.Quality)}
+		if err := save(); err != nil {
+			return err
+		}
+		if old != nil && old.Path != w.Path {
+			r.remove(old.Path)
+		}
+		if dir := filepath.Dir(w.Path); !covers[dir] {
+			covers[dir] = true
+			r.cover(ctx, w)
+		}
+		r.finished(w)
+		r.op("download", w.Path)
+	}
+
+	keep := map[string]bool{}
+	for name, paths := range p.Playlists {
+		f := library.PlaylistFile(r.root, name)
+		keep[f] = true
+		have := []string{} // songs that failed are left out until they arrive
+		for _, s := range paths {
+			if _, err := os.Stat(s); err == nil {
+				have = append(have, s)
+			}
+		}
+		if err := library.WriteM3U(r.root, f, have); err != nil {
+			return r.cardErr(err)
+		}
+	}
+	stale, _ := filepath.Glob(filepath.Join(r.root, "_explaylist_data", "Navidrome - *.m3u"))
+	for _, f := range stale {
+		if !keep[f] {
+			library.Remove(r.root, f)
+		}
+	}
+
+	for _, e := range p.Remove {
+		if err := r.check(ctx); err != nil {
+			return err
+		}
+		if err := r.remove(e.Path); err != nil {
+			r.logf("sync: remove %s: %v", e.ID, err)
+			continue
+		}
+		delete(m.Songs, e.ID)
+		r.op("remove", e.Path)
+	}
+	return save()
+}
+
+// remove deletes path through the guard and, when its album folder is left holding only
+// cover.jpg, the cover too, so the guard prunes the folder.
+func (r *Runner) remove(path string) error {
+	if err := library.Remove(r.root, path); err != nil {
+		return err
+	}
+	dir := filepath.Dir(path)
+	if es, err := os.ReadDir(dir); err == nil && len(es) == 1 && es[0].Name() == "cover.jpg" {
+		library.Remove(r.root, filepath.Join(dir, "cover.jpg"))
+	}
+	return nil
+}
+
+func owned(root, path string) error {
+	if filepath.Clean(path) != path || !library.Owned(root, path) {
+		return errors.New("refusing path outside owned trees: " + path)
+	}
+	return nil
+}
+
+func (r *Runner) rename(mv plan.Move) error {
+	for _, p := range []string{mv.From, mv.To} {
+		if err := owned(r.root, p); err != nil {
+			return err
+		}
+	}
+	if _, err := os.Lstat(mv.To); err == nil {
+		return errors.New("rename target exists: " + mv.To)
+	}
+	if err := os.MkdirAll(filepath.Dir(mv.To), 0o755); err != nil {
+		return err
+	}
+	if err := os.Rename(mv.From, mv.To); err != nil {
+		return err
+	}
+	return r.remove(mv.From) // the file is gone already; this prunes the folders it left empty
+}
+
+// fetchTries fetches w, one try per Backoff entry, waiting that long after each failed try.
+func (r *Runner) fetchTries(ctx context.Context, w plan.Want) (int64, error) {
+	var err error
+	for i, d := range r.Backoff {
+		var n int64
+		if n, err = r.fetch(ctx, w); err == nil {
+			return n, nil
+		}
+		if ctx.Err() != nil || !r.CardMounted() {
+			return 0, err
+		}
+		r.logf("sync: %s try %d: %s", w.Song.ID, i+1, applog.Redact(err.Error()))
+		select {
+		case <-time.After(d):
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
+	}
+	return 0, err
+}
+
+// fetch downloads w to <path>.part, resuming an original with Range when the server answers
+// 206 at the right offset, then fsyncs and renames it into place. It returns the file's size.
+func (r *Runner) fetch(ctx context.Context, w plan.Want) (int64, error) {
+	if err := owned(r.root, w.Path); err != nil {
+		return 0, err
+	}
+	part := w.Path + ".part"
+	if err := os.MkdirAll(filepath.Dir(part), 0o755); err != nil {
+		return 0, err
+	}
+	var from int64
+	if st, err := os.Stat(part); err == nil && w.Quality == "original" {
+		from = st.Size()
+	}
+	if err := r.Net.Acquire(ctx, false); err != nil {
+		return 0, err
+	}
+	defer r.Net.Release()
+	resp, err := r.src.Get(ctx, r.src.MediaURL(w.Song.ID, w.Quality), from)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	flag := os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+	if resp.StatusCode == http.StatusPartialContent {
+		if from == 0 || !strings.HasPrefix(resp.Header.Get("Content-Range"), fmt.Sprintf("bytes %d-", from)) {
+			library.Remove(r.root, part)
+			return 0, fmt.Errorf("unexpected Content-Range %q", resp.Header.Get("Content-Range"))
+		}
+		flag = os.O_WRONLY | os.O_APPEND
+	} else {
+		from = 0 // 200: the server ignored Range, start over
+	}
+	f, err := os.OpenFile(part, flag, 0o644)
+	if err != nil {
+		return 0, err
+	}
+	r.mu.Lock()
+	r.part, r.cur, r.curMax = part, from, w.Bytes
+	r.mu.Unlock()
+	n, err := r.copy(f, resp.Body, from)
+	if err == nil {
+		err = f.Sync()
+	}
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(part, w.Path)
+	}
+	if err != nil {
+		return 0, err
+	}
+	r.mu.Lock()
+	r.part = ""
+	r.mu.Unlock()
+	return n, nil
+}
+
+// copy writes body to f, counting progress; n starts at from (the bytes already in the .part).
+func (r *Runner) copy(f *os.File, body io.Reader, n int64) (int64, error) {
+	buf := make([]byte, 64<<10)
+	for {
+		k, rerr := body.Read(buf)
+		if k > 0 {
+			if _, err := f.Write(buf[:k]); err != nil {
+				return n, err
+			}
+			n += int64(k)
+			r.mu.Lock()
+			r.cur = n
+			r.meter.add(r.Now(), int64(k))
+			r.mu.Unlock()
+		}
+		if rerr == io.EOF {
+			return n, nil
+		}
+		if rerr != nil {
+			return n, rerr
+		}
+	}
+}
+
+// cover writes cover.jpg into w's album folder when it is missing. A failure is recorded but
+// does not fail the song.
+func (r *Runner) cover(ctx context.Context, w plan.Want) {
+	c := filepath.Join(filepath.Dir(w.Path), "cover.jpg")
+	if w.Song.CoverArt == "" {
+		return
+	}
+	if _, err := os.Stat(c); err == nil {
+		return
+	}
+	err := func() error {
+		if err := r.Net.Acquire(ctx, false); err != nil {
+			return err
+		}
+		defer r.Net.Release()
+		resp, err := r.src.Get(ctx, r.src.CoverURL(w.Song.CoverArt), 0)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		b, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+		if err != nil {
+			return err
+		}
+		return q2.WriteFile(c, b)
+	}()
+	if err != nil && ctx.Err() == nil {
+		r.fail(w.Song.ID, w.Song.Title, "cover", err)
+	}
+}
+
+// NetSlot lets one network transfer run at a time. Priority waiters (the streamer) are served
+// before normal ones (the sync runner, which takes it per file).
+type NetSlot struct {
+	mu         sync.Mutex
+	held       bool
+	prio, norm []chan struct{}
+}
+
+func NewNetSlot() *NetSlot { return &NetSlot{} }
+
+// Net is the slot the sync runner and the streamer share.
+var Net = NewNetSlot()
+
+func (s *NetSlot) Acquire(ctx context.Context, priority bool) error {
+	s.mu.Lock()
+	if !s.held {
+		s.held = true
+		s.mu.Unlock()
+		return nil
+	}
+	ch := make(chan struct{})
+	if priority {
+		s.prio = append(s.prio, ch)
+	} else {
+		s.norm = append(s.norm, ch)
+	}
+	s.mu.Unlock()
+	select {
+	case <-ch:
+		return nil
+	case <-ctx.Done():
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if !drop(&s.prio, ch) && !drop(&s.norm, ch) {
+			s.handOff() // granted while giving up: pass it on
+		}
+		return ctx.Err()
+	}
+}
+
+func (s *NetSlot) Release() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.handOff()
+}
+
+func (s *NetSlot) handOff() {
+	for _, q := range []*[]chan struct{}{&s.prio, &s.norm} {
+		if len(*q) > 0 {
+			close((*q)[0])
+			*q = (*q)[1:]
+			return
+		}
+	}
+	s.held = false
+}
+
+func drop(q *[]chan struct{}, ch chan struct{}) bool {
+	for i, c := range *q {
+		if c == ch {
+			*q = append((*q)[:i], (*q)[i+1:]...)
+			return true
+		}
+	}
+	return false
+}
