@@ -1,8 +1,9 @@
 name: Q2 release
-# A tag q2-vX.Y (matching cmd/q2-subsonic/main.go's version) builds the card files and publishes them
+# Every push to master is tested. A tag q2-vX.Y (matching cmd/q2-subsonic/main.go's version) builds the card files and publishes them
 # as the release's only ZIP, which Q2 Pod's System settings -> Apps installs.
 on:
   push:
+    branches: [master] # tests only; Publish runs for tags
     tags: ['q2-v*']
   workflow_dispatch:
 
