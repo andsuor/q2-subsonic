@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/andsuor/q2-subsonic/internal/applog"
 	"github.com/andsuor/q2-subsonic/internal/fw"
 	"github.com/andsuor/q2-subsonic/internal/library"
 	"github.com/andsuor/q2-subsonic/internal/q2"
@@ -19,6 +20,10 @@ import (
 )
 
 const streamWindow = 2 // songs fetched ahead of, and kept behind, the one playing
+
+// playableSuffix are the formats the Q2 plays, streamed as they are when the firmware takes playlists.
+var playableSuffix = map[string]bool{"flac": true, "mp3": true, "m4a": true, "aac": true, "alac": true, "ogg": true,
+	"wav": true, "aiff": true, "aif": true, "ape": true, "wma": true, "dsf": true, "dff": true}
 
 type streamSource interface {
 	MediaURL(id, quality string) string
@@ -34,6 +39,11 @@ type streamer struct {
 	manifest                    func() *library.Manifest
 	net                         *syncer.NetSlot
 	poll                        time.Duration
+	backoff                     []time.Duration // wait after each failed try of a song; one try per entry
+	log                         *applog.Log     // optional
+
+	errMu sync.Mutex
+	err   error
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -42,7 +52,21 @@ type streamer struct {
 
 func newStreamer(root, play, playing string, caps fw.Caps, src streamSource, man func() *library.Manifest,
 	net *syncer.NetSlot, poll time.Duration) *streamer {
-	return &streamer{root: root, playFile: play, playingFile: playing, caps: caps, src: src, manifest: man, net: net, poll: poll}
+	return &streamer{root: root, playFile: play, playingFile: playing, caps: caps, src: src, manifest: man, net: net, poll: poll,
+		backoff: []time.Duration{2 * time.Second, 8 * time.Second, 30 * time.Second}}
+}
+
+// Err is set when a song failed all its tries; prefetching stops at that song.
+func (s *streamer) Err() error {
+	s.errMu.Lock()
+	defer s.errMu.Unlock()
+	return s.err
+}
+
+func (s *streamer) setErr(err error) {
+	s.errMu.Lock()
+	s.err = err
+	s.errMu.Unlock()
 }
 
 func (s *streamer) dir() string { return filepath.Join(s.root, ".subsonic", "stream") }
@@ -90,6 +114,8 @@ func (s *streamer) start(songs []subsonic.Song, from int) {
 	if from < 0 || from >= len(songs) {
 		return
 	}
+	s.setErr(nil)
+	stale, _ := os.ReadFile(s.playingFile) // belongs to the previous list
 	// A new list gets a clean folder (old queue file, stale and half-fetched songs).
 	if ents, err := os.ReadDir(s.dir()); err == nil {
 		for _, e := range ents {
@@ -104,7 +130,7 @@ func (s *streamer) start(songs []subsonic.Song, from int) {
 			continue
 		}
 		ext, q := strings.ToLower(sg.Suffix), "original"
-		if ext == "" || (!s.caps.Playlist && ext != "flac" && ext != "mp3") {
+		if s.caps.Playlist && !playableSuffix[ext] || !s.caps.Playlist && ext != "flac" && ext != "mp3" {
 			ext, q = "mp3", "mp3-320"
 		}
 		name := fmt.Sprintf("%04d - %s [%s].%s", i, library.SafeName(sg.Title), library.SafeName(sg.ID), ext)
@@ -113,7 +139,8 @@ func (s *streamer) start(songs []subsonic.Song, from int) {
 	seq := time.Now().UnixNano() // never reused
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel, s.done = cancel, make(chan struct{})
-	r := &streamRun{s: s, ctx: ctx, songs: songs, jobs: jobs, from: from, seq: seq}
+	r := &streamRun{s: s, ctx: ctx, songs: songs, jobs: jobs, from: from, seq: seq, stale: strings.TrimSpace(string(stale)),
+		fails: map[int]int{}, next: map[int]time.Time{}}
 	if s.caps.Playlist {
 		// Written once, whole: the firmware has queued these lines and waits for missing files.
 		var paths []string
@@ -139,6 +166,9 @@ type streamRun struct {
 	from      int
 	seq       int64
 	announced bool
+	stale     string // .playing at start: ignored until it changes
+	fails     map[int]int
+	next      map[int]time.Time
 }
 
 func (r *streamRun) announce(path string) {
@@ -151,7 +181,7 @@ func (r *streamRun) announce(path string) {
 func (r *streamRun) current() int {
 	b, _ := os.ReadFile(r.s.playingFile)
 	p := strings.TrimSpace(string(b))
-	for i := r.from; i < len(r.jobs) && p != ""; i++ {
+	for i := r.from; i < len(r.jobs) && p != "" && p != r.stale; i++ {
 		if r.jobs[i].path == p {
 			return i
 		}
@@ -167,22 +197,39 @@ func (r *streamRun) run() {
 				library.Remove(r.s.root, r.jobs[i].path)
 			}
 		}
-		fetched := false
+		fetched, missing := false, false
 		for i := cur; i < len(r.jobs) && i <= cur+streamWindow; i++ {
 			j := r.jobs[i]
 			if !j.fetch || exists(j.path) {
 				continue
 			}
-			if err := r.fetch(r.songs[i], j); err != nil {
-				break // retried on the next tick
+			missing = true
+			if time.Now().Before(r.next[i]) {
+				break // backing off
 			}
-			fetched = true
+			if err := r.fetch(r.songs[i], j); err != nil {
+				if r.ctx.Err() != nil {
+					return
+				}
+				r.fails[i]++
+				s := r.s
+				if s.log != nil {
+					s.log.Printf("%s", applog.Redact(fmt.Sprintf("stream %q try %d: %v", r.songs[i].Title, r.fails[i], err)))
+				}
+				if r.fails[i] >= len(s.backoff) {
+					s.setErr(fmt.Errorf("Couldn't stream %s", r.songs[i].Title))
+					return
+				}
+				r.next[i] = time.Now().Add(s.backoff[r.fails[i]-1])
+				break
+			}
+			fetched, missing = true, false
 			break
 		}
 		if !r.announced && exists(r.jobs[r.from].path) {
 			r.announce(r.s.dir()) // stock firmware: plays the folder once it has a song
 		}
-		if cur == len(r.jobs)-1 && !fetched {
+		if cur == len(r.jobs)-1 && !fetched && !missing {
 			return
 		}
 		if !fetched {

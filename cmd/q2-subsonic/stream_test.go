@@ -22,6 +22,7 @@ type fakeSrc struct {
 	mu    sync.Mutex
 	urls  []string
 	onGet func()
+	fail  func(u string) bool
 }
 
 func (f *fakeSrc) MediaURL(id, q string) string { return "u:" + id + ":" + q }
@@ -31,6 +32,9 @@ func (f *fakeSrc) Get(_ context.Context, u string, _ int64) (*http.Response, err
 	f.mu.Unlock()
 	if f.onGet != nil {
 		f.onGet()
+	}
+	if f.fail != nil && f.fail(u) {
+		return nil, fmt.Errorf("boom")
 	}
 	return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader("data-" + u))}, nil
 }
@@ -148,8 +152,9 @@ func TestStreamFallbackTranscodesOthers(t *testing.T) {
 
 func TestStreamPrefetchTwoAhead(t *testing.T) {
 	e := newEnv(t, fw.Caps{})
-	os.WriteFile(e.playing, []byte(e.stream(3, "flac")+"\n"), 0o644)
 	e.s.start(songs(8, "flac"), 0)
+	until(t, "0-2", func() bool { return exists(e.stream(2, "flac")) })
+	os.WriteFile(e.playing, []byte(e.stream(3, "flac")+"\n"), 0o644)
 	until(t, "4,5", func() bool { return exists(e.stream(4, "flac")) && exists(e.stream(5, "flac")) })
 	time.Sleep(40 * time.Millisecond)
 	if exists(e.stream(6, "flac")) {
@@ -189,5 +194,64 @@ func TestStreamPriority(t *testing.T) {
 	until(t, "both", func() bool { mu.Lock(); defer mu.Unlock(); return len(order) == 2 })
 	if order[0] != "stream" {
 		t.Fatal(order)
+	}
+}
+
+func TestStartIgnoresStalePlaying(t *testing.T) {
+	e := newEnv(t, fw.Caps{})
+	os.WriteFile(e.playing, []byte(e.stream(5, "flac")), 0o644) // left by the previous list
+	e.s.start(songs(8, "flac"), 0)
+	until(t, "song 0", func() bool { return exists(e.stream(0, "flac")) })
+	until(t, "play", func() bool { return exists(e.play) })
+	time.Sleep(30 * time.Millisecond)
+	if exists(e.stream(6, "flac")) {
+		t.Fatal("stale .playing used")
+	}
+}
+
+func TestFetchRetriesThenErr(t *testing.T) {
+	e := newEnv(t, fw.Caps{})
+	e.s.backoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	e.src.fail = func(u string) bool { return strings.Contains(u, "s1") }
+	e.s.start(songs(4, "flac"), 0)
+	until(t, "err", func() bool { return e.s.Err() != nil })
+	if e.s.Err().Error() != "Couldn't stream T1" {
+		t.Fatal(e.s.Err())
+	}
+	until(t, "stopped", func() bool { return !e.s.active() })
+	n := 0
+	for _, u := range e.src.urls {
+		if strings.Contains(u, "s1") {
+			n++
+		}
+	}
+	if n != 3 || exists(e.stream(2, "flac")) {
+		t.Fatalf("tries=%d", n)
+	}
+}
+
+func TestLastSongFailureRetries(t *testing.T) {
+	e := newEnv(t, fw.Caps{})
+	e.s.backoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	var mu sync.Mutex
+	tries := 0
+	e.src.fail = func(string) bool { mu.Lock(); defer mu.Unlock(); tries++; return tries == 1 }
+	e.s.start(songs(1, "flac"), 0)
+	until(t, "fetched", func() bool { return exists(e.stream(0, "flac")) })
+	if e.s.Err() != nil {
+		t.Fatal(e.s.Err())
+	}
+}
+
+func TestPlaylistModeOriginalOnlyForPlayable(t *testing.T) {
+	e := newEnv(t, fw.Caps{Playlist: true})
+	ss := songs(2, "M4A")
+	ss[1].Suffix = "opus"
+	e.s.start(ss, 0)
+	until(t, "files", func() bool { return exists(e.stream(0, "m4a")) && exists(e.stream(1, "mp3")) })
+	e.src.mu.Lock()
+	defer e.src.mu.Unlock()
+	if e.src.urls[0] != "u:s0:original" || e.src.urls[1] != "u:s1:mp3-320" {
+		t.Fatal(e.src.urls)
 	}
 }
