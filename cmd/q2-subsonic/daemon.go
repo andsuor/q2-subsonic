@@ -137,7 +137,7 @@ type daemon struct {
 	pinging, pinged    bool
 	gen                int // bumped by every selection change
 	preview            *preview
-	showDone           bool // the finished sync's page, until the selection changes or Check Again
+	showDone           bool // the finished sync's page, until Check Again, a new Start, or a choice made after it ended
 	lib                *libJob
 	libTaken           int64                       // the library request whose answer was taken last (libPoll)
 	libAgain           bool                        // a request was wanted while one awaited its answer: sent once that comes
