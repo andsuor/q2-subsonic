@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1046,5 +1047,41 @@ func TestCoverSizedAndWhole(t *testing.T) {
 	defer f.mu.Unlock()
 	if len(f.sizes) != 2 || f.sizes[0] != "600" || f.sizes[1] != "600" {
 		t.Errorf("sizes %q", f.sizes)
+	}
+}
+
+// Refresh records the items holding songs that need no transfer, while no sync runs (I12); a run
+// records them too, and a renamed song's new MetaKey.
+func TestRefreshRecords(t *testing.T) {
+	f, r, root := setup(t)
+	s := subsonic.Song{ID: "a", Title: "Ta", Album: "Alb", AlbumArtist: "Art", Track: 1, Suffix: "flac"}
+	moved := s
+	moved.Title = "Tb"
+	from, to := library.SongPath(root, s, "original", false), library.SongPath(root, moved, "original", false)
+	put(t, from, "a")
+	(&library.Manifest{Songs: map[string]*library.Entry{"a": {ID: "a", Path: from, Quality: "original", Size: 1,
+		Items: []string{"playlist:p1"}, Meta: library.MetaKey(s, "original")}}}).Save(root, root+"/.subsonic/manifest.json")
+	if err := r.Refresh([]plan.Want{{Song: s, Quality: "original", Path: from, Items: []string{"album:al"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if e := manifest(t, root).Songs["a"]; !reflect.DeepEqual(e.Items, []string{"album:al"}) {
+		t.Fatalf("%+v", e)
+	}
+	b := want(root, "bb", "original")
+	f.block["bb"] = make(chan struct{})
+	r.Start(plan.Plan{Add: []plan.Want{b}, Rename: []plan.Move{{From: from, To: to, ID: "a"}},
+		Keep: []plan.Want{{Song: moved, Quality: "original", Path: to, Items: []string{"album:al"}}}})
+	if err := r.Refresh(nil); err != nil {
+		t.Fatal("nothing to refresh:", err)
+	}
+	if err := r.Refresh([]plan.Want{{Song: s, Quality: "original", Path: from}}); !errors.Is(err, ErrBusy) {
+		t.Fatal("refresh while running:", err)
+	}
+	close(f.block["bb"])
+	if s := wait(t, r); s.State != "done" {
+		t.Fatalf("%+v", s)
+	}
+	if e := manifest(t, root).Songs["a"]; e.Path != to || e.Meta != library.MetaKey(moved, "original") {
+		t.Fatalf("%+v", e)
 	}
 }

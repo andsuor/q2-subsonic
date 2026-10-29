@@ -132,6 +132,11 @@ func (d *daemon) computePreview(cl *subsonic.Client, p *preview) {
 	var pl plan.Plan
 	if err == nil {
 		pl = plan.Compute(sel, resolved, names, d.manifest(), d.card, d.free(d.card))
+		// The items holding songs already on the card, recorded now: an up-to-date preview starts
+		// no sync, and status reads them after a restart (I12). A running sync records its own.
+		if rerr := d.runner.Refresh(pl.Keep); rerr != nil && !errors.Is(rerr, syncer.ErrBusy) {
+			d.log.Printf("sync: refresh: %v", rerr)
+		}
 	}
 	d.mu.Lock()
 	p.done, p.plan, p.err, p.at = true, &pl, err, time.Now()

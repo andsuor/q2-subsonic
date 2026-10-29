@@ -863,3 +863,25 @@ func TestPreviewReplaceShowsSize(t *testing.T) {
 		}
 	}
 }
+
+// Swapping a synced playlist for the album holding the same songs needs no transfer; the songs'
+// items are still recorded, so after a restart the album reads On Q2, not Waiting to sync (I12).
+func TestItemsRecordedWithoutTransfer(t *testing.T) {
+	n := &nav{albums: 1, songsPer: 2}
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", "playlist:pl1")
+	d.preview(t)
+	d.do("start")
+	eventually(t, "the sync", func() bool { return d.runner.Snapshot().State == "done" })
+	d.do("toggle", "album:al0")
+	d.do("toggle", "playlist:pl1")
+	d.do("check")
+	d.preview(t)
+	d2 := newTestDaemonOn(t, d.card, n, "", true) // a restart: nothing resolved yet
+	if st := d2.view().status(selection.KindAlbum, "al0", 2); st != "On Q2" {
+		t.Errorf("album after restart: %q", st)
+	}
+	if _, ok := find(d2.do("albums"), "Sync Now"); ok {
+		t.Error("Sync Now after restart")
+	}
+}

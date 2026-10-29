@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -167,6 +168,52 @@ func (r *Runner) stop(as string) {
 	<-done
 }
 
+// Refresh records keep (plan.Keep: the items holding songs that need no transfer) while no sync
+// runs, so an up-to-date preview still updates what each song is on the card for (I12). ErrBusy
+// while one runs; that run records them itself.
+func (r *Runner) Refresh(keep []plan.Want) error {
+	if len(keep) == 0 {
+		return nil
+	}
+	return r.edit(func(m *library.Manifest) (bool, error) { return applyKeep(m, keep), nil })
+}
+
+// edit changes the manifest while no sync runs: a run holds it in memory and saves it whole.
+func (r *Runner) edit(f func(*library.Manifest) (bool, error)) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.state == "running" {
+		return ErrBusy
+	}
+	m, err := library.LoadManifest(r.manifestPath())
+	if err != nil {
+		return err
+	}
+	changed, err := f(m)
+	if changed {
+		if serr := m.Save(r.root, r.manifestPath()); err == nil {
+			err = serr
+		}
+	}
+	return err
+}
+
+// applyKeep records each kept song's items and MetaKey, once it is where the plan puts it (a
+// rename that failed is left for the next sync).
+func applyKeep(m *library.Manifest, keep []plan.Want) bool {
+	changed := false
+	for _, w := range keep {
+		e := m.Songs[w.Song.ID]
+		if e == nil || e.Path != w.Path || e.Quality != w.Quality {
+			continue
+		}
+		if meta := library.MetaKey(w.Song, w.Quality); e.Meta != meta || !slices.Equal(e.Items, w.Items) {
+			e.Meta, e.Items, changed = meta, w.Items, true
+		}
+	}
+	return changed
+}
+
 // Pause stops after cutting the file in flight; its .part stays for Resume.
 func (r *Runner) Pause() { r.stop("paused") }
 
@@ -317,8 +364,7 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 			r.fail(mv.ID, filepath.Base(mv.To), "rename", err)
 			continue
 		}
-		// ponytail: e.Meta keeps the old MetaKey (Move has no Song); harmless, as Compute keys on the path.
-		e.Path = mv.To
+		e.Path = mv.To // its MetaKey with the rest of p.Keep, after the downloads
 		if err := save(); err != nil {
 			return err
 		}
@@ -385,6 +431,10 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 		}
 		r.finished(w)
 		r.op("download", w.Path)
+	}
+
+	if applyKeep(m, p.Keep) {
+		unsaved++
 	}
 
 	for name, f := range m.Playlists {

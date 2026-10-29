@@ -281,3 +281,26 @@ func TestPlanCountsCovers(t *testing.T) {
 		t.Fatalf("need = %d", p.NeedBytes)
 	}
 }
+
+// A song with nothing to move still has its record refreshed: the items now holding it (I12), and
+// after a rename its MetaKey.
+func TestPlanKeepsRecordsFresh(t *testing.T) {
+	a, old, b := song("s1", "One"), song("s2", "Two"), song("s2", "Deux")
+	sel := selection.Set{Items: []selection.Item{item("album", "a1", "original")}}
+	m := manifest(entry(a, "original", 1000, "playlist:p1"), entry(old, "original", 1000, "album:a1"))
+	p := Compute(sel, map[string][]subsonic.Song{"album:a1": {a, b}}, nil, m, root, big)
+	got := map[string]Want{}
+	for _, w := range p.Keep {
+		got[w.Song.ID] = w
+	}
+	if w := got["s1"]; !reflect.DeepEqual(w.Items, []string{"album:a1"}) || w.Path != m.Songs["s1"].Path {
+		t.Errorf("s1: %+v", w)
+	}
+	if w := got["s2"]; len(p.Rename) != 1 || w.Path != p.Rename[0].To || w.Song.Title != "Deux" {
+		t.Errorf("s2: %+v %+v", w, p.Rename)
+	}
+	up := Compute(sel, map[string][]subsonic.Song{"album:a1": {a}}, nil, manifest(entry(a, "original", 1000, "album:a1")), root, big)
+	if len(up.Keep) != 0 {
+		t.Errorf("keep with nothing to refresh: %+v", up.Keep)
+	}
+}

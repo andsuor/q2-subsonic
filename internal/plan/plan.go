@@ -4,6 +4,7 @@ package plan
 
 import (
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -29,6 +30,7 @@ type Move struct{ From, To, ID string }
 
 type Plan struct {
 	Add, Replace         []Want
+	Keep                 []Want // no transfer, but the record changes: the items holding it, or its MetaKey
 	Rename               []Move
 	Remove               []*library.Entry
 	Playlists            map[string][]string
@@ -134,6 +136,9 @@ func Compute(sel selection.Set, resolved map[string][]subsonic.Song, playlistNam
 		if e != nil && unchanged(e, w) {
 			w.Path = e.Path
 			final[id] = e.Path
+			if !slices.Equal(e.Items, w.Items) {
+				p.Keep = append(p.Keep, *w)
+			}
 			continue
 		}
 		path := library.SongPath(root, w.Song, w.Quality, multi[w.Song.AlbumID])
@@ -152,8 +157,11 @@ func Compute(sel selection.Set, resolved map[string][]subsonic.Song, playlistNam
 			p.Replace = append(p.Replace, *w)
 			p.NeedBytes += w.Bytes - e.Size
 			p.ReplaceBytes += w.Bytes - e.Size
-		case e.Path != path:
-			p.Rename = append(p.Rename, Move{From: e.Path, To: path, ID: id})
+		default:
+			if e.Path != path {
+				p.Rename = append(p.Rename, Move{From: e.Path, To: path, ID: id})
+			}
+			p.Keep = append(p.Keep, *w) // its new MetaKey, recorded once it is at path
 		}
 	}
 	for id, e := range m.Songs {
