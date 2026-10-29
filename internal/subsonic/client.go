@@ -224,45 +224,50 @@ func decode(op string, status int, body []byte, out any) error {
 }
 
 // SignIn checks the sign-in and returns what to keep on the card. The password field may hold an
-// OpenSubsonic API key: on a server offering them it is tried as a key first, and a working key is
-// kept alone, with the user name the server gives for it. Otherwise (or when the key is refused) it
-// is the password, checked with token auth and kept as before (R38).
+// OpenSubsonic API key. It is first checked as a password with token auth, which never sends it in
+// clear, and kept as before. Only when that is refused, and the server offers API keys, is it tried
+// as a key; a working key is kept alone, with the user name the server gives for it (R38).
 func (c *Client) SignIn(ctx context.Context) (Creds, error) {
-	var keyErr error
-	if c.offers(ctx, "apiKeyAuthentication") {
-		k := *c
-		k.c = Creds{Server: c.c.Server, APIKey: c.c.Password}
-		var r struct {
-			T struct {
-				Username string `json:"username"`
-			} `json:"tokenInfo"`
-		}
-		keyErr = k.call(ctx, "tokenInfo", nil, &r)
-		if keyErr == nil {
-			k.c.User = cmp.Or(r.T.Username, c.c.User)
-			return k.c, nil
-		}
-		if !errors.Is(keyErr, ErrAuth) && !errors.Is(keyErr, ErrAuthMethod) {
-			return Creds{}, keyErr // not a refused key: unreachable, certificate, ...
-		}
-	}
-	err := c.Ping(ctx)
-	switch {
-	case err == nil:
+	tokErr := c.Ping(ctx)
+	if tokErr == nil {
 		return c.c, nil
-	case keyErr != nil && errors.Is(err, ErrAuthMethod): // a server taking only keys: the key was wrong
-		return Creds{}, keyErr
-	case keyErr != nil && errors.Is(err, ErrAuth):
-		var ae *APIError
-		errors.As(err, &ae)
-		return Creds{}, &APIError{Op: "signin", HTTP: ae.HTTP, Code: ae.Code, Msg: ae.Msg, kind: ErrAuthKey}
 	}
-	return Creds{}, err
+	if !errors.Is(tokErr, ErrAuth) && !errors.Is(tokErr, ErrAuthMethod) {
+		return Creds{}, tokErr // unreachable, certificate, ...
+	}
+	keys, err := c.offers(ctx, "apiKeyAuthentication")
+	if err != nil {
+		return Creds{}, err
+	}
+	if !keys {
+		return Creds{}, tokErr
+	}
+	k := *c
+	k.c = Creds{Server: c.c.Server, APIKey: c.c.Password}
+	var r struct {
+		T struct {
+			Username string `json:"username"`
+		} `json:"tokenInfo"`
+	}
+	keyErr := k.call(ctx, "tokenInfo", nil, &r)
+	switch {
+	case keyErr == nil:
+		k.c.User = cmp.Or(r.T.Username, c.c.User)
+		return k.c, nil
+	case !errors.Is(keyErr, ErrAuth) && !errors.Is(keyErr, ErrAuthMethod):
+		return Creds{}, keyErr
+	case errors.Is(tokErr, ErrAuthMethod): // a server taking only keys: the key was wrong
+		return Creds{}, keyErr
+	}
+	var ae *APIError
+	errors.As(tokErr, &ae)
+	return Creds{}, &APIError{Op: "signin", HTTP: ae.HTTP, Code: ae.Code, Msg: ae.Msg, kind: ErrAuthKey}
 }
 
 // offers reports whether the server lists the OpenSubsonic extension. The call is public, so it
-// carries no credentials; a server without it (plain Subsonic) offers nothing.
-func (c *Client) offers(ctx context.Context, ext string) bool {
+// carries no credentials. A server without it (plain Subsonic: an error code or status) offers
+// nothing; a transport failure is returned.
+func (c *Client) offers(ctx context.Context, ext string) (bool, error) {
 	anon := *c
 	anon.c = Creds{Server: c.c.Server}
 	var r struct {
@@ -270,15 +275,19 @@ func (c *Client) offers(ctx context.Context, ext string) bool {
 			Name string `json:"name"`
 		} `json:"openSubsonicExtensions"`
 	}
-	if anon.call(ctx, "getOpenSubsonicExtensions", nil, &r) != nil {
-		return false
+	if err := anon.call(ctx, "getOpenSubsonicExtensions", nil, &r); err != nil {
+		var ae *APIError
+		if errors.As(err, &ae) && ae.HTTP == 0 {
+			return false, err
+		}
+		return false, nil
 	}
 	for _, e := range r.Ext {
 		if e.Name == ext {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // KeyAuth reports whether the client signs in with an API key rather than a password.

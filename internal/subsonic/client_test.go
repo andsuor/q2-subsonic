@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -483,11 +484,14 @@ func TestNotYetValidWhileClockUnknown(t *testing.T) {
 }
 
 // keyServer lists apiKeyAuthentication when offer is set: KEY belongs to "andreas". Token auth with
-// u/pw works too, unless keyOnly (then it is refused with 42, as on LMS).
+// u/pw works too, unless keyOnly (then it is refused with 42, as on LMS). seen gets every request's
+// query, with its endpoint as "_op".
 func keyServer(t *testing.T, offer, keyOnly bool, seen *[]url.Values) *httptest.Server {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
-		*seen = append(*seen, q)
+		rec := r.URL.Query()
+		rec.Set("_op", path.Base(r.URL.Path))
+		*seen = append(*seen, rec)
 		w.Header().Set("Content-Type", "application/json")
 		ok := func(extra string) {
 			fmt.Fprintf(w, `{"subsonic-response":{"status":"ok","version":"1.16.1","openSubsonic":true%s}}`, extra)
@@ -531,9 +535,11 @@ func TestSignInAPIKey(t *testing.T) {
 	if err != nil || got != (Creds{Server: srv.URL, User: "andreas", APIKey: "KEY"}) {
 		t.Fatalf("%+v %v", got, err)
 	}
-	for _, k := range []string{"u", "t", "s", "p", "apiKey"} {
-		if seen[0].Has(k) {
-			t.Fatalf("extensions call sent %s: %v", k, seen[0])
+	for _, q := range seen {
+		for _, k := range []string{"u", "t", "s", "p", "apiKey"} {
+			if q.Get("_op") == "getOpenSubsonicExtensions" && q.Has(k) {
+				t.Fatalf("extensions call sent %s: %v", k, q)
+			}
 		}
 	}
 	c, _ = New(got, srv.Client())
@@ -545,14 +551,22 @@ func TestSignInAPIKey(t *testing.T) {
 	}
 }
 
-// R38: on a server offering API keys, a password still works (the key try fails, token auth
-// follows) and is kept as before; when both fail, the words cover both.
+// R38 (amended): on a server offering API keys, a password still works and is kept as before. Token
+// auth goes first, so a correct password never travels in clear as ?apiKey=. When both fail, the
+// words cover both.
 func TestSignInPasswordOnKeyServer(t *testing.T) {
 	var seen []url.Values
 	srv := keyServer(t, true, false, &seen)
 	c, _ := New(Creds{Server: srv.URL, User: "u", Password: "pw"}, srv.Client())
 	if got, err := c.SignIn(context.Background()); err != nil || got != (Creds{Server: srv.URL, User: "u", Password: "pw"}) {
 		t.Fatalf("password: %+v %v", got, err)
+	}
+	for _, q := range seen {
+		for k, vs := range q {
+			if k == "apiKey" || slices.Contains(vs, "pw") {
+				t.Fatalf("a correct password went out in clear: %v", q)
+			}
+		}
 	}
 	c, _ = New(Creds{Server: srv.URL, User: "u", Password: "nope"}, srv.Client())
 	_, err := c.SignIn(context.Background())
@@ -584,5 +598,23 @@ func TestSignInToken(t *testing.T) {
 	_, c = serve(t, "ping.json", nil)
 	if _, err := c.SignIn(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// R38: the extensions call failing in transport is reported as such, not as a wrong password.
+func TestSignInExtensionsUnreachable(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if path.Base(r.URL.Path) == "getOpenSubsonicExtensions" {
+			conn, _, _ := w.(http.Hijacker).Hijack()
+			conn.Close()
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(failed(40)))
+	}))
+	defer srv.Close()
+	c, _ := New(Creds{Server: srv.URL, User: "u", Password: "KEY"}, srv.Client())
+	if _, err := c.SignIn(context.Background()); errors.Is(err, ErrAuth) || !errors.Is(err, ErrUnreachable) {
+		t.Fatalf("got %v", err)
 	}
 }
