@@ -138,6 +138,7 @@ type daemon struct {
 	showDone           bool // the finished sync's page, until the selection changes or Check Again
 	lib                *libJob
 	resolved           map[string][]subsonic.Song // selection key -> its songs, as last fetched
+	libCount           [2]int                     // albums, playlists of the Entire Library, as last resolved
 	playSeq            int                        // the latest play request; an older one still waiting is dropped
 	playMu             sync.Mutex                 // one streamer.start at a time
 	man                *library.Manifest

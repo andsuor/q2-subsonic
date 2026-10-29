@@ -19,6 +19,7 @@ const (
 	KindAlbum    Kind = "album"
 	KindArtist   Kind = "artist"
 	KindSong     Kind = "song"
+	KindLibrary  Kind = "library" // the whole library, id "all"
 )
 
 type Item struct {

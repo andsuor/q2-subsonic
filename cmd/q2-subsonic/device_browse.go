@@ -138,6 +138,9 @@ func (d *daemon) browse(ctx context.Context, cl *subsonic.Client, op, cursor str
 		for _, a := range al {
 			r.Rows = append(r.Rows, v.item(selection.KindAlbum, a.ID, a.Name, a.Artist, a.SongCount))
 		}
+		if len(r.Rows) == 0 && off == 0 {
+			r.Rows = []q2spot.Row{info("No albums")}
+		}
 		return r
 	case "playlists":
 		pls, err := cl.Playlists(ctx)
@@ -147,6 +150,9 @@ func (d *daemon) browse(ctx context.Context, cl *subsonic.Client, op, cursor str
 		for _, p := range pls {
 			rows = append(rows, v.item(selection.KindPlaylist, p.ID, p.Name, plural(p.SongCount, "song"), p.SongCount))
 		}
+		if len(rows) == 0 {
+			rows = []q2spot.Row{{Kind: "info", Title: "No playlists", Subtitle: "Playlists must be public in Navidrome to show here"}}
+		}
 	case "artists":
 		ars, err := cl.Artists(ctx)
 		if err != nil {
@@ -154,6 +160,9 @@ func (d *daemon) browse(ctx context.Context, cl *subsonic.Client, op, cursor str
 		}
 		for _, a := range ars {
 			rows = append(rows, v.item(selection.KindArtist, a.ID, a.Name, plural(a.AlbumCount, "album"), 0))
+		}
+		if len(rows) == 0 {
+			rows = []q2spot.Row{info("No artists")}
 		}
 	}
 	return page(rows, cursor)
@@ -294,6 +303,16 @@ func (d *daemon) toggle(ctx context.Context, cl *subsonic.Client, arg string) q2
 			return q2spot.Fail(q2spot.Error, "Couldn't save the selection")
 		}
 		return q2spot.Reply{Message: "Removed from Sync"}
+	}
+	if kind == selection.KindLibrary {
+		sel.Toggle(selection.Item{Kind: kind, ID: id, Name: "Entire Library", Quality: d.settings().def()})
+		if err := d.saveSelection(sel); err != nil {
+			return q2spot.Fail(q2spot.Error, "Couldn't save the selection")
+		}
+		return q2spot.Reply{Message: "Added to Sync · Entire Library"}
+	}
+	if sel.Has(selection.KindLibrary, "all") {
+		return q2spot.Reply{Message: "Included via Entire Library"}
 	}
 	var name string
 	var n int

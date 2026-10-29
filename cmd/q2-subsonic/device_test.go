@@ -30,6 +30,8 @@ type nav struct {
 	errCode          int           // every API call fails with this Subsonic code
 	block            chan struct{} // downloads wait for it
 	failID           string        // getAlbum fails for this album only
+	playlists        int           // playlists pl1..plN ("Mix", "Mix 2"…); 0 means 1. pl<k> holds al<k-1>'s songs
+	empty            bool          // every list reply is empty
 }
 
 func (n *nav) song(al, j int) map[string]any {
@@ -40,6 +42,14 @@ func (n *nav) song(al, j int) map[string]any {
 
 func (n *nav) album(i int) map[string]any {
 	return map[string]any{"id": fmt.Sprintf("al%d", i), "name": fmt.Sprintf("Album %03d", i), "artist": "Artist", "year": 2020, "songCount": n.songsPer}
+}
+
+func (n *nav) playlist(k int) map[string]any {
+	name := "Mix"
+	if k > 1 {
+		name = fmt.Sprintf("Mix %d", k)
+	}
+	return map[string]any{"id": fmt.Sprintf("pl%d", k), "name": name, "songCount": n.songsPer}
 }
 
 func (n *nav) songs(al int) []map[string]any {
@@ -74,6 +84,10 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "ping":
 		ok("", nil)
 	case "getAlbumList2":
+		if n.empty {
+			ok("albumList2", map[string]any{})
+			return
+		}
 		off, _ := strconv.Atoi(q.Get("offset"))
 		size, _ := strconv.Atoi(q.Get("size"))
 		var al []map[string]any
@@ -91,14 +105,29 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a["song"] = n.songs(albumOf(q.Get("id")))
 		ok("album", a)
 	case "getPlaylists":
-		ok("playlists", map[string]any{"playlist": []any{map[string]any{"id": "pl1", "name": "Mix", "songCount": n.songsPer}}})
+		var pls []any
+		for k := 1; k <= max(n.playlists, 1) && !n.empty; k++ {
+			pls = append(pls, n.playlist(k))
+		}
+		ok("playlists", map[string]any{"playlist": pls})
 	case "getPlaylist":
-		ok("playlist", map[string]any{"id": "pl1", "name": "Mix", "songCount": n.songsPer, "entry": n.songs(0)})
+		kk, _ := strconv.Atoi(strings.TrimPrefix(q.Get("id"), "pl"))
+		p := n.playlist(kk)
+		p["entry"] = n.songs(kk - 1)
+		ok("playlist", p)
 	case "getArtists":
+		if n.empty {
+			ok("artists", map[string]any{})
+			return
+		}
 		ok("artists", map[string]any{"index": []any{map[string]any{"artist": []any{map[string]any{"id": "ar1", "name": "Artist", "albumCount": 2}}}}})
 	case "getArtist":
 		ok("artist", map[string]any{"id": "ar1", "name": "Artist", "albumCount": 2, "album": []any{n.album(0), n.album(1)}})
 	case "search3":
+		if n.empty {
+			ok("searchResult3", map[string]any{})
+			return
+		}
 		ok("searchResult3", map[string]any{"album": []any{n.album(0)}, "song": n.songs(0)})
 	case "getSong":
 		al, j, _ := strings.Cut(strings.TrimPrefix(q.Get("id"), "al"), ".")
@@ -542,5 +571,99 @@ func TestLibraryHelpCopy(t *testing.T) {
 		if !strings.Contains(got, w) {
 			t.Errorf("missing %q in %q", w, got)
 		}
+	}
+}
+
+func (d *tdaemon) selected(t *testing.T) []selection.Item {
+	t.Helper()
+	sel, err := selection.Load(filepath.Join(d.dir, "selection.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sel.Items
+}
+
+func TestEntireLibraryRow(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 3, songsPer: 2, playlists: 2}, "", true)
+	r := d.do("onq2")
+	row := r.Rows[0]
+	if row.Title != "Sync Entire Library" || row.Subtitle != "Off" || row.URI != "toggle" ||
+		row.Context != "library:all" || row.Position != "toggle" || row.Kind != "action" {
+		t.Fatalf("row %+v", row)
+	}
+	if r := d.do(row.URI, row.Context); r.Message != "Added to Sync · Entire Library" {
+		t.Fatalf("toast %q", r.Message)
+	}
+	if it := d.selected(t); len(it) != 1 || it[0].Name != "Entire Library" || it[0].Quality != "original" {
+		t.Fatalf("selection %+v", it)
+	}
+	if got := d.do("onq2").Rows[0].Subtitle; got != "On" {
+		t.Fatalf("before resolve %q", got)
+	}
+	d.preview(t)
+	r = d.do("onq2")
+	if got := r.Rows[0].Subtitle; got != "On · 3 albums · 2 playlists" || len(r.Rows) != 1 {
+		t.Fatalf("after resolve %q, %q", got, titles(r))
+	}
+	if r := d.do("toggle", "library:all"); r.Message != "Removed from Sync" {
+		t.Fatalf("toast %q", r.Message)
+	}
+	if got := d.do("onq2").Rows[0].Subtitle; got != "Off" {
+		t.Fatalf("after removal %q", got)
+	}
+}
+
+func TestEntireLibraryResolvesAlbumsAndPlaylists(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 3, songsPer: 2, playlists: 2}, "", true)
+	d.do("toggle", "library:all")
+	if r := d.do("albums"); r.Rows[0].Title != "Sync Now" || r.Rows[0].Subtitle != "1 waiting" {
+		t.Fatalf("rows %q %q", titles(r), r.Rows[0].Subtitle)
+	}
+	d.preview(t)
+	p := d.daemon.preview.plan
+	if len(p.Add) != 6 {
+		t.Errorf("Add %d, want 6", len(p.Add))
+	}
+	if len(p.Playlists) != 2 || len(p.Playlists["Mix"]) != 2 || len(p.Playlists["Mix 2"]) != 2 {
+		t.Errorf("playlists %v", p.Playlists)
+	}
+}
+
+func TestEntireLibraryIncludedVia(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 3, songsPer: 2}, "", true)
+	d.do("toggle", "library:all")
+	for _, key := range []string{"album:al1", "playlist:pl1", "artist:ar1", "song:al0.1"} {
+		if r := d.do("toggle", key); r.Message != "Included via Entire Library" {
+			t.Errorf("%s: toast %q", key, r.Message)
+		}
+	}
+	if it := d.selected(t); len(it) != 1 || it[0].Kind != selection.KindLibrary {
+		t.Fatalf("selection changed: %+v", it)
+	}
+}
+
+func TestEmptyStates(t *testing.T) {
+	d := newTestDaemon(t, &nav{empty: true}, "", true)
+	for _, c := range []struct{ op, arg, title, sub string }{
+		{"playlists", "", "No playlists", "Playlists must be public in Navidrome to show here"},
+		{"albums", "", "No albums", ""},
+		{"artists", "", "No artists", ""},
+		{"search", "x", "No results", ""},
+		{"onq2", "", "Nothing chosen yet", "Hold Play/Pause on a playlist, album or artist"},
+	} {
+		r := d.do(c.op, c.arg)
+		row, ok := find(r, c.title)
+		if !ok || row.Kind != "info" || row.Subtitle != c.sub {
+			t.Errorf("%s: %q row %+v", c.op, titles(r), row)
+		}
+	}
+}
+
+func TestEntireLibraryPagesPast500Albums(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 501, songsPer: 1}, "", true)
+	d.do("toggle", "library:all")
+	d.preview(t)
+	if n := len(d.daemon.preview.plan.Add); n != 501 {
+		t.Errorf("Add %d, want 501", n)
 	}
 }

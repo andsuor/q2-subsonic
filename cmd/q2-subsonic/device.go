@@ -300,11 +300,27 @@ func when(t, now time.Time) string {
 // onQ2 is the selection, each with its status and size on the card; a hold takes one out.
 func (d *daemon) onQ2() q2spot.Reply {
 	v := d.view()
-	if len(v.sel.Items) == 0 {
-		return q2spot.Reply{Rows: []q2spot.Row{info("Nothing selected yet"), info("Hold Play/Pause on an item to add it")}}
+	sub := "Off"
+	if v.sel.Has(selection.KindLibrary, "all") {
+		sub = "On"
+		d.mu.Lock()
+		c := d.libCount
+		_, ok := d.resolved[selection.Key(selection.KindLibrary, "all")]
+		d.mu.Unlock()
+		if ok {
+			sub = fmt.Sprintf("On · %s · %s", plural(c[0], "album"), plural(c[1], "playlist"))
+		}
 	}
-	var rows []q2spot.Row
+	rows := []q2spot.Row{{Kind: "action", URI: "toggle", Title: "Sync Entire Library", Subtitle: sub,
+		Context: "library:all", Position: "toggle"}}
+	if len(v.sel.Items) == 0 {
+		return q2spot.Reply{Rows: append(rows, q2spot.Row{Kind: "info", Title: "Nothing chosen yet",
+			Subtitle: "Hold Play/Pause on a playlist, album or artist"})}
+	}
 	for _, it := range v.sel.Items {
+		if it.Kind == selection.KindLibrary {
+			continue
+		}
 		key := selection.Key(it.Kind, it.ID)
 		var b int64
 		for _, e := range v.m.Songs {

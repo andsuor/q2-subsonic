@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -75,13 +76,35 @@ func (d *daemon) computePreview(cl *subsonic.Client, p *preview) {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 4)
 	var werr error // the first worker's failure, under mu; it cancels ctx, so the rest return at once
-	for _, it := range sel.Items {
+	items := sel.Items
+	for _, it := range items {
 		if err != nil {
 			break // the selection didn't load; no worker has started
 		}
 		wg.Add(1)
 		go func(it selection.Item) {
 			defer wg.Done()
+			if it.Kind == selection.KindLibrary {
+				// Holds no slot itself: its requests take them, so 4 stay the most in flight.
+				lib, e := d.resolveLibrary(ctx, cl, sem)
+				mu.Lock()
+				defer mu.Unlock()
+				if e != nil && werr == nil {
+					werr = e
+					cancel()
+				}
+				key := selection.Key(it.Kind, it.ID)
+				resolved[key] = lib.songs
+				for _, p := range lib.playlists {
+					pk := selection.Key(selection.KindPlaylist, p.id)
+					if sel.Has(selection.KindPlaylist, p.id) {
+						continue // chosen on its own: that item's quality and songs stand
+					}
+					sel.Items = append(sel.Items, selection.Item{Kind: selection.KindPlaylist, ID: p.id, Name: p.name, Quality: it.Quality})
+					resolved[pk], names[pk] = p.songs, p.name
+				}
+				return
+			}
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			songs, name, e := d.songsOf(ctx, cl, it.Kind, it.ID)
@@ -312,4 +335,82 @@ func (d *daemon) library() q2spot.Reply {
 		msg = "Library update failed"
 	}
 	return q2spot.Reply{Rows: []q2spot.Row{info(msg), list("details", "Details", "", detailsCtx("library", 0, 0, at, ""))}}
+}
+
+type libPlaylist struct {
+	id, name string
+	songs    []subsonic.Song
+}
+
+type libResult struct {
+	songs     []subsonic.Song
+	playlists []libPlaylist
+}
+
+// resolveLibrary lists every album (500 a page) and every playlist, then fetches each one's songs.
+// Every request takes a slot of sem, so the library never runs more than the preview's 4 at once.
+// Albums keep their listing order; so do playlists.
+func (d *daemon) resolveLibrary(ctx context.Context, cl *subsonic.Client, sem chan struct{}) (libResult, error) {
+	slot := func() func() { sem <- struct{}{}; return func() { <-sem } }
+	var albums []subsonic.Album
+	for off := 0; ; {
+		release := slot()
+		page, err := cl.Albums(ctx, off, 500)
+		release()
+		if err != nil {
+			return libResult{}, err
+		}
+		albums = append(albums, page...)
+		if len(page) < 500 {
+			break
+		}
+		off += len(page)
+	}
+	release := slot()
+	pls, err := cl.Playlists(ctx)
+	release()
+	if err != nil {
+		return libResult{}, err
+	}
+	res := libResult{playlists: make([]libPlaylist, len(pls))}
+	albumSongs := make([][]subsonic.Song, len(albums))
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	var first error
+	run := func(f func() error) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer slot()()
+			if e := f(); e != nil {
+				mu.Lock()
+				first = cmp.Or(first, e)
+				mu.Unlock()
+			}
+		}()
+	}
+	for i, a := range albums {
+		run(func() (err error) { _, albumSongs[i], err = cl.Album(ctx, a.ID); return })
+	}
+	for i, p := range pls {
+		run(func() (err error) {
+			var pl subsonic.Playlist
+			pl, res.playlists[i].songs, err = cl.Playlist(ctx, p.ID)
+			res.playlists[i].id, res.playlists[i].name = p.ID, cmp.Or(pl.Name, p.Name)
+			return
+		})
+	}
+	wg.Wait()
+	if first != nil {
+		return libResult{}, first
+	}
+	res.songs = []subsonic.Song{}
+	for _, s := range albumSongs {
+		res.songs = append(res.songs, s...)
+	}
+	d.mu.Lock()
+	d.resolved[selection.Key(selection.KindLibrary, "all")] = res.songs
+	d.libCount = [2]int{len(albums), len(pls)}
+	d.mu.Unlock()
+	return res, nil
 }

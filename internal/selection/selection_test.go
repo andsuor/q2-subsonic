@@ -24,7 +24,7 @@ func TestToggleAddRemove(t *testing.T) {
 	if s.Toggle(it) || s.Has(KindAlbum, "a1") || len(s.Items) != 0 {
 		t.Fatal("remove failed")
 	}
-	if Key(KindAlbum, "a1") != "album:a1" {
+	if Key(KindLibrary, "all") != "library:all" || Key(KindAlbum, "a1") != "album:a1" {
 		t.Fatal("key")
 	}
 }
