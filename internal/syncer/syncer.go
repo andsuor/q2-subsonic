@@ -627,8 +627,8 @@ var (
 )
 
 // stopReason tells a failure the whole sync shares from one of this song's own (an HTTP error, or
-// a Subsonic one such as 70, not found): ErrOffline (no answer, wrapping err when it says more,
-// such as a certificate), ErrCardFull, or ErrRefused (wrapping err) for an answer about the
+// a Subsonic one such as 70, not found): ErrOffline (no answer, or a proxy's answer that the
+// server is down, wrapping err), ErrCardFull, or ErrRefused (wrapping err) for an answer about the
 // account: the sign-in (40-44) or downloads turned off for it (50, R39). nil for the song's own.
 func stopReason(err error) error {
 	var ae *subsonic.APIError
@@ -639,7 +639,7 @@ func stopReason(err error) error {
 	case errors.Is(err, subsonic.ErrAuth) || errors.As(err, &ae) && ae.Code >= 40 && ae.Code <= 50:
 		return fmt.Errorf("%w: %w", ErrRefused, err)
 	case errors.As(err, &ae):
-		if ae.HTTP == 0 {
+		if ae.HTTP == 0 || serverDown(ae.HTTP) {
 			return fmt.Errorf("%w: %w", ErrOffline, err)
 		}
 		return nil
@@ -647,6 +647,13 @@ func stopReason(err error) error {
 		return ErrOffline
 	}
 	return nil
+}
+
+// serverDown reports an HTTP status a proxy or CDN in front of the server answers for every
+// request while the server is down or overloaded (Caddy's 502, Cloudflare's 520-527, 503, 504), or
+// the server's own 429 (too many transcodes).
+func serverDown(status int) bool {
+	return status == 429 || status >= 502 && status <= 504 || status >= 520 && status <= 527
 }
 
 // freePlaylistFile picks <name>.m3u (unless skipBase), else <name> (Subsonic).m3u, else

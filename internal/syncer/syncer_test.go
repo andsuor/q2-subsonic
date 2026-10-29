@@ -1164,3 +1164,32 @@ func TestImported(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// The server down behind a proxy or CDN (Caddy's 502, Cloudflare's 52x, 503, 504; or 429) is the
+// whole sync's problem, as no answer is: two songs in a row pause it (review G1, Important 1).
+func TestProxyErrorPauses(t *testing.T) {
+	f, r, root := setup(t)
+	var ws []plan.Want
+	for _, id := range []string{"a", "bb", "ccc", "dddd"} {
+		f.status[id] = 502
+		ws = append(ws, want(root, id, "original"))
+	}
+	r.Start(plan.Plan{Add: ws})
+	s := wait(t, r)
+	if s.State != "paused" || !errors.Is(s.Err, ErrOffline) {
+		t.Fatalf("%+v", s)
+	}
+	if h, _ := f.seen("ccc"); h != 0 {
+		t.Errorf("went on after two songs: %d requests for the third", h)
+	}
+	for _, st := range []int{429, 503, 504, 520, 527} {
+		if err := stopReason(&subsonic.APIError{Op: "download", HTTP: st}); !errors.Is(err, ErrOffline) {
+			t.Error(st, err)
+		}
+	}
+	for _, st := range []int{404, 500} {
+		if err := stopReason(&subsonic.APIError{Op: "download", HTTP: st}); err != nil {
+			t.Error(st, "is the song's own:", err)
+		}
+	}
+}
