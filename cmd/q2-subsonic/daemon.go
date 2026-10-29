@@ -150,7 +150,9 @@ type daemon struct {
 	man                *library.Manifest
 	manAt              time.Time
 	manSize            int64
-	migrateErr         error // the one-time Navidrome/ -> Subsonic/ move failed; Sync shows it
+	migrateErr         error     // the one-time Navidrome/ -> Subsonic/ move failed; Sync shows it
+	migrateAt          time.Time // when it ran
+	wasBusy            bool      // the runner, at the last tick
 
 	bg sync.WaitGroup // the work replies leave running (ping, preview, play, sign-out's stops); tests wait for it
 }
@@ -188,7 +190,7 @@ func newDaemon(dir, card, tmp string) *daemon {
 	d.stream.moving = d.runner.Moving
 	d.stream.clean() // a stream an earlier run left (M26)
 	d.state.Write(nil)
-	d.migrateErr = library.Migrate(card, lg.Printf)
+	d.migrateErr, d.migrateAt = library.Migrate(card, lg.Printf), time.Now()
 	d.logCrash()
 	return d
 }
@@ -366,8 +368,17 @@ func (d *daemon) saveSettings(s settings) error {
 
 // tick keeps the state file's hold=1 while files move (a sync, or a stream fetching) or the phone
 // page is open, and takes the firmware's answer to a library request as soon as it comes.
+// A run's end, however it ends (done, paused, stopped), counts as activity: its page stays as long
+// as after a press (I15, review G3 Minor 8).
 func (d *daemon) tick() {
-	d.state.setHold(d.runner.Busy() || d.signin.active() || d.stream.busy())
+	busy := d.runner.Busy()
+	d.mu.Lock()
+	if d.wasBusy && !busy {
+		d.lastReq = time.Now()
+	}
+	d.wasBusy = busy
+	d.mu.Unlock()
+	d.state.setHold(busy || d.signin.active() || d.stream.busy())
 	if d.caps.Library {
 		d.mu.Lock()
 		d.libPoll()

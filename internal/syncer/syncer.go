@@ -53,6 +53,8 @@ type Snapshot struct {
 	ETA                   time.Duration
 	Current               string // "Artist – Title" of the song in flight
 	Err                   error
+	ErrAt                 time.Time // when the run stopped with Err
+	Renamed, Removed      int       // songs this run renamed and removed
 	Failures              []Failure
 }
 
@@ -79,6 +81,8 @@ type Runner struct {
 	cancel                context.CancelFunc
 	done                  chan struct{}
 	doneN, total, failedN int
+	renamedN, removedN    int
+	errAt                 time.Time
 	bytesDone, bytesTotal int64
 	cur, curMax           int64 // the file in flight: bytes on the card, its planned size
 	current, part         string
@@ -121,7 +125,7 @@ func (r *Runner) launch() {
 	ctx, cancel := context.WithCancel(context.Background())
 	r.cancel, r.done = cancel, make(chan struct{})
 	r.state, r.err, r.failures, r.meter = "running", nil, nil, meter{}
-	r.doneN, r.failedN, r.total = 0, 0, len(p.Add)+len(p.Replace)
+	r.doneN, r.failedN, r.total, r.renamedN, r.removedN = 0, 0, len(p.Add)+len(p.Replace), 0, 0
 	r.bytesDone, r.bytesTotal, r.cur, r.curMax = 0, 0, 0, 0
 	for _, w := range append(append([]plan.Want(nil), p.Add...), p.Replace...) {
 		r.bytesTotal += w.Bytes
@@ -148,12 +152,12 @@ func (r *Runner) run(ctx context.Context, p plan.Plan, done chan struct{}) {
 	case ctx.Err() != nil:
 		r.state = r.stopAs
 	case errors.Is(err, q2.ErrNoCard):
-		r.state, r.err = "paused", q2.ErrNoCard
+		r.state, r.err, r.errAt = "paused", q2.ErrNoCard, r.Now()
 	case errors.Is(err, ErrOffline) || errors.Is(err, ErrCardFull) || errors.Is(err, ErrRefused):
-		r.state, r.err = "paused", err // Resume, or the next Sync, continues once it is back
+		r.state, r.err, r.errAt = "paused", err, r.Now() // Resume, or the next Sync, continues once it is back
 		r.logf("sync: paused: %v", err)
 	case err != nil:
-		r.state, r.err = "error", err
+		r.state, r.err, r.errAt = "error", err, r.Now()
 		r.logf("sync: %v", err)
 	default:
 		r.state, finished, r.ending = "done", true, true
@@ -379,7 +383,8 @@ func (r *Runner) Snapshot() Snapshot {
 	defer r.mu.Unlock()
 	done := r.bytesDone + min(r.cur, r.curMax)
 	s := Snapshot{State: r.state, Done: r.doneN, Total: r.total, Failed: r.failedN, BytesDone: done,
-		BytesTotal: r.bytesTotal, Current: r.current, Err: r.err, Failures: append([]Failure(nil), r.failures...)}
+		BytesTotal: r.bytesTotal, Current: r.current, Err: r.err, ErrAt: r.errAt,
+		Renamed: r.renamedN, Removed: r.removedN, Failures: append([]Failure(nil), r.failures...)}
 	switch {
 	case s.State == "done":
 		s.Permille = 1000
@@ -474,6 +479,13 @@ type job struct {
 	failed  bool      // a wanted song is missing: nothing is removed this run (I2)
 }
 
+// count adds one to a counter the snapshot reads.
+func (j *job) count(n *int) {
+	j.mu.Lock()
+	*n++
+	j.mu.Unlock()
+}
+
 func (j *job) save() error {
 	if !j.CardMounted() { // never MkdirAll .subsonic onto the Q2's own storage under the mount point
 		return q2.ErrNoCard
@@ -510,6 +522,7 @@ func (j *job) renames() error {
 		delete(recorded, strings.ToLower(e.Path))
 		recorded[strings.ToLower(mv.To)] = true
 		e.Path = mv.To // its MetaKey with the rest of p.Keep, after the downloads
+		j.count(&j.renamedN)
 		if err := j.save(); err != nil {
 			return err
 		}
@@ -659,6 +672,7 @@ func (j *job) playlists() error {
 			return j.cardErr(err)
 		}
 		m.PlaylistSums[name] = library.PlaylistSum(p.Playlists[name]) // what the next plan compares (I10)
+		j.unsaved++                                                   // saved with a stop between playlists too
 		j.op("playlist", f)
 		if migrating {
 			library.Remove(j.root, library.LegacyPlaylistFile(j.root, name))
@@ -730,6 +744,7 @@ func (j *job) removals() error {
 				j.unsaved++
 				continue
 			}
+			j.count(&j.removedN)
 			j.op("remove", e.Path)
 		}
 	}

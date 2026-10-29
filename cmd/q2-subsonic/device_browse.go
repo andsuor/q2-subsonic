@@ -117,7 +117,8 @@ func (v view) status(kind selection.Kind, id string, total int) string {
 	songs, resolved := v.res[key]
 	x := 0
 	switch {
-	case resolved: // counted by id: a playlist may hold a song twice (I13)
+	case resolved: // its own songs, counted by id: a playlist may hold a song twice (I13), and a song
+		// it no longer holds doesn't stand in for one it gained (review G3, Minor 4)
 		on, all := map[string]bool{}, map[string]bool{}
 		for _, s := range songs {
 			all[s.ID] = true
@@ -125,7 +126,7 @@ func (v view) status(kind selection.Kind, id string, total int) string {
 				on[s.ID] = true
 			}
 		}
-		x, total = v.on(key, on), len(all)
+		x, total = len(on), len(all)
 	case kind == selection.KindAlbum:
 		x = v.on(key, v.albumOn[id])
 	case kind == selection.KindArtist && !selected && v.artists[id] != nil: // through its albums (M36)

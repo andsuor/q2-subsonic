@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/andsuor/q2-subsonic/internal/applog"
 	"github.com/andsuor/q2-subsonic/internal/q2"
 	"github.com/andsuor/q2-subsonic/internal/q2spot"
 	"github.com/andsuor/q2-subsonic/internal/selection"
@@ -146,7 +147,7 @@ func (d *daemon) reply(req q2spot.Request) q2spot.Reply {
 		d.lastMenu = time.Now() // pressed on the root: its toast is no gap
 		d.mu.Unlock()
 		d.signin.start(d.signinPort)
-		return q2spot.Reply{Message: "Scan the code with your phone"}
+		return q2spot.Reply{Message: "Press again for the QR code"} // the row turns into the QR page's
 	}
 	cl := d.client()
 	if cl == nil {
@@ -214,14 +215,20 @@ func (d *daemon) errToast(err error) q2spot.Reply {
 	return q2spot.Fail(st, subsonic.Message(err, host))
 }
 
-// detailsCtx carries what the Details page shows, so it needs no state: op|http|code|unix|song.
+// detailsCtx carries what the Details page shows, so it needs no state: op|http|code|unix|song,
+// then |error when withErr adds one.
 func detailsCtx(op string, h, code int, at time.Time, song string) string {
 	return fmt.Sprintf("%s|%d|%d|%d|%s", op, h, code, at.Unix(), song)
 }
 
+// withErr adds err's text to a Details context, for a failure no op, HTTP status or code explains.
+func withErr(ctx string, err error) string {
+	return ctx + "|" + strings.ReplaceAll(applog.Redact(err.Error()), "|", "/")
+}
+
 func details(ctx string) q2spot.Reply {
-	f := strings.SplitN(ctx, "|", 5)
-	for len(f) < 5 {
+	f := strings.SplitN(ctx, "|", 6)
+	for len(f) < 6 {
 		f = append(f, "")
 	}
 	unix, _ := strconv.ParseInt(f[3], 10, 64)
@@ -229,6 +236,9 @@ func details(ctx string) q2spot.Reply {
 		info("Time: " + time.Unix(unix, 0).UTC().Format("2006-01-02 15:04:05 UTC"))}
 	if f[4] != "" {
 		rows = append(rows, info("Song: "+f[4]))
+	}
+	if f[5] != "" {
+		rows = append(rows, info("Error: "+f[5]))
 	}
 	return q2spot.Reply{Rows: rows}
 }

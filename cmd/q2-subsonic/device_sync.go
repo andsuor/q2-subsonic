@@ -33,10 +33,10 @@ const planMargin = 16 << 20 // plan.Compute's headroom on top of what a sync nee
 // in the background while the page refreshes.
 func (d *daemon) syncPage(cl *subsonic.Client) q2spot.Reply {
 	d.mu.Lock()
-	merr := d.migrateErr
+	merr, mat := d.migrateErr, d.migrateAt
 	d.mu.Unlock()
 	if merr != nil { // the old manifest and both folders are intact; a sync now would copy everything again
-		return d.migrateRows(merr)
+		return d.migrateRows(merr, mat)
 	}
 	snap := d.runner.Snapshot()
 	d.mu.Lock()
@@ -57,8 +57,12 @@ func (d *daemon) syncPage(cl *subsonic.Client) q2spot.Reply {
 		if errors.As(snap.Err, &ae) {
 			op, h, code = ae.Op, ae.HTTP, ae.Code
 		}
+		det := detailsCtx(op, h, code, snap.ErrAt, "") // when it stopped (review G3, Minor 3)
+		if snap.Err != nil {
+			det = withErr(det, snap.Err)
+		}
 		return q2spot.Reply{Rows: []q2spot.Row{info(msg), act("retry", "Retry", ""), act("check", "Check Again", ""),
-			list("details", "Details", "", detailsCtx(op, h, code, time.Now(), ""))}}
+			list("details", "Details", "", det)}}
 	}
 	if _, err := d.selection(); err != nil {
 		return damagedSelection()
@@ -119,8 +123,8 @@ func (d *daemon) stopMessage(err error) string {
 }
 
 // migrateRows is the one-time move's failure: the file in its way when that is why, and Try Again
-// once it is moved, rather than a dead end (M23).
-func (d *daemon) migrateRows(err error) q2spot.Reply {
+// once it is moved, rather than a dead end (M23); Details carry the error (review G3, Minor 10).
+func (d *daemon) migrateRows(err error, at time.Time) q2spot.Reply {
 	rows := []q2spot.Row{info("Couldn't move Navidrome/ to Subsonic/")}
 	var pe *fs.PathError
 	if errors.Is(err, fs.ErrExist) && errors.As(err, &pe) {
@@ -128,14 +132,14 @@ func (d *daemon) migrateRows(err error) q2spot.Reply {
 			info("Move it out of Subsonic/, then Try Again"))
 	}
 	return q2spot.Reply{Rows: append(rows, act("migrate", "Try Again", ""),
-		list("details", "Details", "", detailsCtx("migrate", 0, 0, time.Now(), "")))}
+		list("details", "Details", "", withErr(detailsCtx("migrate", 0, 0, at, ""), err)))}
 }
 
 // migrate runs the one-time move again (Try Again).
 func (d *daemon) migrate() q2spot.Reply {
 	err := library.Migrate(d.card, d.log.Printf)
 	d.mu.Lock()
-	d.migrateErr = err
+	d.migrateErr, d.migrateAt = err, time.Now()
 	d.mu.Unlock()
 	if err != nil {
 		return q2spot.Fail(q2spot.Error, "Couldn't move Navidrome/ to Subsonic/")
@@ -318,7 +322,22 @@ func eta(t time.Duration) string {
 }
 
 func (d *daemon) doneRows(s syncer.Snapshot) q2spot.Reply {
-	rows := []q2spot.Row{info(fmt.Sprintf("Sync complete · %s · %d failed", plural(s.Done, "song"), s.Failed))}
+	// What the run did: songs fetched, renamed, removed; a run that moved none rewrote playlists
+	// (review G3, Minor 7).
+	var did []string
+	if s.Total > 0 {
+		did = append(did, plural(s.Done, "song"))
+	}
+	if s.Renamed > 0 {
+		did = append(did, plural(s.Renamed, "song")+" renamed")
+	}
+	if s.Removed > 0 {
+		did = append(did, plural(s.Removed, "song")+" removed")
+	}
+	if len(did) == 0 {
+		did = []string{"Playlists updated"}
+	}
+	rows := []q2spot.Row{info(fmt.Sprintf("Sync complete · %s · %d failed", strings.Join(did, " · "), s.Failed))}
 	if s.Failed > 0 {
 		rows = append(rows, list("failed", "Failed Songs", "", ""))
 	}

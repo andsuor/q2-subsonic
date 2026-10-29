@@ -296,7 +296,9 @@ func TestRootSignedOut(t *testing.T) {
 	if d.signin.active() {
 		t.Fatal("sign-in started without a press")
 	}
-	d.do("signin")
+	if r := d.do("signin"); r.Message != "Press again for the QR code" {
+		t.Errorf("toast %q: no code is on screen until the next press", r.Message)
+	}
 	if r := d.do("menu"); r.Rows[0].Kind != "remote" || !d.signin.active() {
 		t.Fatalf("after the press %+v", r.Rows)
 	}
@@ -581,7 +583,7 @@ func TestSigninTimeoutNotAutoRestarted(t *testing.T) {
 			t.Fatal("the refresh restarted sign-in")
 		}
 	}
-	if r := d.do("signin"); r.Message != "Scan the code with your phone" || !d.signin.active() {
+	if r := d.do("signin"); r.Message != "Press again for the QR code" || !d.signin.active() {
 		t.Fatalf("signin: %q, active %v", r.Message, d.signin.active())
 	}
 	if r := d.do("menu"); r.Rows[0].Kind != "remote" {
@@ -1530,6 +1532,9 @@ func TestPlaylistOnlyChangeSyncs(t *testing.T) {
 	if !exists(mix) {
 		t.Fatal("Mix.m3u not written")
 	}
+	if r := d.do("sync"); r.Rows[0].Title != "Sync complete · Playlists updated · 0 failed" {
+		t.Errorf("done %q", titles(r))
+	}
 	if _, lines := d.libReq(t); strings.Join(lines, "|") != "scan|add "+mix {
 		t.Errorf("library request %q", lines)
 	}
@@ -1696,5 +1701,76 @@ func TestCrashLogged(t *testing.T) {
 	}
 	if _, err := os.Stat(crash); err == nil {
 		t.Fatal("crash file kept: logged again at every start")
+	}
+}
+
+// A removal-only sync says what it did, not "0 songs" (review G3, Minor 7).
+func TestDoneSaysRemoved(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 2}, "", true)
+	d.do("toggle", "album:al0")
+	d.syncOK(t)
+	d.do("toggle", "album:al0")
+	d.syncOK(t)
+	if r := d.do("sync"); r.Rows[0].Title != "Sync complete · 2 songs removed · 0 failed" {
+		t.Errorf("done %q", titles(r))
+	}
+}
+
+// Details of a stopped sync carry when it stopped, not when they were opened, and its error
+// (review G3, Minor 3).
+func TestStoppedDetailsTime(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 1}, "", true)
+	d.do("toggle", "album:al0")
+	d.preview(t)
+	os.WriteFile(filepath.Join(d.card, ".subsonic", "manifest.json"), []byte("{"), 0o644)
+	d.do("start")
+	eventually(t, "the sync to stop", func() bool { return d.runner.Snapshot().State == "error" })
+	time.Sleep(1100 * time.Millisecond)
+	det, _ := find(d.do("sync"), "Details")
+	f := strings.Split(det.Context, "|")
+	if unix, _ := strconv.ParseInt(f[3], 10, 64); unix >= time.Now().Unix() {
+		t.Errorf("Details time %d is when they were opened", unix)
+	}
+	if got := strings.Join(titles(d.do(det.URI, det.Context)), "|"); !strings.Contains(got, "Error: ") {
+		t.Errorf("no error in %q", got)
+	}
+}
+
+// A resolved item is On Q2 only when its songs are: a song a server playlist dropped doesn't stand
+// in for the one it gained (review G3, Minor 4).
+func TestResolvedItemCountsItsOwnSongs(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 2, songsPer: 2}, "", true)
+	d.do("toggle", "playlist:pl1")
+	d.syncOK(t)
+	d.mu.Lock()
+	d.resolved["playlist:pl1"] = []subsonic.Song{{ID: "al0.0"}, {ID: "al1.0"}} // al0.1 swapped for al1.0
+	d.mu.Unlock()
+	r := d.do("playlists")
+	if row, _ := find(r, "Mix"); row.Subtitle != "2 songs · 1 of 2 songs on Q2" {
+		t.Errorf("Mix %q", row.Subtitle)
+	}
+	if _, ok := find(r, "Sync Now"); !ok {
+		t.Error("no Sync Now")
+	}
+}
+
+// A sync that ends paused or stopped counts as activity too: its reason stays on screen as long as
+// a finished sync's summary (review G3, Minor 8).
+func TestStaysUpAfterPausedSync(t *testing.T) {
+	n := &nav{albums: 1, songsPer: 2, block: make(chan struct{})}
+	d := newTestDaemon(t, n, "", true)
+	t.Cleanup(func() { close(n.block) })
+	d.do("toggle", "album:al0")
+	d.preview(t)
+	d.do("start")
+	eventually(t, "the sync to run", d.runner.Busy)
+	d.tick()
+	d.mu.Lock()
+	d.lastReq = time.Now().Add(-time.Hour)
+	d.mu.Unlock()
+	d.runner.Pause() // as Wi-Fi going would
+	d.tick()
+	if d.idle(time.Now()) {
+		t.Fatal("exits the moment the sync pauses")
 	}
 }

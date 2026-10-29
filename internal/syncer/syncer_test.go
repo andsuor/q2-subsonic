@@ -1242,3 +1242,50 @@ func TestBodyBounds(t *testing.T) {
 		})
 	}
 }
+
+// A playlist's digest is saved with it, so a pause between playlists doesn't offer the written
+// ones again (review G3, Minor 9).
+func TestPlaylistSumsSurvivePause(t *testing.T) {
+	_, r, root := setup(t)
+	r.onOp = func(op, _ string) {
+		if op == "playlist" {
+			r.mu.Lock()
+			r.stopAs = "paused"
+			r.cancel() // Pause, from inside the run, after the first playlist
+			r.mu.Unlock()
+		}
+	}
+	r.Start(plan.Plan{Playlists: map[string][]string{"A": {}, "B": {}}})
+	if s := wait(t, r); s.State != "paused" {
+		t.Fatalf("%+v", s)
+	}
+	if m := manifest(t, root); m.PlaylistSums["A"] != library.PlaylistSum([]string{}) {
+		t.Fatalf("sums %v", m.PlaylistSums)
+	}
+}
+
+// A stop records when it happened, for Details (review G3, Minor 3), and the snapshot counts the
+// renames and removals a run made, for its summary (Minor 7).
+func TestStopTimeAndCounts(t *testing.T) {
+	_, r, root := setup(t)
+	r.Now = func() time.Time { return time.Unix(1_000_000, 0) }
+	os.MkdirAll(root+"/.subsonic", 0o755)
+	os.WriteFile(root+"/.subsonic/manifest.json", []byte("{"), 0o644)
+	r.Start(plan.Plan{})
+	if s := wait(t, r); s.State != "error" || !s.ErrAt.Equal(time.Unix(1_000_000, 0)) {
+		t.Fatalf("%+v", s)
+	}
+	os.Remove(root + "/.subsonic/manifest.json")
+	m := &library.Manifest{Songs: map[string]*library.Entry{}}
+	for _, id := range []string{"x", "y"} {
+		e := &library.Entry{ID: id, Path: root + "/Subsonic/Z/z/" + id + ".flac", Quality: "original"}
+		put(t, e.Path, id)
+		m.Songs[id] = e
+	}
+	m.Save(root, root+"/.subsonic/manifest.json")
+	r.Start(plan.Plan{Remove: []*library.Entry{m.Songs["x"]},
+		Rename: []plan.Move{{ID: "y", From: m.Songs["y"].Path, To: root + "/Subsonic/Z/z/y2.flac"}}})
+	if s := wait(t, r); s.Removed != 1 || s.Renamed != 1 {
+		t.Fatalf("%+v", s)
+	}
+}

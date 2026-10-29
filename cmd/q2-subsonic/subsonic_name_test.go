@@ -22,14 +22,14 @@ func TestQ2AppName(t *testing.T) { // package.py zips this file as it is
 	}
 }
 
-// The release builds with a current Go, not go.mod's minimum (M44).
+// The release builds with a Go of its own choosing, not go.mod's minimum (M44).
 func TestReleaseGoVersion(t *testing.T) {
 	b, err := os.ReadFile("../../.github/workflows/release.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(b), "go-version-file") || !strings.Contains(string(b), "go-version: '1.27'") {
-		t.Error("release.yml doesn't pin a current Go")
+	if strings.Contains(string(b), "go-version-file") || !strings.Contains(string(b), "go-version:") {
+		t.Error("release.yml builds with go.mod's minimum Go")
 	}
 }
 
@@ -140,8 +140,13 @@ func TestMigrateFailureShowsErrorRow(t *testing.T) {
 	if r.Rows[0].Title != "Couldn't move Navidrome/ to Subsonic/" {
 		t.Fatalf("rows %q", titles(r))
 	}
-	if _, ok := find(r, "Details"); !ok {
-		t.Error("no Details row")
+	det, ok := find(r, "Details")
+	if !ok {
+		t.Fatal("no Details row")
+	}
+	// not a file in the way: Details say what went wrong (review G3, Minor 10)
+	if got := strings.Join(titles(d.do(det.URI, det.Context)), "|"); !strings.Contains(got, "Error: ") {
+		t.Errorf("details %q", got)
 	}
 	if _, err := os.Stat(filepath.Join(card, "Navidrome")); err != nil {
 		t.Error("Navidrome/ lost")
