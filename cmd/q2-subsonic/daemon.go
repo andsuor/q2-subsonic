@@ -166,6 +166,7 @@ func newDaemon(dir, card, tmp string) *daemon {
 		return cl, err
 	}}
 	d.runner = syncer.New(card, src{d}, lg)
+	d.runner.OnDone = d.syncDone
 	d.stream = newStreamer(card, filepath.Join(tmp, "q2-subsonic.play"), filepath.Join(tmp, "q2-subsonic.playing"),
 		d.caps, src{d}, d.manifest, syncer.Net, time.Second)
 	d.stream.log = lg

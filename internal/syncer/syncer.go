@@ -58,6 +58,8 @@ type Runner struct {
 	CardMounted func() bool
 	Now         func() time.Time
 	Net         *NetSlot
+	// OnDone is called, with no lock held, after each run that ends in state "done". It must not block.
+	OnDone func(plan.Plan)
 
 	root string
 	src  MediaSource
@@ -141,6 +143,12 @@ func (r *Runner) launch() {
 func (r *Runner) run(ctx context.Context, p plan.Plan, done chan struct{}) {
 	defer close(done)
 	err := r.work(ctx, p)
+	finished := false
+	defer func() { // deferred before the unlock below, so it runs after it
+		if finished && r.OnDone != nil {
+			r.OnDone(p)
+		}
+	}()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.current = ""
@@ -153,7 +161,7 @@ func (r *Runner) run(ctx context.Context, p plan.Plan, done chan struct{}) {
 		r.state, r.err = "error", err
 		r.logf("sync: %v", err)
 	default:
-		r.state = "done"
+		r.state, finished = "done", true
 		library.Remove(r.root, r.pendingPath())
 	}
 }

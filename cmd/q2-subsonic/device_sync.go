@@ -225,15 +225,28 @@ func (d *daemon) doneRows(s syncer.Snapshot) q2spot.Reply {
 		rows = append(rows, list("failed", "Failed Songs", "", ""))
 	}
 	d.mu.Lock()
-	lib := d.lib
-	updated := lib != nil && lib.done && lib.ok
-	d.mu.Unlock()
-	if updated {
-		rows = append(rows, info("Library updated"))
-	} else {
-		rows = append(rows, list("library", "Update Your Library", "", ""))
+	var done, ok bool
+	var msg string
+	var at time.Time
+	auto := d.caps.Library && d.lib != nil
+	if auto {
+		done, ok, msg, at = d.libState()
 	}
-	return q2spot.Reply{Rows: append(rows, act("check", "Check Again", ""))}
+	d.mu.Unlock()
+	reply := q2spot.Reply{}
+	switch {
+	case !auto:
+		rows = append(rows, list("library", "Update Your Library", "", ""))
+	case !done:
+		rows = append(rows, list("library", "Updating Library…", "", ""))
+		reply.Message = "refresh"
+	case ok:
+		rows = append(rows, info("Library updated"))
+	default:
+		rows = append(rows, d.libFailedRows(msg, at)...)
+	}
+	reply.Rows = append(rows, act("check", "Check Again", ""))
+	return reply
 }
 
 func (d *daemon) failed() q2spot.Reply {
@@ -277,12 +290,15 @@ func (d *daemon) syncAction(op string) q2spot.Reply {
 		if !p.plan.Fits {
 			return q2spot.Reply{Message: "Not enough space"}
 		}
+		d.mu.Lock()
+		d.lib = nil // before Start: the sync's own OnDone sets it
+		d.mu.Unlock()
 		if err := d.runner.Start(*p.plan); err != nil {
 			d.log.Printf("sync: start: %v", err)
 			return q2spot.Fail(q2spot.Error, "Couldn't start the sync")
 		}
 		d.mu.Lock()
-		d.showDone, d.preview, d.lib = true, nil, nil
+		d.showDone, d.preview = true, nil
 		d.mu.Unlock()
 	case "pause": // R27: stopping waits for the download to notice; the reply doesn't
 		go d.runner.Pause()
@@ -309,35 +325,18 @@ func (d *daemon) library() q2spot.Reply {
 		return q2spot.Reply{Rows: []q2spot.Row{info("1. Library → Update Local Music"), info("Run after the sync has finished"),
 			info("2. Library → Playlists → Import playlist"), info("Import playlist only applies to synced playlists")}}
 	}
-	req := filepath.Join(d.tmp, "q2-subsonic.library")
 	d.mu.Lock()
 	j := d.lib
-	if j == nil || j.done && time.Since(j.doneAt) > 30*time.Second {
-		seq := time.Now().UnixNano() // never reused, even across restarts
-		var m3us []string            // the files the last sync recorded; the user's own playlists are never imported
-		if m, _ := library.LoadManifest(filepath.Join(d.card, ".subsonic", "manifest.json")); m != nil {
-			for _, f := range m.Playlists {
-				if _, err := os.Stat(f); err == nil && library.ValidPlaylistFile(d.card, f) {
-					m3us = append(m3us, f)
-				}
-			}
-			sort.Strings(m3us)
-		}
-		if err := fw.RequestLibrary(req, seq, m3us); err != nil {
+	if j == nil || j.done && !j.ok && time.Since(j.doneAt) > 30*time.Second {
+		var err error
+		if j, err = d.sendLibrary(); err != nil {
 			d.mu.Unlock()
 			d.log.Printf("library: %v", err)
 			return q2spot.Reply{Rows: []q2spot.Row{info("Couldn't ask for a library update"),
 				list("details", "Details", "", detailsCtx("library", 0, 0, time.Now(), ""))}}
 		}
-		j = &libJob{seq: seq}
-		d.lib = j
 	}
-	if !j.done {
-		if done, ok, msg := fw.LibraryDone(req+".done", j.seq); done {
-			j.done, j.ok, j.msg, j.doneAt = true, ok, msg, time.Now()
-		}
-	}
-	done, ok, msg, at := j.done, j.ok, j.msg, j.doneAt
+	done, ok, msg, at := d.libState()
 	d.mu.Unlock()
 	switch {
 	case !done:
@@ -349,10 +348,62 @@ func (d *daemon) library() q2spot.Reply {
 	case ok:
 		return q2spot.Reply{Rows: []q2spot.Row{info("Library updated")}}
 	}
+	return q2spot.Reply{Rows: d.libFailedRows(msg, at)}
+}
+
+func (d *daemon) libFailedRows(msg string, at time.Time) []q2spot.Row {
 	if msg == "" {
 		msg = "Library update failed"
 	}
-	return q2spot.Reply{Rows: []q2spot.Row{info(msg), list("details", "Details", "", detailsCtx("library", 0, 0, at, ""))}}
+	return []q2spot.Row{info(msg), list("details", "Details", "", detailsCtx("library", 0, 0, at, ""))}
+}
+
+// sendLibrary writes a new library request (seq = UnixNano, never reused, even across restarts) for
+// the playlist files the last sync recorded; the user's own playlists are never imported.
+// ponytail: imports every recorded playlist file, not only the ones this sync rewrote; re-importing an
+// unchanged playlist is harmless (the import replaces by name). d.mu is held.
+func (d *daemon) sendLibrary() (*libJob, error) {
+	seq := time.Now().UnixNano()
+	var m3us []string
+	if m, _ := library.LoadManifest(filepath.Join(d.card, ".subsonic", "manifest.json")); m != nil {
+		for _, f := range m.Playlists {
+			if _, err := os.Stat(f); err == nil && library.ValidPlaylistFile(d.card, f) {
+				m3us = append(m3us, f)
+			}
+		}
+		sort.Strings(m3us)
+	}
+	if err := fw.RequestLibrary(d.libReq(), seq, m3us); err != nil {
+		return nil, err
+	}
+	d.lib = &libJob{seq: seq}
+	return d.lib, nil
+}
+
+func (d *daemon) libReq() string { return filepath.Join(d.tmp, "q2-subsonic.library") }
+
+// libState polls the firmware's reply for the pending request. d.mu is held, d.lib is not nil.
+func (d *daemon) libState() (done, ok bool, msg string, at time.Time) {
+	j := d.lib
+	if !j.done {
+		if done, ok, msg := fw.LibraryDone(d.libReq()+".done", j.seq); done {
+			j.done, j.ok, j.msg, j.doneAt = true, ok, msg, time.Now()
+		}
+	}
+	return j.done, j.ok, j.msg, j.doneAt
+}
+
+// syncDone is the runner's OnDone: with cap library, a sync that changed anything asks the firmware
+// to scan and import, whether or not the Sync page is open.
+func (d *daemon) syncDone(p plan.Plan) {
+	if !d.caps.Library || len(p.Add)+len(p.Replace)+len(p.Rename)+len(p.Remove) == 0 && !p.PlaylistsStale {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, err := d.sendLibrary(); err != nil {
+		d.log.Printf("library: %v", err)
+	}
 }
 
 type libPlaylist struct {

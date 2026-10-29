@@ -17,6 +17,7 @@ import (
 
 	"github.com/andsuor/q2-subsonic/internal/creds"
 	"github.com/andsuor/q2-subsonic/internal/library"
+	"github.com/andsuor/q2-subsonic/internal/plan"
 	"github.com/andsuor/q2-subsonic/internal/q2spot"
 	"github.com/andsuor/q2-subsonic/internal/selection"
 	"github.com/andsuor/q2-subsonic/internal/subsonic"
@@ -699,5 +700,92 @@ func TestEntireLibraryFailsFast(t *testing.T) {
 	}
 	if got := n.albumReqs.Load(); got > 50 {
 		t.Errorf("%d of 400 album requests made after the first failure", got)
+	}
+}
+
+// syncAlbum runs a one-album sync to done on a daemon with cap library.
+func syncAlbum(t *testing.T) *tdaemon {
+	t.Helper()
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 2}, "library", true)
+	d.do("toggle", "album:al0")
+	d.preview(t)
+	d.do("start")
+	eventually(t, "the sync to finish", func() bool { return d.runner.Snapshot().State == "done" })
+	return d
+}
+
+func (d *tdaemon) libReqSeq(t *testing.T) string {
+	t.Helper()
+	var b []byte
+	eventually(t, "the library request", func() bool {
+		var err error
+		b, err = os.ReadFile(filepath.Join(d.tmp, "q2-subsonic.library"))
+		return err == nil
+	})
+	return strings.SplitN(string(b), "\n", 2)[0]
+}
+
+func TestLibraryRequestedAutomaticallyAfterSync(t *testing.T) {
+	d := syncAlbum(t)
+	seq := d.libReqSeq(t)
+	b, _ := os.ReadFile(filepath.Join(d.tmp, "q2-subsonic.library"))
+	if !strings.HasPrefix(string(b), seq+"\nscan\n") {
+		t.Errorf("request %q", b)
+	}
+	time.Sleep(100 * time.Millisecond)
+	d.do("sync") // opening the page sends nothing more
+	if got := d.libReqSeq(t); got != seq {
+		t.Errorf("request rewritten: %s -> %s", seq, got)
+	}
+}
+
+func TestNoLibraryRequestWhenNothingChanged(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "library", true)
+	d.syncDone(plan.Plan{})
+	if _, err := os.Stat(filepath.Join(d.tmp, "q2-subsonic.library")); err == nil {
+		t.Error("a request was written")
+	}
+	d.syncDone(plan.Plan{PlaylistsStale: true})
+	if _, err := os.Stat(filepath.Join(d.tmp, "q2-subsonic.library")); err != nil {
+		t.Error("a rewritten playlist sent nothing")
+	}
+}
+
+func TestLibraryRowShowsPendingThenUpdated(t *testing.T) {
+	d := syncAlbum(t)
+	seq := d.libReqSeq(t)
+	r := d.do("sync")
+	if r.Message != "refresh" {
+		t.Errorf("pending without refresh: %+v", r)
+	}
+	if _, ok := find(r, "Updating Library…"); !ok {
+		t.Fatalf("pending rows %q", titles(r))
+	}
+	os.WriteFile(filepath.Join(d.tmp, "q2-subsonic.library.done"), []byte(seq+" ok\n"), 0o644)
+	if _, ok := find(d.do("sync"), "Library updated"); !ok {
+		t.Errorf("ok rows %q", titles(d.do("sync")))
+	}
+}
+
+func TestLibraryRowShowsFirmwareError(t *testing.T) {
+	d := syncAlbum(t)
+	seq := d.libReqSeq(t)
+	os.WriteFile(filepath.Join(d.tmp, "q2-subsonic.library.done"), []byte(seq+" error scan busy\n"), 0o644)
+	r := d.do("sync")
+	if _, ok := find(r, "scan busy"); !ok {
+		t.Errorf("error rows %q", titles(r))
+	}
+	if _, ok := find(r, "Details"); !ok {
+		t.Errorf("no Details: %q", titles(r))
+	}
+}
+
+func TestLibraryRowNoDoubleRequest(t *testing.T) {
+	d := syncAlbum(t)
+	seq := d.libReqSeq(t)
+	d.do("library")
+	d.do("library")
+	if got := d.libReqSeq(t); got != seq {
+		t.Errorf("second request: %s -> %s", seq, got)
 	}
 }
