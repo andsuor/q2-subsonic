@@ -87,7 +87,7 @@ func (r *Runner) pendingPath() string  { return filepath.Join(r.root, ".subsonic
 
 func (r *Runner) logf(format string, a ...any) {
 	if r.log != nil {
-		r.log.Printf(format, a...)
+		r.log.Printf("%s", applog.Redact(fmt.Sprintf(format, a...)))
 	}
 }
 
@@ -424,7 +424,8 @@ func (r *Runner) rename(mv plan.Move) error {
 	return r.remove(mv.From) // the file is gone already; this prunes the folders it left empty
 }
 
-// fetchTries fetches w, one try per Backoff entry, waiting that long after each failed try.
+// fetchTries fetches w, one try per Backoff entry, waiting that long after each failed try but
+// the last.
 func (r *Runner) fetchTries(ctx context.Context, w plan.Want) (int64, error) {
 	var err error
 	for i, d := range r.Backoff {
@@ -435,7 +436,10 @@ func (r *Runner) fetchTries(ctx context.Context, w plan.Want) (int64, error) {
 		if ctx.Err() != nil || !r.CardMounted() {
 			return 0, err
 		}
-		r.logf("sync: %s try %d: %s", w.Song.ID, i+1, applog.Redact(err.Error()))
+		r.logf("sync: %s try %d: %s", w.Song.ID, i+1, err)
+		if i == len(r.Backoff)-1 {
+			break
+		}
 		select {
 		case <-time.After(d):
 		case <-ctx.Done():
@@ -456,14 +460,41 @@ func (r *Runner) fetch(ctx context.Context, w plan.Want) (int64, error) {
 		return 0, err
 	}
 	var from int64
-	if st, err := os.Stat(part); err == nil && w.Quality == "original" {
+	// A .part already at the planned size (cut between fsync and rename, or an older, longer
+	// version) is fetched again whole.
+	if st, err := os.Stat(part); err == nil && w.Quality == "original" && (w.Bytes <= 0 || st.Size() < w.Bytes) {
 		from = st.Size()
 	}
 	if err := r.Net.Acquire(ctx, false); err != nil {
 		return 0, err
 	}
-	defer r.Net.Release()
-	resp, err := r.src.Get(ctx, r.src.MediaURL(w.Song.ID, w.Quality), from)
+	held := true
+	defer func() {
+		if held {
+			r.Net.Release()
+		}
+	}()
+	// yield lets a priority waiter (the streamer) go first, then takes the slot back.
+	yield := func() error {
+		if !r.Net.PriorityWaiting() {
+			return nil
+		}
+		r.Net.Release()
+		held = false
+		if err := r.Net.Acquire(ctx, false); err != nil {
+			return err
+		}
+		held = true
+		return nil
+	}
+	u := r.src.MediaURL(w.Song.ID, w.Quality)
+	resp, err := r.src.Get(ctx, u, from)
+	var ae *subsonic.APIError
+	if from > 0 && errors.As(err, &ae) && ae.HTTP == http.StatusRequestedRangeNotSatisfiable {
+		library.Remove(r.root, part)
+		from = 0
+		resp, err = r.src.Get(ctx, u, 0)
+	}
 	if err != nil {
 		return 0, err
 	}
@@ -485,7 +516,7 @@ func (r *Runner) fetch(ctx context.Context, w plan.Want) (int64, error) {
 	r.mu.Lock()
 	r.part, r.cur, r.curMax = part, from, w.Bytes
 	r.mu.Unlock()
-	n, err := r.copy(f, resp.Body, from)
+	n, err := r.copy(f, resp.Body, from, yield)
 	if err == nil {
 		err = f.Sync()
 	}
@@ -505,15 +536,24 @@ func (r *Runner) fetch(ctx context.Context, w plan.Want) (int64, error) {
 }
 
 // copy writes body to f, counting progress; n starts at from (the bytes already in the .part).
-func (r *Runner) copy(f *os.File, body io.Reader, n int64) (int64, error) {
+// Every 256 KiB it calls yield, so a stream never waits for a whole file.
+func (r *Runner) copy(f *os.File, body io.Reader, n int64, yield func() error) (int64, error) {
 	buf := make([]byte, 64<<10)
+	since := 0
 	for {
+		if since >= 256<<10 {
+			if err := yield(); err != nil {
+				return n, err
+			}
+			since = 0
+		}
 		k, rerr := body.Read(buf)
 		if k > 0 {
 			if _, err := f.Write(buf[:k]); err != nil {
 				return n, err
 			}
 			n += int64(k)
+			since += k
 			r.mu.Lock()
 			r.cur = n
 			r.meter.add(r.Now(), int64(k))
@@ -597,6 +637,13 @@ func (s *NetSlot) Acquire(ctx context.Context, priority bool) error {
 		}
 		return ctx.Err()
 	}
+}
+
+// PriorityWaiting reports whether a priority acquirer is queued.
+func (s *NetSlot) PriorityWaiting() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.prio) > 0
 }
 
 func (s *NetSlot) Release() {

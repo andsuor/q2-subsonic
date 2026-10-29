@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/andsuor/q2-subsonic/internal/applog"
 	"github.com/andsuor/q2-subsonic/internal/library"
 	"github.com/andsuor/q2-subsonic/internal/plan"
 	"github.com/andsuor/q2-subsonic/internal/q2"
@@ -29,6 +30,7 @@ type fake struct {
 	drop    map[string]bool // id -> cut the next response at 50 %
 	noRange bool            // answer 200 with the whole file even when asked for a Range
 	block   map[string]chan struct{}
+	slow    map[string]bool     // id -> send in 32 KiB writes, 3 ms apart
 	ranges  map[string][]string // id -> Range headers seen
 	hits    map[string]int
 }
@@ -40,14 +42,28 @@ func (f *fake) seen(id string) (int, []string) {
 	return f.hits[id], append([]string(nil), f.ranges[id]...)
 }
 
-func data(id string) []byte { return bytes.Repeat([]byte("song-"+id+"|"), 7000) }
+func data(id string) []byte {
+	if strings.HasPrefix(id, "big") {
+		return bytes.Repeat([]byte("song-"+id+"|"), 300000)
+	}
+	return bytes.Repeat([]byte("song-"+id+"|"), 7000)
+}
+
+type slowWriter struct{ http.ResponseWriter }
+
+func (w slowWriter) Write(b []byte) (int, error) {
+	time.Sleep(3 * time.Millisecond)
+	n, err := w.ResponseWriter.Write(b)
+	w.ResponseWriter.(http.Flusher).Flush()
+	return n, err
+}
 
 func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
 	f.mu.Lock()
 	f.hits[id]++
 	f.ranges[id] = append(f.ranges[id], r.Header.Get("Range"))
-	st, drop, block := f.status[id], f.drop[id], f.block[id]
+	st, drop, block, slow := f.status[id], f.drop[id], f.block[id], f.slow[id]
 	delete(f.drop, id)
 	noRange := f.noRange
 	f.mu.Unlock()
@@ -76,12 +92,15 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if noRange {
 		r.Header.Del("Range")
 	}
+	if slow {
+		w = slowWriter{w}
+	}
 	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(b))
 }
 
 func setup(t *testing.T) (*fake, *Runner, string) {
 	t.Helper()
-	f := &fake{status: map[string]int{}, drop: map[string]bool{}, block: map[string]chan struct{}{},
+	f := &fake{status: map[string]int{}, drop: map[string]bool{}, block: map[string]chan struct{}{}, slow: map[string]bool{},
 		ranges: map[string][]string{}, hits: map[string]int{}}
 	srv := httptest.NewTLSServer(f)
 	t.Cleanup(srv.Close)
@@ -93,6 +112,7 @@ func setup(t *testing.T) (*fake, *Runner, string) {
 	r := New(root, c, nil)
 	r.Backoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
 	r.CardMounted = func() bool { return true }
+	r.Net = NewNetSlot()
 	return f, r, root
 }
 
@@ -424,5 +444,111 @@ func TestNetSlotPriority(t *testing.T) {
 	}
 	if err := s.Acquire(ctx, false); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRunFullSizePartRecovers(t *testing.T) {
+	f, r, root := setup(t)
+	a, b := want(root, "a", "original"), want(root, "bb", "original")
+	b.Bytes = 0 // size unknown: the full .part asks for a Range past the end and gets 416
+	for _, w := range []plan.Want{a, b} {
+		os.MkdirAll(filepath.Dir(w.Path), 0o755)
+		os.WriteFile(w.Path+".part", bytes.Repeat([]byte("x"), len(data(w.Song.ID))), 0o644)
+	}
+	r.Start(plan.Plan{Add: []plan.Want{a, b}})
+	if s := wait(t, r); s.State != "done" || s.Failed != 0 {
+		t.Fatalf("%+v", s)
+	}
+	sameFile(t, a.Path, "a")
+	sameFile(t, b.Path, "bb")
+	if _, ra := f.seen("a"); len(ra) != 1 || ra[0] != "" {
+		t.Fatalf("full .part at planned size sent Range: %q", ra)
+	}
+	if _, rb := f.seen("bb"); len(rb) != 2 || rb[0] != fmt.Sprintf("bytes=%d-", len(data("bb"))) || rb[1] != "" {
+		t.Fatalf("416 not recovered in one try: %q", rb)
+	}
+	noParts(t, root)
+}
+
+func TestStreamerPreemptsMidFile(t *testing.T) {
+	f, r, root := setup(t)
+	big := want(root, "big", "original")
+	f.slow["big"] = true
+	r.Start(plan.Plan{Add: []plan.Want{big}})
+	for i := 0; r.Snapshot().BytesDone == 0; i++ {
+		if i > 1000 {
+			t.Fatal("download never started")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := r.Net.Acquire(ctx, true); err != nil {
+		t.Fatal(err)
+	}
+	s := r.Snapshot()
+	if s.State != "running" || s.BytesDone >= s.BytesTotal {
+		t.Fatalf("streamer served only after the file: %+v", s)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if b := r.Snapshot().BytesDone; b != s.BytesDone {
+		t.Fatal("download kept going while the streamer held the slot", b, s.BytesDone)
+	}
+	r.Net.Release()
+	if s := wait(t, r); s.State != "done" {
+		t.Fatalf("%+v", s)
+	}
+	sameFile(t, big.Path, "big")
+	if _, rg := f.seen("big"); len(rg) != 1 {
+		t.Fatalf("download restarted: %q", rg)
+	}
+}
+
+func TestRestartResumes(t *testing.T) {
+	f, ra, root := setup(t)
+	a, big := want(root, "a", "original"), want(root, "big", "original")
+	f.slow["big"] = true
+	p := plan.Plan{Add: []plan.Want{a, big}}
+	ra.Start(p)
+	for i := 0; ; i++ {
+		if s := ra.Snapshot(); s.Done == 1 && s.BytesDone > a.Bytes {
+			break
+		}
+		if i > 2000 {
+			t.Fatal("big never started")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	ra.Pause() // the process dies mid-file: the .part and pending.json stay
+	st, err := os.Stat(big.Path + ".part")
+	if err != nil || st.Size() == 0 {
+		t.Fatal("no .part", err)
+	}
+
+	rb := New(root, ra.src, nil)
+	rb.Backoff, rb.CardMounted, rb.Net = ra.Backoff, ra.CardMounted, NewNetSlot()
+	if err := rb.Start(p); err != nil {
+		t.Fatal(err)
+	}
+	if s := wait(t, rb); s.State != "done" || s.Done != 2 {
+		t.Fatalf("%+v", s)
+	}
+	if h, _ := f.seen("a"); h != 1 {
+		t.Fatal("finished song fetched again", h)
+	}
+	if _, rg := f.seen("big"); len(rg) != 2 || rg[1] != fmt.Sprintf("bytes=%d-", st.Size()) {
+		t.Fatalf("ranges %q, part %d", rg, st.Size())
+	}
+	sameFile(t, big.Path, "big")
+}
+
+func TestLogRedacted(t *testing.T) {
+	_, r, root := setup(t)
+	r.log = applog.Open(root+"/log.txt", 1<<20)
+	r.logf("sync: %v", errors.New("GET https://h/rest/download?u=u&t=tok123&s=salt99&p=pw77 -> EOF"))
+	b, _ := os.ReadFile(root + "/log.txt")
+	if len(b) == 0 || strings.Contains(string(b), "tok123") || strings.Contains(string(b), "salt99") ||
+		strings.Contains(string(b), "pw77") {
+		t.Fatalf("%q", b)
 	}
 }
