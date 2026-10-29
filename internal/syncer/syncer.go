@@ -382,79 +382,105 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 	if err != nil {
 		return r.cardErr(err)
 	}
-	unsaved, saved := 0, r.Now() // changes not on the card yet, and when it was last saved
-	save := func() error {
-		if !r.CardMounted() { // never MkdirAll .subsonic onto the Q2's own storage under the mount point
-			return q2.ErrNoCard
-		}
-		r.op("save", "")
-		if err := m.Save(r.root, r.manifestPath()); err != nil {
-			return r.cardErr(err)
-		}
-		unsaved, saved = 0, r.Now()
-		return nil
-	}
+	j := &job{Runner: r, ctx: ctx, p: p, m: m, saved: r.Now()}
 	defer func() { // a stop keeps what is done; a crash re-fetches at most the songs since the last save
-		if unsaved > 0 {
-			save()
+		if j.unsaved > 0 {
+			j.save()
 		}
 	}()
-
-	recorded := map[string]bool{} // every song's file, case-folded: a rename never replaces one
-	for _, e := range m.Songs {
-		recorded[strings.ToLower(e.Path)] = true
-	}
-	for _, mv := range p.Rename {
-		if err := r.check(ctx); err != nil {
+	for _, phase := range []func() error{j.renames, j.downloads, j.keep, j.playlists, j.removals} {
+		if err := phase(); err != nil {
 			return err
 		}
-		e := m.Songs[mv.ID]
+	}
+	return nil
+}
+
+// job is one run of a plan over the manifest it loaded, phase by phase. The manifest never names a
+// file that isn't there: each phase records a change before the file it frees goes.
+type job struct {
+	*Runner
+	ctx     context.Context
+	p       plan.Plan
+	m       *library.Manifest
+	unsaved int       // changes not on the card yet
+	saved   time.Time // when the manifest was last saved
+	failed  bool      // a wanted song is missing: nothing is removed this run (I2)
+}
+
+func (j *job) save() error {
+	if !j.CardMounted() { // never MkdirAll .subsonic onto the Q2's own storage under the mount point
+		return q2.ErrNoCard
+	}
+	j.op("save", "")
+	if err := j.m.Save(j.root, j.manifestPath()); err != nil {
+		return j.cardErr(err)
+	}
+	j.unsaved, j.saved = 0, j.Now()
+	return nil
+}
+
+// renames moves songs whose path changed, saving after each (M13 finishes one cut before its save).
+func (j *job) renames() error {
+	recorded := map[string]bool{} // every song's file, case-folded: a rename never replaces one
+	for _, e := range j.m.Songs {
+		recorded[strings.ToLower(e.Path)] = true
+	}
+	for _, mv := range j.p.Rename {
+		if err := j.check(j.ctx); err != nil {
+			return err
+		}
+		e := j.m.Songs[mv.ID]
 		if e == nil || e.Path == mv.To {
 			continue
 		}
-		if err := r.rename(e.Path, mv.To, !recorded[strings.ToLower(mv.To)]); err != nil {
-			if !r.CardMounted() {
+		if err := j.rename(e.Path, mv.To, !recorded[strings.ToLower(mv.To)]); err != nil {
+			if !j.CardMounted() {
 				return q2.ErrNoCard
 			}
-			r.fail(mv.ID, filepath.Base(mv.To), "rename", err)
+			j.fail(mv.ID, filepath.Base(mv.To), "rename", err)
 			continue
 		}
 		delete(recorded, strings.ToLower(e.Path))
 		recorded[strings.ToLower(mv.To)] = true
 		e.Path = mv.To // its MetaKey with the rest of p.Keep, after the downloads
-		if err := save(); err != nil {
+		if err := j.save(); err != nil {
 			return err
 		}
 	}
+	return nil
+}
 
+// downloads fetches the adds and replaces, recording them in batches (M18). It ends the run on a
+// failure the whole sync shares (I3, R39).
+func (j *job) downloads() error {
 	covers := map[string]bool{} // album folders whose cover was tried this run
-	failed := false             // a wanted song is missing: nothing is removed this run
 	streak := 0                 // songs failed in a row for the same reason as the whole sync would (I3)
-	for _, w := range append(append([]plan.Want(nil), p.Add...), p.Replace...) {
+	for _, w := range append(append([]plan.Want(nil), j.p.Add...), j.p.Replace...) {
 		id := w.Song.ID
-		if e := m.Songs[id]; e != nil && e.Path == w.Path && e.Quality == w.Quality && e.Meta == library.MetaKey(w.Song, w.Quality) {
-			r.finished(w)
+		if e := j.m.Songs[id]; e != nil && e.Path == w.Path && e.Quality == w.Quality && e.Meta == library.MetaKey(w.Song, w.Quality) {
+			j.finished(w)
 			continue
 		}
-		if err := r.check(ctx); err != nil {
+		if err := j.check(j.ctx); err != nil {
 			return err
 		}
-		r.mu.Lock()
-		r.current = w.Song.Title
+		j.mu.Lock()
+		j.current = w.Song.Title
 		if w.Song.Artist != "" {
-			r.current = w.Song.Artist + " – " + w.Song.Title
+			j.current = w.Song.Artist + " – " + w.Song.Title
 		}
-		r.mu.Unlock()
-		n, err := r.fetchTries(ctx, w)
+		j.mu.Unlock()
+		n, err := j.fetchTries(j.ctx, w)
 		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
+			if j.ctx.Err() != nil {
+				return j.ctx.Err()
 			}
-			if !r.CardMounted() {
+			if !j.CardMounted() {
 				return q2.ErrNoCard
 			}
-			r.fail(id, w.Song.Title, "download", err)
-			failed = true
+			j.fail(id, w.Song.Title, "download", err)
+			j.failed = true
 			switch stop := stopReason(err); {
 			case errors.Is(stop, ErrRefused): // the server's answer for the account: at once
 				return stop
@@ -468,44 +494,54 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 			continue
 		}
 		streak = 0
-		old := m.Songs[id]
+		old := j.m.Songs[id]
 		e := &library.Entry{ID: id, Path: w.Path, Quality: w.Quality, Size: n, Items: w.Items,
 			Meta: library.MetaKey(w.Song, w.Quality)}
 		if w.Quality == "original" {
 			e.SrcSize = w.Song.Size
 		}
-		m.Songs[id] = e
-		unsaved++
+		j.m.Songs[id] = e
+		j.unsaved++
 		switch {
 		case old != nil && !oneFile(old.Path, w.Path):
-			if err := save(); err != nil { // the new file recorded before the old one goes
+			if err := j.save(); err != nil { // the new file recorded before the old one goes
 				return err
 			}
-			r.remove(old.Path)
-		case unsaved >= saveEvery || r.Now().Sub(saved) >= saveAfter:
-			if err := save(); err != nil {
+			j.remove(old.Path)
+		case j.unsaved >= saveEvery || j.Now().Sub(j.saved) >= saveAfter:
+			if err := j.save(); err != nil {
 				return err
 			}
 		}
 		if dir := filepath.Dir(w.Path); !covers[dir] {
 			covers[dir] = true
-			r.cover(ctx, w)
+			j.cover(j.ctx, w)
 		}
-		r.finished(w)
-		r.op("download", w.Path)
+		j.finished(w)
+		j.op("download", w.Path)
 	}
+	return nil
+}
 
-	if applyKeep(m, p.Keep) {
-		unsaved++
+// keep records the items and MetaKeys of songs that needed no transfer (I12).
+func (j *job) keep() error {
+	if applyKeep(j.m, j.p.Keep) {
+		j.unsaved++
 	}
+	return nil
+}
 
+// playlists writes every selected playlist's .m3u, naming where each song is, and deletes the
+// recorded ones no longer selected (unless a download failed).
+func (j *job) playlists() error {
+	m, p := j.m, j.p
 	for name, f := range m.Playlists {
 		switch {
-		case !library.ValidPlaylistFile(r.root, f):
-			r.logf("sync: ignoring bad recorded playlist path %q for %s", f, name)
+		case !library.ValidPlaylistFile(j.root, f):
+			j.logf("sync: ignoring bad recorded playlist path %q for %s", f, name)
 			delete(m.Playlists, name)
 		case strings.Contains(filepath.Base(f), ".."): // an older SafeName's; the firmware refuses it
-			if m.Remove(r.root, f) == nil {
+			if m.Remove(j.root, f) == nil {
 				delete(m.Playlists, name) // written again below under a clean name
 			}
 		}
@@ -530,17 +566,17 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 	// one a later sync takes for the user's own (and so writes a "(Subsonic)" copy beside).
 	for _, name := range names {
 		if m.Playlists[name] == "" {
-			m.Playlists[name] = r.freePlaylistFile(m, name, false)
-			unsaved++
+			m.Playlists[name] = j.freePlaylistFile(m, name, false)
+			j.unsaved++
 		}
 	}
-	if unsaved > 0 {
-		if err := save(); err != nil {
+	if j.unsaved > 0 {
+		if err := j.save(); err != nil {
 			return err
 		}
 	}
 	for _, name := range names {
-		if err := r.check(ctx); err != nil { // USB storage gives the app 3 s to let the card go
+		if err := j.check(j.ctx); err != nil { // USB storage gives the app 3 s to let the card go
 			return err
 		}
 		f := m.Playlists[name]
@@ -553,40 +589,43 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 				have = append(have, s)
 			}
 		}
-		if err := m.WriteM3U(r.root, f, have); err != nil {
-			return r.cardErr(err)
+		if err := m.WriteM3U(j.root, f, have); err != nil {
+			return j.cardErr(err)
 		}
-		r.op("playlist", f)
+		j.op("playlist", f)
 		if migrating {
-			library.Remove(r.root, library.LegacyPlaylistFile(r.root, name))
+			library.Remove(j.root, library.LegacyPlaylistFile(j.root, name))
 		}
 	}
-	if !failed {
+	if !j.failed {
 		for name, f := range m.Playlists {
 			if _, ok := p.Playlists[name]; !ok {
-				if m.Remove(r.root, f) == nil {
+				if m.Remove(j.root, f) == nil {
 					delete(m.Playlists, name)
 				}
 			}
 		}
 	}
 	if migrating {
-		legacy, _ := filepath.Glob(filepath.Join(r.root, "_explaylist_data", "Navidrome - *.m3u"))
+		legacy, _ := filepath.Glob(filepath.Join(j.root, "_explaylist_data", "Navidrome - *.m3u"))
 		for _, f := range legacy {
-			library.Remove(r.root, f)
+			library.Remove(j.root, f)
 		}
 	}
 	m.PlaylistsStale = false
-	if err := save(); err != nil {
-		return err
-	}
+	return j.save()
+}
 
-	if failed {
+// removals deletes the songs no longer selected, last and only once every download arrived (I2):
+// each batch leaves the manifest before its files go (I4).
+func (j *job) removals() error {
+	if j.failed {
 		return nil // I2: the card never ends with less than before; Retry Failed or the next Sync removes
 	}
+	m := j.m
 	keep := map[string]bool{} // files other songs stay in (one file under two names, from older builds)
 	gone := map[string]bool{}
-	for _, e := range p.Remove {
+	for _, e := range j.p.Remove {
 		gone[e.ID] = true
 	}
 	for id, e := range m.Songs {
@@ -594,8 +633,8 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 			keep[strings.ToLower(e.Path)] = true
 		}
 	}
-	for rest := p.Remove; len(rest) > 0; {
-		if err := r.check(ctx); err != nil {
+	for rest := j.p.Remove; len(rest) > 0; {
+		if err := j.check(j.ctx); err != nil {
 			return err
 		}
 		batch := rest[:min(len(rest), removeBatch)]
@@ -609,24 +648,24 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 		}
 		// Dropped from the manifest before the files go: a stop or crash part-way leaves at worst a
 		// file the app forgot, never a song recorded as on the card that is not (I4).
-		unsaved++
-		if err := save(); err != nil {
+		j.unsaved++
+		if err := j.save(); err != nil {
 			return err
 		}
 		for _, e := range es {
 			if keep[strings.ToLower(e.Path)] {
 				continue
 			}
-			if err := r.remove(e.Path); err != nil {
-				r.logf("sync: remove %s: %v", e.ID, err)
+			if err := j.remove(e.Path); err != nil {
+				j.logf("sync: remove %s: %v", e.ID, err)
 				m.Songs[e.ID] = e // still there: the next sync tries again
-				unsaved++
+				j.unsaved++
 				continue
 			}
-			r.op("remove", e.Path)
+			j.op("remove", e.Path)
 		}
 	}
-	return save()
+	return j.save()
 }
 
 const (
