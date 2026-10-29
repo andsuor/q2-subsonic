@@ -40,9 +40,9 @@ type streamer struct {
 	log                         *applog.Log          // optional
 	quality                     func() string        // optional Streaming Quality; mp3-320/mp3-128 transcode every streamed song
 	moving                      func(id string) bool // optional: a sync running or paused will move or remove this song
-	// idle ends a stream when no new song has played for this long and nothing is left to fetch: the
-	// firmware leaves .playing alone once it plays anything else, so this is also how a stream learns
-	// that it was left. Default idleAfter.
+	// idle ends a stream when no new song has played for this long after the one playing should
+	// have ended, and nothing is left to fetch: the firmware leaves .playing alone once it plays
+	// anything else, so this is also how a stream learns that it was left. Default idleAfter.
 	idle time.Duration
 
 	errMu sync.Mutex
@@ -120,14 +120,12 @@ func (s *streamer) stopLocked() {
 	}
 }
 
-// clean empties the stream folder but for keep: a new list, or a daemon start, leaves no songs
-// from an older one on the card (M26).
-func (s *streamer) clean(keep string) {
+// clean empties the stream folder: a new list, or a daemon start, leaves no songs from an older
+// one on the card (M26).
+func (s *streamer) clean() {
 	ents, _ := os.ReadDir(s.dir())
 	for _, e := range ents {
-		if p := filepath.Join(s.dir(), e.Name()); p != keep {
-			library.Remove(s.root, p)
-		}
+		library.Remove(s.root, filepath.Join(s.dir(), e.Name()))
 	}
 }
 
@@ -155,7 +153,7 @@ func (s *streamer) start(songs []subsonic.Song, from int) {
 	}
 	s.setErr(nil)
 	stale, _ := os.ReadFile(s.playingFile) // belongs to the previous list
-	s.clean("")                            // old queue file, stale and half-fetched songs
+	s.clean()                              // old queue file, stale and half-fetched songs
 	jobs := make([]job, len(songs))
 	m := s.manifest()
 	for i, sg := range songs {
@@ -288,14 +286,12 @@ func (r *streamRun) run() {
 		if !r.announced && exists(r.jobs[r.from].path) {
 			r.announce(r.s.dir()) // stock firmware: plays the folder once it has a song
 		}
-		// The last song plays, or none has started for the idle time (paused, or the firmware plays
-		// something else): nothing more to fetch. What was fetched goes but the song last playing (M26).
-		if want < 0 && (cur == len(r.jobs)-1 || time.Since(since) >= idle) {
-			if r.jobs[cur].fetch {
-				r.s.clean(r.jobs[cur].path)
-			} else {
-				r.s.clean("")
-			}
+		// The last song plays, or none has started for the idle time after the one playing should
+		// have ended (paused, or the firmware plays something else): nothing more to fetch. The songs
+		// around it stay, as the firmware has them queued; those behind went above, and the rest go
+		// at the next Play or start-up (M26).
+		long := idle + time.Duration(r.songs[cur].Duration)*time.Second
+		if want < 0 && (cur == len(r.jobs)-1 || time.Since(since) >= long) {
 			return
 		}
 		if !fetched {

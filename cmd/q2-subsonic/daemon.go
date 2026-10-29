@@ -186,7 +186,7 @@ func newDaemon(dir, card, tmp string) *daemon {
 	d.stream.log = lg
 	d.stream.quality = func() string { return d.settings().stream() }
 	d.stream.moving = d.runner.Moving
-	d.stream.clean("") // a stream an earlier run left (M26)
+	d.stream.clean() // a stream an earlier run left (M26)
 	d.state.Write(nil)
 	d.migrateErr = library.Migrate(card, lg.Printf)
 	d.logCrash()

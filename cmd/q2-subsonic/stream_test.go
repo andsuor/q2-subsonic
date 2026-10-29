@@ -345,8 +345,8 @@ func TestStreamDuplicateSyncedSongs(t *testing.T) {
 }
 
 // Once the songs around the one playing are on the card, the stream moves no data: hold is off,
-// so the Q2 can sleep. With no new song for the idle time the stream ends and deletes what it
-// fetched but the song last played (I14, M26).
+// so the Q2 can sleep. With no new song for the idle time the stream ends, but the songs the
+// firmware has queued around the one playing stay: they still play (I14, M26).
 func TestStreamIdleEnds(t *testing.T) {
 	e := newEnv(t, fw.Caps{Playlist: true})
 	e.s.idle = 300 * time.Millisecond
@@ -359,23 +359,49 @@ func TestStreamIdleEnds(t *testing.T) {
 	os.WriteFile(e.playing, []byte(e.stream(1, "flac")+"\n"), 0o644)
 	until(t, "busy for song 3", func() bool { return exists(e.stream(3, "flac")) })
 	until(t, "ended", func() bool { return !e.s.active() })
-	if exists(e.stream(0, "flac")) || exists(e.stream(2, "flac")) || exists(e.stream(3, "flac")) || !exists(e.stream(1, "flac")) {
-		t.Fatal("left the fetched songs, or deleted the one playing")
+	for i := 1; i <= 3; i++ {
+		if !exists(e.stream(i, "flac")) {
+			t.Fatalf("song %d deleted: the firmware has it queued", i)
+		}
 	}
 	if e.s.busy() {
 		t.Fatal("busy after the end")
 	}
 }
 
-// A list played to its last song leaves only that song (M26).
-func TestStreamEndCleansUp(t *testing.T) {
+// The idle time counts from the end of the song playing: a song longer than it (a live set, a
+// symphony in one file) doesn't end the list (I14).
+func TestStreamIdleAfterLongSong(t *testing.T) {
 	e := newEnv(t, fw.Caps{Playlist: true})
-	e.s.start(songs(3, "flac"), 0)
+	e.s.idle = 100 * time.Millisecond
+	ss := songs(6, "flac")
+	ss[0].Duration = 1 // second
+	e.s.start(ss, 0)
 	until(t, "window", func() bool { return exists(e.stream(2, "flac")) })
-	os.WriteFile(e.playing, []byte(e.stream(2, "flac")+"\n"), 0o644)
+	time.Sleep(600 * time.Millisecond)
+	if !e.s.active() {
+		t.Fatal("ended while a song longer than the idle time plays")
+	}
 	until(t, "ended", func() bool { return !e.s.active() })
-	if exists(e.stream(0, "flac")) || exists(e.stream(1, "flac")) || !exists(e.stream(2, "flac")) {
-		t.Fatal("played songs left, or the last one deleted")
+}
+
+// A list played to its last song keeps the songs behind it in the window, which Prev reaches;
+// older ones go (M26).
+func TestStreamEndKeepsWindow(t *testing.T) {
+	e := newEnv(t, fw.Caps{Playlist: true})
+	e.s.start(songs(6, "flac"), 0)
+	until(t, "window", func() bool { return exists(e.stream(2, "flac")) })
+	os.WriteFile(e.playing, []byte(e.stream(3, "flac")+"\n"), 0o644)
+	until(t, "4, 5", func() bool { return exists(e.stream(4, "flac")) && exists(e.stream(5, "flac")) })
+	os.WriteFile(e.playing, []byte(e.stream(5, "flac")+"\n"), 0o644)
+	until(t, "ended", func() bool { return !e.s.active() })
+	if exists(e.stream(0, "flac")) || exists(e.stream(2, "flac")) {
+		t.Fatal("songs long played left")
+	}
+	for i := 3; i <= 5; i++ {
+		if !exists(e.stream(i, "flac")) {
+			t.Fatalf("song %d deleted", i)
+		}
 	}
 }
 
