@@ -121,11 +121,11 @@ func (d *daemon) device(req q2spot.Request) q2spot.Reply {
 	defer cancel()
 	switch req.Op {
 	case "playlists", "artists", "albums":
-		return d.browse(ctx, cl, req.Op, req.Arg(0))
+		return d.withSyncNow(d.browse(ctx, cl, req.Op, req.Arg(0)), req.Arg(0))
 	case "artist", "album", "playlist":
-		return d.itemPage(ctx, cl, req.Arg(0), req.Arg(1))
+		return d.withSyncNow(d.itemPage(ctx, cl, req.Arg(0), req.Arg(1)), req.Arg(1))
 	case "search":
-		return d.search(ctx, cl, req.Arg(0), req.Arg(1))
+		return d.withSyncNow(d.search(ctx, cl, req.Arg(0), req.Arg(1)), req.Arg(1))
 	case "toggle":
 		return d.toggle(ctx, cl, req.Arg(0))
 	case "quality":

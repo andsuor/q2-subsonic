@@ -483,3 +483,64 @@ func TestControlOpsReplyFast(t *testing.T) {
 	timed("signout")
 	eventually(t, "the stream to stop", func() bool { return !d.stream.active() })
 }
+
+func TestSyncNowRowWhenWaiting(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 3, songsPer: 2}, "", true)
+	d.do("toggle", "album:al0")
+	for _, c := range [][]string{{"playlists"}, {"albums"}, {"artists"}, {"search", "x"}, {"album", "album:al1"}} {
+		r := d.do(c[0], c[1:]...)
+		if len(r.Rows) == 0 || r.Rows[0].Title != "Sync Now" || r.Rows[0].Subtitle != "1 waiting" ||
+			r.Rows[0].Kind != "list" || r.Rows[0].URI != "sync" {
+			t.Errorf("%v: first row %+v", c, r.Rows)
+		}
+	}
+	if r := d.do("albums"); len(r.Rows) < 2 || r.Rows[1].Title != "Album 000" {
+		t.Errorf("order changed: %q", titles(r))
+	}
+}
+
+func TestNoSyncNowRowWhenUpToDate(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 3, songsPer: 2}, "", true)
+	for _, c := range [][]string{{"albums"}, {"playlists"}, {"menu"}} {
+		if _, ok := find(d.do(c[0]), "Sync Now"); ok {
+			t.Errorf("%v: Sync Now with nothing selected", c)
+		}
+	}
+	d.do("toggle", "album:al0")
+	if _, ok := find(d.do("menu"), "Sync Now"); ok {
+		t.Error("Sync Now on the root menu")
+	}
+	m := &library.Manifest{Songs: map[string]*library.Entry{}}
+	for j := 0; j < 2; j++ {
+		id := fmt.Sprintf("al0.%d", j)
+		m.Songs[id] = &library.Entry{ID: id, Path: filepath.Join(d.card, "Navidrome", id+".flac"), Size: 1, Items: []string{"album:al0"}}
+	}
+	if err := m.Save(d.card, filepath.Join(d.card, ".subsonic", "manifest.json")); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := find(d.do("albums"), "Sync Now"); ok {
+		t.Error("Sync Now though everything is on the Q2")
+	}
+}
+
+func TestSyncNowRowKeepsPagingWhole(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 120, songsPer: 1}, "", true)
+	d.do("toggle", "album:al0")
+	r := d.do("albums")
+	if len(r.Rows) != 50 || r.Rows[0].Title != "Sync Now" || r.Rows[49].Title != "Album 048" || r.Cursor != "49" {
+		t.Fatalf("first page %d rows, last %q, cursor %q", len(r.Rows), r.Rows[len(r.Rows)-1].Title, r.Cursor)
+	}
+	if r = d.do("albums", r.Cursor); r.Rows[0].Title != "Album 049" {
+		t.Errorf("second page starts %q", r.Rows[0].Title)
+	}
+}
+
+func TestLibraryHelpCopy(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "", true)
+	got := strings.Join(titles(d.do("library")), "|")
+	for _, w := range []string{"Run after the sync has finished", "Import playlist only applies to synced playlists"} {
+		if !strings.Contains(got, w) {
+			t.Errorf("missing %q in %q", w, got)
+		}
+	}
+}

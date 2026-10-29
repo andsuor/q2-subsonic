@@ -91,6 +91,36 @@ func (v view) song(s subsonic.Song, listKey string, i int) q2spot.Row {
 		Context: fmt.Sprintf("song:%s %s %d", s.ID, listKey, i), Position: "toggle"}
 }
 
+// syncNowRow is the shortcut to Sync, present while selected items are not all on the Q2.
+// Cheap: read from the selection, manifest and cached songs, never the network.
+func (d *daemon) syncNowRow() (q2spot.Row, bool) {
+	v := d.view()
+	n := 0
+	for _, it := range v.sel.Items {
+		if v.status(it.Kind, it.ID, 0) != "On Q2" {
+			n++
+		}
+	}
+	if n == 0 {
+		return q2spot.Row{}, false
+	}
+	return list("sync", "Sync Now", fmt.Sprintf("%d waiting", n), ""), true
+}
+
+// withSyncNow puts the Sync Now row first on a list's first page, pushing the last row to the next.
+func (d *daemon) withSyncNow(r q2spot.Reply, cursor string) q2spot.Reply {
+	row, ok := d.syncNowRow()
+	if !ok || cursor != "" || r.Status != "" {
+		return r
+	}
+	if len(r.Rows) >= q2spot.MaxRows {
+		n := q2spot.MaxRows - 1
+		r.Rows, r.Cursor = r.Rows[:n], strconv.Itoa(n)
+	}
+	r.Rows = append([]q2spot.Row{row}, r.Rows...)
+	return r
+}
+
 func (d *daemon) browse(ctx context.Context, cl *subsonic.Client, op, cursor string) q2spot.Reply {
 	v := d.view()
 	var rows []q2spot.Row

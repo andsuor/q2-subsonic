@@ -273,7 +273,8 @@ func (d *daemon) syncAction(op string) q2spot.Reply {
 // library asks the firmware (F3) to update the library and import the playlists, or says how.
 func (d *daemon) library() q2spot.Reply {
 	if !d.caps.Library {
-		return q2spot.Reply{Rows: []q2spot.Row{info("1. Library → Update Local Music"), info("2. Library → Playlists → Import playlist")}}
+		return q2spot.Reply{Rows: []q2spot.Row{info("1. Library → Update Local Music"), info("Run after the sync has finished"),
+			info("2. Library → Playlists → Import playlist"), info("Import playlist only applies to synced playlists")}}
 	}
 	req := filepath.Join(d.tmp, "q2-subsonic.library")
 	d.mu.Lock()
