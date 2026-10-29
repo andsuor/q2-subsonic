@@ -304,3 +304,22 @@ func TestPlanKeepsRecordsFresh(t *testing.T) {
 		t.Errorf("keep with nothing to refresh: %+v", up.Keep)
 	}
 }
+
+// A song resolved through its album (with the album's own artist) and through a playlist (with only
+// its track artist, on a server without displayAlbumArtist) gets the album's artist whichever item
+// comes first, so its folder doesn't depend on the selection's order (review G1, Minor 2).
+func TestPlanPrefersAlbumArtist(t *testing.T) {
+	inList, inAlbum := song("s1", "One"), song("s1", "One")
+	inList.Artist, inList.AlbumArtist = "Artist 1", "Artist 1"
+	inAlbum.Artist, inAlbum.AlbumArtist = "Artist 1", "Various Artists"
+	res := map[string][]subsonic.Song{"playlist:p1": {inList}, "album:a1": {inAlbum}}
+	for _, items := range [][]selection.Item{
+		{item("playlist", "p1", "original"), item("album", "a1", "original")},
+		{item("album", "a1", "original"), item("playlist", "p1", "original")},
+	} {
+		p := Compute(selection.Set{Items: items}, res, map[string]string{"playlist:p1": "Mix"}, manifest(), root, big)
+		if len(p.Add) != 1 || p.Add[0].Song.AlbumArtist != "Various Artists" {
+			t.Errorf("%v: %+v", items[0].Kind, p.Add)
+		}
+	}
+}

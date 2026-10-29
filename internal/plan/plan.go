@@ -97,6 +97,9 @@ func Compute(sel selection.Set, resolved map[string][]subsonic.Song, playlistNam
 			} else if Better(q, w.Quality) {
 				w.Quality = q
 			}
+			if w.Song.AlbumArtist == w.Song.Artist && s.AlbumArtist != s.Artist {
+				w.Song = s // its album's own artist over its track artist, whichever item came first (M41)
+			}
 			if n := len(w.Items); n == 0 || w.Items[n-1] != key {
 				seen := false
 				for _, k := range w.Items {

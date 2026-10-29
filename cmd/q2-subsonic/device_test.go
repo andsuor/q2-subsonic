@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -37,6 +38,7 @@ type nav struct {
 	empty            bool          // every list reply is empty
 	lastRange        atomic.Value  // the Range header of the latest download, a string
 	various          bool          // albums are compilations: album artist "Various Artists", song j by "Artist j"
+	albumArtist      string        // the albums' own artist, when not "Artist"
 }
 
 func (n *nav) song(al, j int) map[string]any {
@@ -50,7 +52,7 @@ func (n *nav) song(al, j int) map[string]any {
 }
 
 func (n *nav) album(i int) map[string]any {
-	artist := "Artist"
+	artist := cmp.Or(n.albumArtist, "Artist")
 	if n.various {
 		artist = "Various Artists"
 	}
@@ -1029,5 +1031,22 @@ func TestLibraryAnswerTakenByTick(t *testing.T) {
 	d.tick()
 	if !d.manifest().Imported[mix] {
 		t.Fatal("answer not taken")
+	}
+}
+
+// Songs agreeing on their album artist keep it (a server's displayAlbumArtist is trusted); only an
+// album whose songs disagree, a compilation on a server without displayAlbumArtist, takes the
+// album's artist (review G1, Minor 2).
+func TestGetAlbumTrustsConsistentArtist(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 2, albumArtist: "Someone Else"}, "", true)
+	d.do("toggle", "album:al0")
+	d.preview(t)
+	d.mu.Lock()
+	p := d.daemon.preview.plan
+	d.mu.Unlock()
+	for _, w := range p.Add {
+		if !strings.HasPrefix(w.Path, filepath.Join(d.card, "Subsonic", "Artist")+"/") {
+			t.Errorf("%s", w.Path)
+		}
 	}
 }
