@@ -8,24 +8,27 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/andsuor/q2-subsonic/internal/q2"
-	"github.com/andsuor/q2-subsonic/internal/q2spot"
 )
 
 const version = "q2-v0.1"
 
 func main() {
-	flag.String("dir", "/mnt/mmc/.subsonic", "the add-on's folder on the card")
-	browse := flag.String("browse-socket", "/tmp/q2-subsonic.browse.sock", "Q2SPOT/1 for the Q2's page")
+	dir := flag.String("dir", "/mnt/mmc/.subsonic", "the add-on's folder on the card")
+	card := flag.String("card", "/mnt/mmc", "the card's root")
+	tmp := flag.String("tmp", "/tmp", "where the firmware's files and the socket live")
 	flag.Parse()
 	q2.SetupLog("q2-subsonic")
+	q2.Card = *card
 	log.Print("start ", version)
+	d := newDaemon(*dir, *card, *tmp)
+	d.log.Printf("start %s", version)
+	sock := filepath.Join(*tmp, "q2-subsonic.browse.sock")
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
-	go func() { <-sig; os.Remove(*browse); os.Exit(0) }()
-	log.Fatal(q2spot.Serve(*browse, func(q2spot.Request) q2spot.Reply {
-		return q2spot.Reply{Rows: []q2spot.Row{{Kind: "info", Title: "Navidrome"}}}
-	}))
+	go func() { <-sig; d.close(sock); os.Exit(0) }()
+	log.Fatal(d.serve(sock))
 }

@@ -41,6 +41,7 @@ type streamer struct {
 	poll                        time.Duration
 	backoff                     []time.Duration // wait after each failed try of a song; one try per entry
 	log                         *applog.Log     // optional
+	quality                     func() string   // optional Streaming Quality; mp3-320/mp3-128 transcode every streamed song
 
 	errMu sync.Mutex
 	err   error
@@ -132,6 +133,11 @@ func (s *streamer) start(songs []subsonic.Song, from int) {
 		ext, q := strings.ToLower(sg.Suffix), "original"
 		if s.caps.Playlist && !playableSuffix[ext] || !s.caps.Playlist && ext != "flac" && ext != "mp3" {
 			ext, q = "mp3", "mp3-320"
+		}
+		if s.quality != nil {
+			if sq := s.quality(); sq == "mp3-320" || sq == "mp3-128" {
+				ext, q = "mp3", sq
+			}
 		}
 		name := fmt.Sprintf("%04d - %s [%s].%s", i, library.SafeName(sg.Title), library.SafeName(sg.ID), ext)
 		jobs[i] = job{path: filepath.Join(s.dir(), name), fetch: true, quality: q}

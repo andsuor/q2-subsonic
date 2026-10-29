@@ -50,7 +50,7 @@ func listenTCP(port int) (net.Listener, int) {
 // code) or the PIN on the Q2's screen, kept in an HttpOnly SameSite=Strict cookie. POSTs need X-Q2: 1.
 type signin struct {
 	dir       string
-	state     *q2.State
+	state     interface{ Write(map[string]string) error }    // the app's state file (q2.State, or the daemon's merge)
 	now       func() time.Time                               // default time.Now
 	tick      time.Duration                                  // how often the 10 min limit is checked; default 1 s
 	newClient func(subsonic.Creds) (*subsonic.Client, error) // default: the embedded roots

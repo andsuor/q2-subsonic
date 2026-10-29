@@ -1,0 +1,408 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/andsuor/q2-subsonic/internal/creds"
+	"github.com/andsuor/q2-subsonic/internal/library"
+	"github.com/andsuor/q2-subsonic/internal/q2spot"
+	"github.com/andsuor/q2-subsonic/internal/selection"
+	"github.com/andsuor/q2-subsonic/internal/subsonic"
+	"github.com/andsuor/q2-subsonic/internal/syncer"
+)
+
+// nav is a Navidrome stand-in: albums al0..alN-1 ("Album 000"…) by "Artist", each with songsPer
+// songs al<i>.<j>; playlist pl1 "Mix" holds al0's songs; artist ar1 has al0 and al1.
+type nav struct {
+	albums, songsPer int
+	stall            bool          // every request hangs until the client gives up
+	errCode          int           // every API call fails with this Subsonic code
+	block            chan struct{} // downloads wait for it
+}
+
+func (n *nav) song(al, j int) map[string]any {
+	return map[string]any{"id": fmt.Sprintf("al%d.%d", al, j), "title": fmt.Sprintf("Song %d", j), "album": fmt.Sprintf("Album %03d", al),
+		"albumId": fmt.Sprintf("al%d", al), "artist": "Artist", "year": 2020, "discNumber": 1, "track": j + 1,
+		"duration": 100, "size": 1000, "suffix": "flac"}
+}
+
+func (n *nav) album(i int) map[string]any {
+	return map[string]any{"id": fmt.Sprintf("al%d", i), "name": fmt.Sprintf("Album %03d", i), "artist": "Artist", "year": 2020, "songCount": n.songsPer}
+}
+
+func (n *nav) songs(al int) []map[string]any {
+	var out []map[string]any
+	for j := 0; j < n.songsPer; j++ {
+		out = append(out, n.song(al, j))
+	}
+	return out
+}
+
+func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if n.stall {
+		<-r.Context().Done()
+		return
+	}
+	q := r.URL.Query()
+	ok := func(k string, v any) {
+		m := map[string]any{"status": "ok", "version": "1.16.1"}
+		if k != "" {
+			m[k] = v
+		}
+		json.NewEncoder(w).Encode(map[string]any{"subsonic-response": m})
+	}
+	op := path.Base(r.URL.Path)
+	if n.errCode != 0 && op != "download" && op != "stream" {
+		json.NewEncoder(w).Encode(map[string]any{"subsonic-response": map[string]any{"status": "failed",
+			"error": map[string]any{"code": n.errCode, "message": "Data not found"}}})
+		return
+	}
+	albumOf := func(id string) int { i, _ := strconv.Atoi(strings.TrimPrefix(id, "al")); return i }
+	switch op {
+	case "ping":
+		ok("", nil)
+	case "getAlbumList2":
+		off, _ := strconv.Atoi(q.Get("offset"))
+		size, _ := strconv.Atoi(q.Get("size"))
+		var al []map[string]any
+		for i := off; i < n.albums && i < off+size; i++ {
+			al = append(al, n.album(i))
+		}
+		ok("albumList2", map[string]any{"album": al})
+	case "getAlbum":
+		a := n.album(albumOf(q.Get("id")))
+		a["song"] = n.songs(albumOf(q.Get("id")))
+		ok("album", a)
+	case "getPlaylists":
+		ok("playlists", map[string]any{"playlist": []any{map[string]any{"id": "pl1", "name": "Mix", "songCount": n.songsPer}}})
+	case "getPlaylist":
+		ok("playlist", map[string]any{"id": "pl1", "name": "Mix", "songCount": n.songsPer, "entry": n.songs(0)})
+	case "getArtists":
+		ok("artists", map[string]any{"index": []any{map[string]any{"artist": []any{map[string]any{"id": "ar1", "name": "Artist", "albumCount": 2}}}}})
+	case "getArtist":
+		ok("artist", map[string]any{"id": "ar1", "name": "Artist", "albumCount": 2, "album": []any{n.album(0), n.album(1)}})
+	case "search3":
+		ok("searchResult3", map[string]any{"album": []any{n.album(0)}, "song": n.songs(0)})
+	case "getSong":
+		al, j, _ := strings.Cut(strings.TrimPrefix(q.Get("id"), "al"), ".")
+		a, _ := strconv.Atoi(al)
+		k, _ := strconv.Atoi(j)
+		ok("song", n.song(a, k))
+	case "download", "stream":
+		if n.block != nil {
+			select {
+			case <-n.block:
+			case <-r.Context().Done():
+				return
+			}
+		}
+		w.Write([]byte(strings.Repeat("x", 1000)))
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+type tdaemon struct {
+	*daemon
+	tmp string
+}
+
+func newTestDaemon(t *testing.T, n *nav, caps string, signedIn bool) *tdaemon {
+	t.Helper()
+	card, tmp := t.TempDir(), t.TempDir()
+	if caps != "" {
+		os.WriteFile(filepath.Join(tmp, "q2-addon.caps"), []byte(caps+"\n"), 0o644)
+	}
+	srv := httptest.NewTLSServer(n)
+	d := newDaemon(filepath.Join(card, ".subsonic"), card, tmp)
+	d.newClient = func(c subsonic.Creds) (*subsonic.Client, error) { return subsonic.New(c, srv.Client()) }
+	d.signinPort = 0
+	d.runner.CardMounted = func() bool { return true }
+	d.free = func(string) int64 { return 1 << 40 }
+	if signedIn {
+		if err := creds.Save(d.dir, subsonic.Creds{Server: srv.URL, User: "u", Password: "pw"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() {
+		d.signin.stop()
+		d.stream.stop()
+		d.runner.Cancel()
+		srv.CloseClientConnections()
+		srv.Close()
+	})
+	return &tdaemon{d, tmp}
+}
+
+func (d *tdaemon) do(op string, args ...string) q2spot.Reply {
+	return d.device(q2spot.Request{ID: "1", Op: op, Args: args})
+}
+
+func titles(r q2spot.Reply) []string {
+	var out []string
+	for _, row := range r.Rows {
+		out = append(out, row.Title)
+	}
+	return out
+}
+
+func find(r q2spot.Reply, title string) (q2spot.Row, bool) {
+	for _, row := range r.Rows {
+		if row.Title == title || strings.HasPrefix(row.Title, title) {
+			return row, true
+		}
+	}
+	return q2spot.Row{}, false
+}
+
+func eventually(t *testing.T, what string, ok func() bool) {
+	t.Helper()
+	for end := time.Now().Add(10 * time.Second); time.Now().Before(end); time.Sleep(10 * time.Millisecond) {
+		if ok() {
+			return
+		}
+	}
+	t.Fatalf("timed out waiting for %s", what)
+}
+
+func TestRootSignedOut(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "", false)
+	r := d.do("menu")
+	if len(r.Rows) != 1 || r.Rows[0].Kind != "remote" || r.Rows[0].Title != "Sign In from Your Phone" {
+		t.Fatalf("rows %+v", r.Rows)
+	}
+	if !d.signin.active() {
+		t.Error("sign-in not started, the QR page would be empty")
+	}
+}
+
+func TestRootSignedIn(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "", true)
+	r := d.do("menu")
+	want := []string{"Sync", "On This Q2", "Playlists", "Albums", "Artists", "Search", "Settings"}
+	if got := titles(r); strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("titles %q, want %q", got, want)
+	}
+	kinds := []string{"list", "list", "list", "list", "list", "search", "list"}
+	for i, row := range r.Rows {
+		if row.Kind != kinds[i] {
+			t.Errorf("%s kind %q, want %q", row.Title, row.Kind, kinds[i])
+		}
+	}
+	if !strings.HasPrefix(r.Rows[1].Subtitle, "0 items · ") {
+		t.Errorf("On This Q2 subtitle %q", r.Rows[1].Subtitle)
+	}
+}
+
+func TestHoldToggleToast(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 3, songsPer: 14}, "", true)
+	row, _ := find(d.do("albums"), "Album 000")
+	if row.Position != "toggle" || row.Context != "album:al0" {
+		t.Fatalf("hold fields %+v", row)
+	}
+	if r := d.do(row.Position, row.Context); r.Message != "Added to Sync · 14 songs" {
+		t.Fatalf("toast %q", r.Message)
+	}
+	if r := d.do(row.Position, row.Context); r.Message != "Removed from Sync" {
+		t.Fatalf("toast %q", r.Message)
+	}
+}
+
+func TestIncludedVia(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 3, songsPer: 4}, "", true)
+	d.do("toggle", "album:al0")
+	page := d.do("album", "album:al0")
+	song, ok := find(page, "Song 1")
+	if !ok || song.Position != "toggle" {
+		t.Fatalf("song row %+v in %q", song, titles(page))
+	}
+	if r := d.do("toggle", song.Context); r.Message != "Included via Album 000" {
+		t.Fatalf("toast %q", r.Message)
+	}
+	sel, _ := selection.Load(filepath.Join(d.dir, "selection.json"))
+	if len(sel.Items) != 1 || sel.Items[0].ID != "al0" {
+		t.Fatalf("selection changed: %+v", sel.Items)
+	}
+}
+
+func TestStatusSubtitles(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 4, songsPer: 3}, "", true)
+	sel := selection.Set{Version: 1}
+	for _, id := range []string{"al0", "al1", "al2"} {
+		sel.Toggle(selection.Item{Kind: selection.KindAlbum, ID: id, Name: id, Quality: "original"})
+	}
+	sel.Save(filepath.Join(d.dir, "selection.json"))
+	m := &library.Manifest{Songs: map[string]*library.Entry{}}
+	add := func(id, key string) {
+		m.Songs[id] = &library.Entry{ID: id, Path: filepath.Join(d.card, "Navidrome", id+".flac"), Size: 1000, Items: []string{key}}
+	}
+	for j := 0; j < 3; j++ {
+		add(fmt.Sprintf("al0.%d", j), "album:al0")
+	}
+	add("al2.0", "album:al2")
+	if err := m.Save(d.card, filepath.Join(d.card, ".subsonic", "manifest.json")); err != nil {
+		t.Fatal(err)
+	}
+	r := d.do("albums")
+	want := map[string]string{"Album 000": "Artist · On Q2", "Album 001": "Artist · Waiting to sync",
+		"Album 002": "Artist · 1 of 3 songs on Q2", "Album 003": "Artist"}
+	for title, sub := range want {
+		if row, _ := find(r, title); row.Subtitle != sub {
+			t.Errorf("%s subtitle %q, want %q", title, row.Subtitle, sub)
+		}
+	}
+}
+
+func TestPagingMore(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 120, songsPer: 1}, "", true)
+	r := d.do("albums")
+	if len(r.Rows) != 50 || r.Cursor == "" {
+		t.Fatalf("first page: %d rows, cursor %q", len(r.Rows), r.Cursor)
+	}
+	r = d.do("albums", r.Cursor)
+	if len(r.Rows) != 50 || r.Rows[0].Title != "Album 050" || r.Cursor == "" {
+		t.Fatalf("second page: %d rows from %q, cursor %q", len(r.Rows), r.Rows[0].Title, r.Cursor)
+	}
+	r = d.do("albums", r.Cursor)
+	if len(r.Rows) != 20 || r.Cursor != "" {
+		t.Fatalf("last page: %d rows, cursor %q", len(r.Rows), r.Cursor)
+	}
+}
+
+// preview asks for sync until the preview is ready.
+func (d *tdaemon) preview(t *testing.T) q2spot.Reply {
+	t.Helper()
+	var r q2spot.Reply
+	eventually(t, "the preview", func() bool { r = d.do("sync"); return r.Message != "refresh" })
+	return r
+}
+
+func TestSyncPreviewRefreshThenRows(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 2, songsPer: 2}, "", true)
+	d.do("toggle", "album:al0")
+	r := d.do("sync")
+	if r.Message != "refresh" || len(r.Rows) == 0 || r.Rows[0].Title != "Checking Navidrome…" {
+		t.Fatalf("first reply %q %q", r.Message, titles(r))
+	}
+	r = d.preview(t)
+	for _, w := range []string{"+2 songs · ", "Needs ", "Start Sync"} {
+		if _, ok := find(r, w); !ok {
+			t.Errorf("no %q row in %q", w, titles(r))
+		}
+	}
+	if row, _ := find(r, "Start Sync"); row.Kind != "action" || row.URI != "start" {
+		t.Errorf("Start Sync row %+v", row)
+	}
+}
+
+func TestSyncNotEnoughSpace(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 2, songsPer: 2}, "", true)
+	d.free = func(string) int64 { return 0 }
+	d.do("toggle", "album:al0")
+	r := d.preview(t)
+	row, ok := find(r, "Not enough space · Free ")
+	if !ok || row.Kind != "info" {
+		t.Fatalf("no info Not enough space row in %q", titles(r))
+	}
+	if _, ok := find(r, "Start Sync"); ok {
+		t.Error("Start Sync offered without space")
+	}
+}
+
+func TestProgressRowKindByCaps(t *testing.T) {
+	snap := syncer.Snapshot{State: "running", Permille: 470, Done: 112, Total: 240, ETA: 6 * time.Minute, Current: "Artist – Song"}
+	d := newTestDaemon(t, &nav{}, "progress", true)
+	r := d.syncRows(snap)
+	if r.Message != "refresh" || r.Rows[0].Kind != "progress" || r.Rows[0].Position != "470" {
+		t.Fatalf("with progress: %q %+v", r.Message, r.Rows[0])
+	}
+	for _, w := range []string{"112 of 240 songs", "About 6 min left", "Now: Artist – Song", "Pause", "Cancel"} {
+		if _, ok := find(r, w); !ok {
+			t.Errorf("no %q in %q", w, titles(r))
+		}
+	}
+	d = newTestDaemon(t, &nav{}, "", true)
+	r = d.syncRows(snap)
+	if r.Rows[0].Kind != "info" || !strings.HasPrefix(r.Rows[0].Title, "[") || r.Rows[0].Title != "[####------] 47 %" {
+		t.Fatalf("without progress: %+v", r.Rows[0])
+	}
+}
+
+func TestDetailsRow(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 1, errCode: 70}, "", true)
+	r := d.do("album", "album:al0")
+	det, ok := find(r, "Details")
+	if !ok || det.Kind != "list" || det.URI != "details" {
+		t.Fatalf("no Details row in %+v", r.Rows)
+	}
+	if r.Rows[0].Title != "Data not found" {
+		t.Errorf("message row %q", r.Rows[0].Title)
+	}
+	got := strings.Join(titles(d.do(det.URI, det.Context)), "|")
+	for _, w := range []string{"Op: getAlbum", "HTTP: 200", "Code: 70", "Time: "} {
+		if !strings.Contains(got, w) {
+			t.Errorf("details %q lack %q", got, w)
+		}
+	}
+}
+
+func TestReplyWithin8s(t *testing.T) {
+	d := newTestDaemon(t, &nav{stall: true}, "library", true)
+	ops := [][]string{{"menu"}, {"playlists"}, {"albums"}, {"artists"}, {"artist", "artist:ar1"}, {"search", "x"},
+		{"playlist", "playlist:pl1"}, {"album", "album:al0"}, {"toggle", "album:al0"}, {"toggle", "song:al0.1 album:al0 1"},
+		{"play", "album:al0 0"}, {"onq2"}, {"settings"}, {"account"}, {"sync"}, {"library"}, {"details", "getAlbum|0|0|0|"}}
+	var wg sync.WaitGroup
+	for _, op := range ops {
+		wg.Add(1)
+		go func(op []string) {
+			defer wg.Done()
+			start := time.Now()
+			d.do(op[0], op[1:]...)
+			if took := time.Since(start); took >= 8*time.Second {
+				t.Errorf("%v took %v", op, took)
+			}
+		}(op)
+	}
+	wg.Wait()
+}
+
+func TestStateHoldDuringSync(t *testing.T) {
+	n := &nav{albums: 1, songsPer: 2, block: make(chan struct{})}
+	d := newTestDaemon(t, n, "", true)
+	state := func() string {
+		d.tick()
+		b, _ := os.ReadFile(filepath.Join(d.tmp, "q2-subsonic.state"))
+		return string(b)
+	}
+	d.do("toggle", "album:al0")
+	d.preview(t)
+	if r := d.do("start"); r.Status != "" && r.Status != q2spot.OK {
+		t.Fatalf("start: %+v", r)
+	}
+	eventually(t, "the sync to run", d.runner.Busy)
+	if st := state(); !strings.Contains(st, "hold=1") || !strings.Contains(st, "version="+version) {
+		t.Fatalf("state during sync:\n%s", st)
+	}
+	if r := d.do("menu"); !strings.HasPrefix(r.Rows[0].Subtitle, "Syncing · ") {
+		t.Errorf("Sync subtitle while running %q", r.Rows[0].Subtitle)
+	}
+	close(n.block)
+	eventually(t, "the sync to finish", func() bool { return d.runner.Snapshot().State == "done" })
+	if st := state(); strings.Contains(st, "hold=1") {
+		t.Fatalf("hold kept after the sync:\n%s", st)
+	}
+	if r := d.do("sync"); r.Rows[0].Title != "Sync complete · 2 songs · 0 failed" {
+		t.Errorf("done rows %q", titles(r))
+	}
+}

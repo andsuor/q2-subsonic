@@ -46,7 +46,7 @@ type Snapshot struct {
 	BytesDone, BytesTotal int64
 	Permille              int
 	ETA                   time.Duration
-	Current               string
+	Current               string // "Artist – Title" of the song in flight
 	Err                   error
 	Failures              []Failure
 }
@@ -322,6 +322,9 @@ func (r *Runner) work(ctx context.Context, p plan.Plan) error {
 		}
 		r.mu.Lock()
 		r.current = w.Song.Title
+		if w.Song.Artist != "" {
+			r.current = w.Song.Artist + " – " + w.Song.Title
+		}
 		r.mu.Unlock()
 		n, err := r.fetchTries(ctx, w)
 		if err != nil {
