@@ -307,7 +307,7 @@ func (s *signin) signin(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 		defer cancel()
-		err = cl.Ping(ctx)
+		c, err = cl.SignIn(ctx) // with OpenSubsonic API keys, only the key is kept
 	}
 	if err != nil {
 		fin(false, subsonic.Message(err, host))

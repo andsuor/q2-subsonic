@@ -331,3 +331,34 @@ func TestSigninSetsDateURL(t *testing.T) {
 		t.Fatalf("date URL before ping %q, want %q", seen, r.nd.URL)
 	}
 }
+
+// I23: on a server offering OpenSubsonic API keys, the phone's "password" is an API key, and only
+// the key is saved (with the server's user name); Account says a key, not a password, is on the card.
+func TestSigninAPIKeySavesOnlyKey(t *testing.T) {
+	nd := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		q := r.URL.Query()
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/getOpenSubsonicExtensions"):
+			w.Write([]byte(`{"subsonic-response":{"status":"ok","openSubsonicExtensions":[{"name":"apiKeyAuthentication","versions":[1]}]}}`))
+		case q.Get("apiKey") == "KEY" && !q.Has("u"):
+			w.Write([]byte(`{"subsonic-response":{"status":"ok","tokenInfo":{"username":"andreas"}}}`))
+		default:
+			w.Write([]byte(`{"subsonic-response":{"status":"failed","error":{"code":44,"message":"Invalid API key"}}}`))
+		}
+	}))
+	defer nd.Close()
+	r := newRig(t, func(s *signin, _ *httptest.Server) {
+		s.newClient = func(c subsonic.Creds) (*subsonic.Client, error) { return subsonic.New(c, nd.Client()) }
+	})
+	c := r.login(t)
+	_, body := r.post(t, "/api/signin", `{"server":"`+nd.URL+`","user":"typed","password":"KEY"}`, true, c)
+	if !strings.Contains(body, "Signed in as andreas") {
+		t.Fatal(body)
+	}
+	cr, ok := creds.Load(r.dir)
+	if b, _ := os.ReadFile(filepath.Join(r.dir, "credentials")); !ok || cr.APIKey != "KEY" || cr.Password != "" ||
+		cr.User != "andreas" || strings.Contains(string(b), "Password") {
+		t.Fatalf("saved %s", b)
+	}
+}

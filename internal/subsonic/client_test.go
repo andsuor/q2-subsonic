@@ -468,3 +468,83 @@ func TestNotYetValidWhileClockUnknown(t *testing.T) {
 		t.Fatalf("clock known: %v", err)
 	}
 }
+
+// keyServer offers OpenSubsonic API keys: KEY belongs to "andreas"; token auth is refused (42).
+func keyServer(t *testing.T, offer bool, seen *[]url.Values) *httptest.Server {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		*seen = append(*seen, q)
+		w.Header().Set("Content-Type", "application/json")
+		ok := func(extra string) {
+			fmt.Fprintf(w, `{"subsonic-response":{"status":"ok","version":"1.16.1","openSubsonic":true%s}}`, extra)
+		}
+		switch op := path.Base(r.URL.Path); {
+		case op == "getOpenSubsonicExtensions":
+			if offer {
+				ok(`,"openSubsonicExtensions":[{"name":"formPost","versions":[1]},{"name":"apiKeyAuthentication","versions":[1]}]`)
+			} else {
+				ok(`,"openSubsonicExtensions":[]`)
+			}
+		case !offer && q.Get("u") == "u" && q.Get("t") != "":
+			ok("")
+		case !offer:
+			w.Write([]byte(failed(40)))
+		case q.Has("u") && q.Has("apiKey"):
+			w.Write([]byte(failed(43)))
+		case q.Get("apiKey") == "KEY" && op == "tokenInfo":
+			ok(`,"tokenInfo":{"username":"andreas"}`)
+		case q.Get("apiKey") == "KEY":
+			ok("")
+		case q.Has("apiKey"):
+			w.Write([]byte(failed(44)))
+		default:
+			w.Write([]byte(failed(42)))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// I23: a server offering OpenSubsonic API keys is signed in to with a key (typed as the password),
+// and only the key is kept; the user name is the server's. Nothing secret goes to the extensions call.
+func TestSignInAPIKey(t *testing.T) {
+	var seen []url.Values
+	srv := keyServer(t, true, &seen)
+	c, _ := New(Creds{Server: srv.URL, User: "typed", Password: "KEY"}, srv.Client())
+	got, err := c.SignIn(context.Background())
+	if err != nil || got != (Creds{Server: srv.URL, User: "andreas", APIKey: "KEY"}) {
+		t.Fatalf("%+v %v", got, err)
+	}
+	for _, k := range []string{"u", "t", "s", "p", "apiKey"} {
+		if seen[0].Has(k) {
+			t.Fatalf("extensions call sent %s: %v", k, seen[0])
+		}
+	}
+	c, _ = New(got, srv.Client())
+	if err := c.Ping(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if q := seen[len(seen)-1]; q.Get("apiKey") != "KEY" || q.Has("u") || q.Has("t") || q.Has("s") || q.Get("v") != "1.13.0" {
+		t.Fatalf("key request %v", q)
+	}
+	// a password typed where the key goes
+	c, _ = New(Creds{Server: srv.URL, User: "u", Password: "pw"}, srv.Client())
+	if _, err := c.SignIn(context.Background()); Message(err, "h") != "Invalid API key: enter one from your server as the password" {
+		t.Fatalf("password on a key server: %v", err)
+	}
+}
+
+// Without the extension, sign-in is token auth with the password, as before.
+func TestSignInToken(t *testing.T) {
+	var seen []url.Values
+	srv := keyServer(t, false, &seen)
+	c, _ := New(Creds{Server: srv.URL, User: "u", Password: "pw"}, srv.Client())
+	if got, err := c.SignIn(context.Background()); err != nil || got != (Creds{Server: srv.URL, User: "u", Password: "pw"}) {
+		t.Fatalf("%+v %v", got, err)
+	}
+	// a server without getOpenSubsonicExtensions at all (plain Subsonic) signs in the same way
+	_, c = serve(t, "ping.json", nil)
+	if _, err := c.SignIn(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}

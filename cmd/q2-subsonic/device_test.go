@@ -836,3 +836,17 @@ func TestAccountHidesServerPassword(t *testing.T) {
 		}
 	}
 }
+
+// I23: Account says what is on the card: the password, or only an API key.
+func TestAccountSaysKeyOrPassword(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "", true)
+	if _, ok := find(d.do("account"), "Password is stored on this card"); !ok {
+		t.Fatal("password sign-in")
+	}
+	d.signOut()
+	creds.Save(d.dir, subsonic.Creds{Server: "https://music.example", User: "u", APIKey: "k"})
+	r := d.do("account")
+	if _, ok := find(r, "Only an API key is stored on this card"); !ok {
+		t.Fatalf("key sign-in: %q", titles(r))
+	}
+}

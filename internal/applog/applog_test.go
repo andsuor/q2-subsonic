@@ -8,8 +8,8 @@ import (
 )
 
 func TestRedact(t *testing.T) {
-	got := Redact("https://x/rest/ping?u=a&t=abc&s=def&p=enc:1")
-	for _, bad := range []string{"abc", "def", "enc:1"} {
+	got := Redact("https://x/rest/ping?u=a&t=abc&s=def&p=enc:1&apiKey=kkk")
+	for _, bad := range []string{"abc", "def", "enc:1", "kkk"} {
 		if strings.Contains(got, bad) {
 			t.Fatalf("%q leaked in %q", bad, got)
 		}

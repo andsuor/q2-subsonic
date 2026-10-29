@@ -2,6 +2,7 @@
 package subsonic
 
 import (
+	"cmp"
 	"context"
 	"crypto/md5"
 	"crypto/rand"
@@ -23,7 +24,12 @@ import (
 	"github.com/andsuor/q2-subsonic/internal/applog"
 )
 
-type Creds struct{ Server, User, Password string }
+// Creds is a sign-in: a password for token auth, or an OpenSubsonic API key (then Password is empty).
+type Creds struct {
+	Server, User string
+	Password     string `json:",omitempty"`
+	APIKey       string `json:",omitempty"`
+}
 
 type Client struct {
 	c    Creds
@@ -57,16 +63,22 @@ func New(c Creds, hc *http.Client) (*Client, error) {
 	return &Client{c: c, base: u, hc: &h}, nil
 }
 
-// auth returns the query values common to every request: a fresh salt and token each time.
+// auth returns the query values common to every request: the API key, or a token with a fresh salt
+// each time. A client with neither user nor key sends no credentials at all.
 func (c *Client) auth() url.Values {
-	b := make([]byte, 6)
-	rand.Read(b)
-	salt := hex.EncodeToString(b)
-	sum := md5.Sum([]byte(c.c.Password + salt))
 	v := url.Values{}
-	v.Set("u", c.c.User)
-	v.Set("t", hex.EncodeToString(sum[:]))
-	v.Set("s", salt)
+	switch {
+	case c.c.APIKey != "":
+		v.Set("apiKey", c.c.APIKey) // u must not be sent with it (code 43)
+	case c.c.User != "" || c.c.Password != "":
+		b := make([]byte, 6)
+		rand.Read(b)
+		salt := hex.EncodeToString(b)
+		sum := md5.Sum([]byte(c.c.Password + salt))
+		v.Set("u", c.c.User)
+		v.Set("t", hex.EncodeToString(sum[:]))
+		v.Set("s", salt)
+	}
 	v.Set("v", "1.13.0") // token auth's version; a higher one makes Airsonic refuse every request (code 30)
 	v.Set("c", "q2-subsonic")
 	v.Set("f", "json")
@@ -210,6 +222,51 @@ func decode(op string, status int, body []byte, out any) error {
 	}
 	return nil
 }
+
+// SignIn checks the sign-in and returns what to keep on the card. A server offering OpenSubsonic API
+// keys gets one typed in the password field, and only the key is kept, with the user name the server
+// gives for it; any other server gets the password, checked with token auth.
+func (c *Client) SignIn(ctx context.Context) (Creds, error) {
+	if !c.offers(ctx, "apiKeyAuthentication") {
+		return c.c, c.Ping(ctx)
+	}
+	k := *c
+	k.c = Creds{Server: c.c.Server, APIKey: c.c.Password}
+	var r struct {
+		T struct {
+			Username string `json:"username"`
+		} `json:"tokenInfo"`
+	}
+	if err := k.call(ctx, "tokenInfo", nil, &r); err != nil {
+		return Creds{}, err
+	}
+	k.c.User = cmp.Or(r.T.Username, c.c.User)
+	return k.c, nil
+}
+
+// offers reports whether the server lists the OpenSubsonic extension. The call is public, so it
+// carries no credentials; a server without it (plain Subsonic) offers nothing.
+func (c *Client) offers(ctx context.Context, ext string) bool {
+	anon := *c
+	anon.c = Creds{Server: c.c.Server}
+	var r struct {
+		Ext []struct {
+			Name string `json:"name"`
+		} `json:"openSubsonicExtensions"`
+	}
+	if anon.call(ctx, "getOpenSubsonicExtensions", nil, &r) != nil {
+		return false
+	}
+	for _, e := range r.Ext {
+		if e.Name == ext {
+			return true
+		}
+	}
+	return false
+}
+
+// KeyAuth reports whether the client signs in with an API key rather than a password.
+func (c *Client) KeyAuth() bool { return c.c.APIKey != "" }
 
 func (c *Client) Ping(ctx context.Context) error { return c.call(ctx, "ping", nil, nil) }
 

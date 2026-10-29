@@ -36,11 +36,11 @@ func (l *Log) Printf(format string, args ...any) {
 }
 
 var (
-	secret   = regexp.MustCompile(`(?i)([?&](?:p|t|s|password)=)[^&\s"]*`)
+	secret   = regexp.MustCompile(`(?i)([?&](?:p|t|s|password|apikey)=)[^&\s"]*`)
 	userinfo = regexp.MustCompile(`(://[^/@\s":]*:)[^/\s"]*@`)
 )
 
-// Redact replaces the values of the query parameters p, t, s and password, and the password in a
+// Redact replaces the values of the query parameters p, t, s, password and apiKey, and the password in a
 // URL's user:password@, with ***.
 func Redact(s string) string {
 	return userinfo.ReplaceAllString(secret.ReplaceAllString(s, "${1}***"), "${1}***@")
