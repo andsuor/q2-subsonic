@@ -6,10 +6,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path"
 	"regexp"
 	"strings"
 	"testing"
@@ -293,5 +295,53 @@ func TestCodeCopy(t *testing.T) {
 				t.Errorf("code %d kind: %v", code, err)
 			}
 		}
+	}
+}
+
+// I8: a 200 answer that is a Subsonic error is an error, never saved as a song or a cover.
+func TestGetRefusesErrorBody(t *testing.T) {
+	ctx := context.Background()
+	c := serveJSON(t, failed(40))
+	for _, u := range []string{c.MediaURL("s1", "original"), c.MediaURL("s1", "mp3-320"), c.CoverURL("c1")} {
+		if resp, err := c.Get(ctx, u, 0); resp != nil || !errors.Is(err, ErrAuth) {
+			t.Fatalf("%s: %v %v", u, resp, err)
+		}
+	}
+	c = serveJSON(t, failed(70))
+	resp, err := c.Get(ctx, c.MediaURL("s1", "mp3-128"), 0)
+	var ae *APIError
+	if resp != nil || !errors.As(err, &ae) || ae.Code != 70 || ae.Op != "stream" {
+		t.Fatalf("code 70: %v %v", resp, err)
+	}
+	c = serveJSON(t, `{"subsonic-response":{"status":"ok"}}`) // not an error, but not the file either
+	if resp, err := c.Get(ctx, c.CoverURL("c1"), 0); resp != nil || err == nil {
+		t.Fatalf("ok envelope as a cover: %v %v", resp, err)
+	}
+}
+
+// M27: an original is fetched with stream?format=raw when the server refuses downloads (code 50).
+func TestOriginalFallsBackToStreamRaw(t *testing.T) {
+	var got url.Values
+	var rng string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if path.Base(r.URL.Path) == "download" {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(failed(50)))
+			return
+		}
+		got, rng = r.URL.Query(), r.Header.Get("Range")
+		w.Header().Set("Content-Type", "audio/flac")
+		w.Write([]byte("AUDIO"))
+	}))
+	defer srv.Close()
+	c, _ := New(Creds{Server: srv.URL, User: "u", Password: "pw"}, srv.Client())
+	resp, err := c.Get(context.Background(), c.MediaURL("s1", "original"), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(b) != "AUDIO" || got.Get("id") != "s1" || got.Get("format") != "raw" || got.Has("maxBitRate") || rng != "bytes=100-" {
+		t.Fatalf("body %q query %v range %q", b, got, rng)
 	}
 }

@@ -10,8 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 
@@ -83,65 +85,71 @@ func (c *Client) logf(format string, a ...any) {
 	}
 }
 
-// call performs one API request and returns the inner subsonic-response object.
-func (c *Client) call(ctx context.Context, op string, q url.Values) (json.RawMessage, error) {
-	u := c.endpoint(op, q)
+// do sends one GET for u, from byte from when from > 0, and logs it redacted.
+func (c *Client) do(ctx context.Context, op, u string, from int64) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
 	if err != nil {
 		return nil, &APIError{Op: op, Msg: applog.Redact(err.Error()), kind: ErrUnreachable}
+	}
+	if from > 0 {
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", from))
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
 		c.logf("GET %s -> %v", u, err)
 		return nil, &APIError{Op: op, Msg: applog.Redact(err.Error()), kind: transportKind(err)}
 	}
-	defer resp.Body.Close()
 	c.logf("GET %s -> %d", u, resp.StatusCode)
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
-	if err != nil {
-		return nil, &APIError{Op: op, HTTP: resp.StatusCode, Msg: applog.Redact(err.Error()), kind: ErrUnreachable}
-	}
-	var env struct {
-		R json.RawMessage `json:"subsonic-response"`
-	}
-	if json.Unmarshal(body, &env) != nil || env.R == nil {
-		if resp.StatusCode < 200 || resp.StatusCode > 299 {
-			return nil, &APIError{Op: op, HTTP: resp.StatusCode, Msg: http.StatusText(resp.StatusCode), kind: ErrUnreachable}
-		}
-		return nil, &APIError{Op: op, HTTP: resp.StatusCode, Msg: "not a Subsonic response", kind: ErrNotSubsonic}
-	}
-	var st struct {
-		Status string `json:"status"`
-		Error  struct {
-			Code    int    `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}
-	if json.Unmarshal(env.R, &st) != nil {
-		return nil, &APIError{Op: op, HTTP: resp.StatusCode, Msg: "bad response", kind: ErrNotSubsonic}
-	}
-	if st.Status != "ok" {
-		return nil, &APIError{Op: op, HTTP: resp.StatusCode, Code: st.Error.Code, Msg: st.Error.Message, kind: codeKind(st.Error.Code)}
-	}
-	return env.R, nil
+	return resp, nil
 }
 
-// get calls op and decodes the response object into out.
-func (c *Client) get(ctx context.Context, op string, q url.Values, out any) error {
-	raw, err := c.call(ctx, op, q)
+// call performs one API request and decodes the subsonic-response object into out (when not nil).
+func (c *Client) call(ctx context.Context, op string, q url.Values, out any) error {
+	resp, err := c.do(ctx, op, c.endpoint(op, q), 0)
 	if err != nil {
 		return err
 	}
-	if err := json.Unmarshal(raw, out); err != nil {
-		return &APIError{Op: op, Msg: err.Error(), kind: ErrNotSubsonic}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	if err != nil {
+		return &APIError{Op: op, HTTP: resp.StatusCode, Msg: applog.Redact(err.Error()), kind: ErrUnreachable}
+	}
+	return decode(op, resp.StatusCode, body, out)
+}
+
+// decode reads a subsonic-response: an *APIError for a failed status or a body that isn't one,
+// else nil with out (when not nil) filled. The body is decoded in place, never copied.
+func decode(op string, status int, body []byte, out any) error {
+	var env struct {
+		R *struct {
+			Status string `json:"status"`
+			Error  struct {
+				Code    int    `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		} `json:"subsonic-response"`
+	}
+	if json.Unmarshal(body, &env) != nil || env.R == nil {
+		if status < 200 || status > 299 {
+			return &APIError{Op: op, HTTP: status, Msg: http.StatusText(status), kind: ErrUnreachable}
+		}
+		return &APIError{Op: op, HTTP: status, Msg: "not a Subsonic response", kind: ErrNotSubsonic}
+	}
+	if e := env.R.Error; env.R.Status != "ok" {
+		return &APIError{Op: op, HTTP: status, Code: e.Code, Msg: e.Message, kind: codeKind(e.Code)}
+	}
+	if out != nil {
+		// An interface holding a pointer decodes into what it points at.
+		if err := json.Unmarshal(body, &struct {
+			R any `json:"subsonic-response"`
+		}{out}); err != nil {
+			return &APIError{Op: op, Msg: err.Error(), kind: ErrNotSubsonic}
+		}
 	}
 	return nil
 }
 
-func (c *Client) Ping(ctx context.Context) error {
-	_, err := c.call(ctx, "ping", nil)
-	return err
-}
+func (c *Client) Ping(ctx context.Context) error { return c.call(ctx, "ping", nil, nil) }
 
 func (c *Client) Playlists(ctx context.Context) ([]Playlist, error) {
 	var r struct {
@@ -153,7 +161,7 @@ func (c *Client) Playlists(ctx context.Context) ([]Playlist, error) {
 			} `json:"playlist"`
 		} `json:"playlists"`
 	}
-	if err := c.get(ctx, "getPlaylists", nil, &r); err != nil {
+	if err := c.call(ctx, "getPlaylists", nil, &r); err != nil {
 		return nil, err
 	}
 	out := make([]Playlist, len(r.Playlists.Playlist))
@@ -173,7 +181,7 @@ func (c *Client) Playlist(ctx context.Context, id string) (Playlist, []Song, err
 			Entry     []wireSong `json:"entry"`
 		} `json:"playlist"`
 	}
-	if err := c.get(ctx, "getPlaylist", url.Values{"id": {id}}, &r); err != nil {
+	if err := c.call(ctx, "getPlaylist", url.Values{"id": {id}}, &r); err != nil {
 		return Playlist{}, nil, err
 	}
 	p := r.Playlist
@@ -187,7 +195,7 @@ func (c *Client) Albums(ctx context.Context, offset, size int) ([]Album, error) 
 		} `json:"albumList2"`
 	}
 	q := url.Values{"type": {"alphabeticalByName"}, "offset": {strconv.Itoa(offset)}, "size": {strconv.Itoa(size)}}
-	if err := c.get(ctx, "getAlbumList2", q, &r); err != nil {
+	if err := c.call(ctx, "getAlbumList2", q, &r); err != nil {
 		return nil, err
 	}
 	return albums(r.L.Album), nil
@@ -200,7 +208,7 @@ func (c *Client) Album(ctx context.Context, id string) (Album, []Song, error) {
 			Song []wireSong `json:"song"`
 		} `json:"album"`
 	}
-	if err := c.get(ctx, "getAlbum", url.Values{"id": {id}}, &r); err != nil {
+	if err := c.call(ctx, "getAlbum", url.Values{"id": {id}}, &r); err != nil {
 		return Album{}, nil, err
 	}
 	return r.Album.album(), songs(r.Album.Song), nil
@@ -214,7 +222,7 @@ func (c *Client) Artists(ctx context.Context) ([]Artist, error) {
 			} `json:"index"`
 		} `json:"artists"`
 	}
-	if err := c.get(ctx, "getArtists", nil, &r); err != nil {
+	if err := c.call(ctx, "getArtists", nil, &r); err != nil {
 		return nil, err
 	}
 	var out []Artist
@@ -231,7 +239,7 @@ func (c *Client) Artist(ctx context.Context, id string) (Artist, []Album, error)
 			Album []wireAlbum `json:"album"`
 		} `json:"artist"`
 	}
-	if err := c.get(ctx, "getArtist", url.Values{"id": {id}}, &r); err != nil {
+	if err := c.call(ctx, "getArtist", url.Values{"id": {id}}, &r); err != nil {
 		return Artist{}, nil, err
 	}
 	return Artist(r.Artist.wireArtist), albums(r.Artist.Album), nil
@@ -252,7 +260,7 @@ func (c *Client) Search(ctx context.Context, q string, offset int) ([]Artist, []
 		v.Set(k+"Count", "50")
 		v.Set(k+"Offset", o)
 	}
-	if err := c.get(ctx, "search3", v, &r); err != nil {
+	if err := c.call(ctx, "search3", v, &r); err != nil {
 		return nil, nil, nil, err
 	}
 	return artists(r.R.Artist), albums(r.R.Album), songs(r.R.Song), nil
@@ -262,7 +270,7 @@ func (c *Client) Song(ctx context.Context, id string) (Song, error) {
 	var r struct {
 		Song wireSong `json:"song"`
 	}
-	if err := c.get(ctx, "getSong", url.Values{"id": {id}}, &r); err != nil {
+	if err := c.call(ctx, "getSong", url.Values{"id": {id}}, &r); err != nil {
 		return Song{}, err
 	}
 	return r.Song.song(), nil
@@ -285,26 +293,37 @@ func (c *Client) CoverURL(id string) string {
 	return c.endpoint("getCoverArt", url.Values{"id": {id}})
 }
 
-// Get fetches u, resuming at byte from when from > 0. The caller closes the body.
+// Get fetches u, resuming at byte from when from > 0. The caller closes the body. A Subsonic error
+// sent as the body (servers answer 200 with one) is returned as an error, so it is never saved as
+// a song or a cover. An original the server won't let this user download (code 50) is fetched with
+// stream?format=raw instead, which serves the same file untouched.
 func (c *Client) Get(ctx context.Context, u string, from int64) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+	op, id := "get", ""
+	if pu, err := url.Parse(u); err == nil && pu.Path != "" {
+		op, id = path.Base(pu.Path), pu.Query().Get("id")
+	}
+	resp, err := c.do(ctx, op, u, from)
 	if err != nil {
-		return nil, &APIError{Op: "get", Msg: applog.Redact(err.Error()), kind: ErrUnreachable}
+		return nil, err
 	}
-	if from > 0 {
-		req.Header.Set("Range", fmt.Sprintf("bytes=%d-", from))
-	}
-	resp, err := c.hc.Do(req)
-	if err != nil {
-		c.logf("GET %s -> %v", u, err)
-		return nil, &APIError{Op: "get", Msg: applog.Redact(err.Error()), kind: transportKind(err)}
-	}
-	c.logf("GET %s -> %d", u, resp.StatusCode)
 	if resp.StatusCode != 200 && resp.StatusCode != 206 {
 		resp.Body.Close()
-		return nil, &APIError{Op: "get", HTTP: resp.StatusCode, Msg: http.StatusText(resp.StatusCode), kind: ErrUnreachable}
+		return nil, &APIError{Op: op, HTTP: resp.StatusCode, Msg: http.StatusText(resp.StatusCode), kind: ErrUnreachable}
 	}
-	return resp, nil
+	if mt, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type")); mt != "application/json" && !strings.HasSuffix(mt, "/xml") {
+		return resp, nil
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	resp.Body.Close()
+	err = decode(op, resp.StatusCode, body, nil)
+	var ae *APIError
+	if !errors.As(err, &ae) || ae.Code == 0 {
+		return nil, &APIError{Op: op, HTTP: resp.StatusCode, Msg: "The server sent an error instead of the file"}
+	}
+	if ae.Code == 50 && op == "download" {
+		return c.Get(ctx, c.endpoint("stream", url.Values{"id": {id}, "format": {"raw"}}), from)
+	}
+	return nil, err
 }
 
 func transportKind(err error) error {
