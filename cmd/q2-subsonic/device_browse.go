@@ -338,15 +338,19 @@ func (d *daemon) search(ctx context.Context, cl *subsonic.Client, term, cursor s
 	return page(rows, cursor)
 }
 
-// getAlbum is cl.Album with each song's album artist taken from the album where the server sent
-// none (no OpenSubsonic displayAlbumArtist, so the song's own artist stood in): a compilation stays
-// one folder, not one per track artist (M41).
+// getAlbum is cl.Album, with the album's artist for every song when its songs disagree on their
+// album artist: a server without OpenSubsonic's displayAlbumArtist gives each song its own artist,
+// so a compilation stays one folder, not one per track artist (M41). Songs that agree (a server's
+// displayAlbumArtist, or one artist's album) keep theirs.
 // ponytail: here, not in subsonic.Client.Album, which another change owns; move it there later.
 func getAlbum(ctx context.Context, cl *subsonic.Client, id string) (subsonic.Album, []subsonic.Song, error) {
 	a, songs, err := cl.Album(ctx, id)
-	for i, s := range songs {
-		if a.Artist != "" && s.AlbumArtist == s.Artist {
-			songs[i].AlbumArtist = a.Artist
+	for _, s := range songs {
+		if a.Artist != "" && s.AlbumArtist != songs[0].AlbumArtist {
+			for i := range songs {
+				songs[i].AlbumArtist = a.Artist
+			}
+			break
 		}
 	}
 	return a, songs, err

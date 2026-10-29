@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -28,6 +29,7 @@ import (
 // nav is a Navidrome stand-in: albums al0..alN-1 ("Album 000"…) by "Artist", each with songsPer
 // songs al<i>.<j>; playlist pl1 "Mix" holds al0's songs; artist ar1 has al0 and al1.
 type nav struct {
+	albumArtist      string // the albums' own artist, when not "Artist"
 	albums, songsPer int
 	stall            bool          // every request hangs until the client gives up
 	errCode          int           // every API call fails with this Subsonic code
@@ -58,7 +60,7 @@ func (n *nav) song(al, j int) map[string]any {
 }
 
 func (n *nav) album(i int) map[string]any {
-	artist := "Artist"
+	artist := cmp.Or(n.albumArtist, "Artist")
 	if n.various {
 		artist = "Various Artists"
 	}
@@ -963,12 +965,15 @@ func TestItemsRecordedWithoutTransfer(t *testing.T) {
 	}
 }
 
-// A sync stopped because downloads are turned off for the account says so (R39).
+// A sync stopped because the server refused the account (downloads turned off, R39) says why, in
+// subsonic.Message's words, the one place that copy lives (review G1, Minor 5).
 func TestPausedRefusedSaysWhy(t *testing.T) {
 	d := newTestDaemon(t, &nav{}, "", true)
-	err := fmt.Errorf("%w: %w", syncer.ErrRefused, &subsonic.APIError{Op: "get", HTTP: 200, Code: 50, Msg: "User not authorized"})
-	if _, ok := find(d.syncRows(syncer.Snapshot{State: "paused", Err: err}), "Downloads are turned off for this account on the server"); !ok {
-		t.Error(titles(d.syncRows(syncer.Snapshot{State: "paused", Err: err})))
+	d.client()
+	err := fmt.Errorf("%w: %w", syncer.ErrRefused, &subsonic.APIError{Op: "download", HTTP: 200, Code: 50, Msg: "User not authorized"})
+	want := subsonic.Message(err, d.hostName())
+	if r := d.syncRows(syncer.Snapshot{State: "paused", Err: err}); !strings.Contains(strings.Join(titles(r), "|"), "|"+want+"|Resume") {
+		t.Errorf("want %q: %q", want, titles(r))
 	}
 }
 
