@@ -69,6 +69,7 @@ type signin struct {
 	ok       bool
 	msg      string
 	failed   string            // the last phone sign-in's failure, still shown after a restart until the next try
+	conns    chan struct{}     // one slot per open connection (capListener)
 	shown    map[string]string // the QR page's keys as start wrote them
 }
 
@@ -108,7 +109,8 @@ func (s *signin) start(port int) {
 	// connections, so none can pin the Q2's memory or file descriptors.
 	s.srv = &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 15 * time.Second,
 		IdleTimeout: 30 * time.Second, MaxHeaderBytes: 8 << 10}
-	go s.srv.Serve(capListener{ln, make(chan struct{}, signinConns)})
+	s.conns = make(chan struct{}, signinConns)
+	go s.srv.Serve(capListener{ln, s.conns})
 	go s.watch(s.done)
 
 	kv := map[string]string{"pin": s.pin, "note": "Scan with your phone"}
@@ -306,7 +308,7 @@ func (s *signin) signin(w http.ResponseWriter, r *http.Request) {
 		}
 		reply(w, http.StatusOK, map[string]any{"ok": ok, "message": msg})
 	}
-	host := c.Server
+	host := "the server" // never the raw address, which may hold a user:password@
 	if u, err := url.Parse(c.Server); err == nil && u.Host != "" {
 		host = u.Host
 	}

@@ -2,6 +2,8 @@
 package subsonic
 
 import (
+	"bufio"
+	"bytes"
 	"cmp"
 	"context"
 	"crypto/md5"
@@ -463,10 +465,16 @@ func (c *Client) Get(ctx context.Context, u string, from int64) (*http.Response,
 		resp.Body.Close()
 		return nil, &APIError{Op: op, HTTP: resp.StatusCode, Msg: http.StatusText(resp.StatusCode), kind: ErrUnreachable}
 	}
-	if mt, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type")); mt != "application/json" && !strings.HasSuffix(mt, "/xml") {
+	// An envelope is known by its type, or by its first bytes when a proxy dropped or changed that.
+	br := bufio.NewReaderSize(resp.Body, 512)
+	if mt, _, _ := mime.ParseMediaType(resp.Header.Get("Content-Type")); mt != "application/json" && !strings.HasSuffix(mt, "/xml") && !envelope(br) {
+		resp.Body = struct {
+			io.Reader
+			io.Closer
+		}{br, resp.Body}
 		return resp, nil
 	}
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	body, _ := io.ReadAll(io.LimitReader(br, 64<<10))
 	resp.Body.Close()
 	err = decode(op, resp.StatusCode, body, nil)
 	var ae *APIError
@@ -474,6 +482,13 @@ func (c *Client) Get(ctx context.Context, u string, from int64) (*http.Response,
 		return nil, &APIError{Op: op, HTTP: resp.StatusCode, Msg: "The server sent an error instead of the file"}
 	}
 	return nil, err
+}
+
+// envelope reports whether the body starts as a subsonic-response (JSON or XML), not as media.
+func envelope(br *bufio.Reader) bool {
+	head, _ := br.Peek(128)
+	t := bytes.TrimLeft(head, " \t\r\n")
+	return len(t) > 0 && (t[0] == '{' || t[0] == '<') && bytes.Contains(head, []byte("subsonic-response"))
 }
 
 func transportKind(err error) error {

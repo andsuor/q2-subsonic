@@ -420,8 +420,8 @@ func TestSigninServerLimits(t *testing.T) {
 	}
 	req, _ := http.NewRequest("GET", r.base+"/", nil)
 	req.Header.Set("X-Big", strings.Repeat("a", 64<<10))
-	if resp, err := noRedirect().Do(req); err == nil && resp.StatusCode != http.StatusRequestHeaderFieldsTooLarge {
-		t.Fatalf("64 KiB header: %d", resp.StatusCode)
+	if resp, err := noRedirect().Do(req); err != nil || resp.StatusCode != http.StatusRequestHeaderFieldsTooLarge {
+		t.Fatalf("64 KiB header: %v %v", resp, err)
 	}
 	var held []net.Conn
 	defer func() {
@@ -436,7 +436,10 @@ func TestSigninServerLimits(t *testing.T) {
 		}
 		held = append(held, c)
 	}
-	time.Sleep(50 * time.Millisecond) // let the server accept them
+	r.s.mu.Lock()
+	conns := r.s.conns
+	r.s.mu.Unlock()
+	eventually(t, "the server to take the 16", func() bool { return len(conns) == signinConns })
 	extra, err := net.Dial("tcp", r.addr)
 	if err != nil {
 		t.Fatal(err)
@@ -450,8 +453,19 @@ func TestSigninServerLimits(t *testing.T) {
 		c.Close()
 	}
 	held = nil
-	time.Sleep(50 * time.Millisecond)
+	eventually(t, "the server to let them go", func() bool { return len(conns) == 0 })
 	if resp, err := noRedirect().Get(r.base + "/"); err != nil || resp.StatusCode != 401 {
 		t.Fatalf("after the held ones closed: %v %v", resp, err)
+	}
+}
+
+// Review G2 Minor 1: a server address that doesn't parse is never echoed (it may hold a password),
+// neither to the phone nor to the Q2's QR page.
+func TestSigninBadAddressNotEchoed(t *testing.T) {
+	r := newRig(t)
+	_, body := r.post(t, "/api/signin", `{"server":"https://alice:my pass@host.example","user":"u","password":"pw"}`, true, r.login(t))
+	st, _ := os.ReadFile(filepath.Join(r.dir, "state"))
+	if strings.Contains(body, "my pass") || strings.Contains(string(st), "my pass") || !strings.Contains(body, "the server") {
+		t.Fatalf("phone %s\nstate %s", body, st)
 	}
 }

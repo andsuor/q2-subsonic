@@ -279,21 +279,34 @@ func failed(code int) string {
 	return fmt.Sprintf(`{"subsonic-response":{"status":"failed","version":"1.15.0","error":{"code":%d,"message":"m"}}}`, code)
 }
 
-// I22/I23: version and sign-in method errors get their own words; 41 is not "wrong password".
+// I22/I23: version and sign-in method errors get their own words; 41-43 are not "wrong password",
+// 40 and 44 are (ErrAuth).
 func TestCodeCopy(t *testing.T) {
 	for code, want := range map[int]string{
 		20: "The server needs a newer version of this app",
 		30: "The server's Subsonic API is too old for this app",
+		40: "Wrong username or password",
 		41: "This server doesn't allow token sign-in for this user",
 		42: "This server doesn't accept this sign-in method",
+		43: "This server doesn't accept this sign-in method",
 		44: "Invalid API key: create one in your server's settings",
 	} {
 		err := serveJSON(t, failed(code)).Ping(context.Background())
 		if m := Message(err, "h"); m != want {
 			t.Errorf("code %d: %q, want %q", code, m, want)
 		}
-		if code == 41 || code == 42 {
-			if errors.Is(err, ErrAuth) || !errors.Is(err, ErrAuthMethod) {
+		auth, method := errors.Is(err, ErrAuth), errors.Is(err, ErrAuthMethod)
+		switch code {
+		case 40, 44:
+			if !auth || method {
+				t.Errorf("code %d kind: %v", code, err)
+			}
+		case 41, 42, 43:
+			if auth || !method {
+				t.Errorf("code %d kind: %v", code, err)
+			}
+		default:
+			if auth || method {
 				t.Errorf("code %d kind: %v", code, err)
 			}
 		}
@@ -616,5 +629,34 @@ func TestSignInExtensionsUnreachable(t *testing.T) {
 	c, _ := New(Creds{Server: srv.URL, User: "u", Password: "KEY"}, srv.Client())
 	if _, err := c.SignIn(context.Background()); errors.Is(err, ErrAuth) || !errors.Is(err, ErrUnreachable) {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// Review G2 Minor 2: an error envelope with a missing or wrong Content-Type (a proxy) is still caught
+// by its first bytes; real media passes untouched.
+func TestGetSniffsErrorBody(t *testing.T) {
+	var body string
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.Write([]byte(body))
+	}))
+	defer srv.Close()
+	c, _ := New(Creds{Server: srv.URL, User: "u", Password: "pw"}, srv.Client())
+	for _, b := range []string{"\n " + failed(70),
+		`<?xml version="1.0" encoding="UTF-8"?><subsonic-response xmlns="http://subsonic.org/restapi" status="failed"><error code="70"/></subsonic-response>`} {
+		body = b
+		if resp, err := c.Get(context.Background(), c.MediaURL("s1", "mp3-320"), 0); resp != nil || err == nil {
+			t.Fatalf("%q: %v %v", b, resp, err)
+		}
+	}
+	body = "fLaC" + strings.Repeat("\x00", 200)
+	resp, err := c.Get(context.Background(), c.MediaURL("s1", "original"), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(got) != body {
+		t.Fatalf("media changed: %d bytes", len(got))
 	}
 }
