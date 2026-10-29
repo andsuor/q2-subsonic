@@ -73,6 +73,10 @@ func Compute(sel selection.Set, resolved map[string][]subsonic.Song, playlistNam
 			if s.Disc > 1 {
 				multi[s.AlbumID] = true
 			}
+			q := q
+			if q == "original" && !library.SafeSuffix(s.Suffix) {
+				q = "mp3-320" // no usable extension: a transcode is truly an .mp3 (as the streamer does)
+			}
 			w := wants[s.ID]
 			if w == nil {
 				w = &Want{Song: s, Quality: q}

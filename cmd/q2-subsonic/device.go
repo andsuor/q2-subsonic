@@ -94,6 +94,16 @@ func parseKey(arg string) (selection.Kind, string) {
 }
 
 func (d *daemon) device(req q2spot.Request) q2spot.Reply {
+	r := d.reply(req)
+	// F-R8: the firmware auto-pages a list only when its Message is "pages" and it has a cursor;
+	// otherwise it shows a More… row. Refresh levels keep "refresh" and never page.
+	if r.Cursor != "" && r.Message == "" {
+		r.Message = "pages"
+	}
+	return r
+}
+
+func (d *daemon) reply(req q2spot.Request) q2spot.Reply {
 	d.mu.Lock()
 	d.lastReq = time.Now()
 	d.mu.Unlock()

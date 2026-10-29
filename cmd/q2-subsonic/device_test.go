@@ -328,9 +328,17 @@ func TestPagingMore(t *testing.T) {
 	if len(r.Rows) != 50 || r.Rows[0].Title != "Album 050" || r.Cursor == "" {
 		t.Fatalf("second page: %d rows from %q, cursor %q", len(r.Rows), r.Rows[0].Title, r.Cursor)
 	}
+	if r.Message != "pages" {
+		t.Errorf("paged reply Message %q, want pages (F-R8: the firmware auto-pages it)", r.Message)
+	}
 	r = d.do("albums", r.Cursor)
-	if len(r.Rows) != 20 || r.Cursor != "" {
-		t.Fatalf("last page: %d rows, cursor %q", len(r.Rows), r.Cursor)
+	if len(r.Rows) != 20 || r.Cursor != "" || r.Message != "" {
+		t.Fatalf("last page: %d rows, cursor %q, message %q", len(r.Rows), r.Cursor, r.Message)
+	}
+	for _, op := range [][]string{{"artists"}, {"search", "Album"}, {"artist", "ar0"}} {
+		if r := d.do(op[0], op[1:]...); r.Cursor != "" && r.Message != "pages" {
+			t.Errorf("%v: cursor %q with Message %q", op, r.Cursor, r.Message)
+		}
 	}
 }
 

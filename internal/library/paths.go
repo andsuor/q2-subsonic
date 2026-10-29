@@ -38,14 +38,17 @@ func SafeName(s string) string {
 	return s
 }
 
-// safeExt is a server-supplied suffix that can only be an extension: 1-5 of [a-z0-9]. Anything
-// else (e.g. "x/../../.subsonic/q2-subsonic") falls back to "mp3", so a hostile server can't steer
-// the path; the Q2 sniffs the format from the content anyway.
+// safeExt: a server-supplied suffix is used only if it can only be an extension, 1-5 of [a-z0-9].
+// Anything else (e.g. "x/../../.subsonic/q2-subsonic") can't steer the path.
 var safeExt = regexp.MustCompile(`^[a-z0-9]{1,5}$`)
 
+// SafeSuffix reports whether a song's suffix can name its original file. The plan fetches a song
+// without one as mp3-320, so the "mp3" ext() falls back to is true.
+func SafeSuffix(suffix string) bool { return safeExt.MatchString(strings.ToLower(suffix)) }
+
 func ext(s subsonic.Song, quality string) string {
-	if e := strings.ToLower(s.Suffix); quality == "original" && safeExt.MatchString(e) {
-		return e
+	if quality == "original" && SafeSuffix(s.Suffix) {
+		return strings.ToLower(s.Suffix)
 	}
 	return "mp3"
 }

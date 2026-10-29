@@ -141,3 +141,22 @@ func TestPlanCollisionGetsID(t *testing.T) {
 		}
 	}
 }
+
+// An original whose suffix is empty or unsafe is fetched as mp3-320, so the .mp3 it is saved as
+// really holds MP3 (never FLAC/OGG bytes under a .mp3 name).
+func TestPlanUnsafeSuffixTranscodes(t *testing.T) {
+	ok, empty, bad := song("s1", "One"), song("s2", "Two"), song("s3", "Three")
+	empty.Suffix, bad.Suffix = "", "dsdiff"
+	sel := selection.Set{Items: []selection.Item{item("album", "a1", "original")}}
+	p := Compute(sel, map[string][]subsonic.Song{"album:a1": {ok, empty, bad}}, nil, manifest(), root, big)
+	got := map[string]string{}
+	for _, w := range p.Add {
+		got[w.Song.ID] = w.Quality
+		if w.Path != library.SongPath(root, w.Song, w.Quality, false) {
+			t.Errorf("%s: path %s", w.Song.ID, w.Path)
+		}
+	}
+	if want := map[string]string{"s1": "original", "s2": "mp3-320", "s3": "mp3-320"}; !reflect.DeepEqual(got, want) {
+		t.Fatal(got)
+	}
+}

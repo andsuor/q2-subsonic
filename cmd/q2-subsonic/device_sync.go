@@ -448,14 +448,18 @@ func (d *daemon) resolveLibrary(ctx context.Context, cl *subsonic.Client, sem ch
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var first error
+	// The slot is taken before the goroutine starts: fetches run in order, a failure stops the
+	// rest at once, and a large library never parks thousands of goroutines on the semaphore.
 	run := func(f func() error) {
+		release := slot()
+		if ctx.Err() != nil {
+			release()
+			return
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			defer slot()()
-			if ctx.Err() != nil {
-				return
-			}
+			defer release()
 			if e := f(); e != nil {
 				mu.Lock()
 				first = cmp.Or(first, e)
