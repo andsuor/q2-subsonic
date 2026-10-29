@@ -493,7 +493,7 @@ func (d *daemon) resolveLibrary(ctx context.Context, cl *subsonic.Client, sem ch
 		}()
 	}
 	for i, a := range albums {
-		run(func() (err error) { _, albumSongs[i], err = cl.Album(ctx, a.ID); return })
+		run(func() (err error) { _, albumSongs[i], err = getAlbum(ctx, cl, a.ID); return })
 	}
 	for i, p := range pls {
 		run(func() (err error) {

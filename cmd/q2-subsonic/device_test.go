@@ -36,16 +36,25 @@ type nav struct {
 	playlists        int           // playlists pl1..plN ("Mix", "Mix 2"…); 0 means 1. pl<k> holds al<k-1>'s songs
 	empty            bool          // every list reply is empty
 	lastRange        atomic.Value  // the Range header of the latest download, a string
+	various          bool          // albums are compilations: album artist "Various Artists", song j by "Artist j"
 }
 
 func (n *nav) song(al, j int) map[string]any {
+	artist := "Artist"
+	if n.various {
+		artist = fmt.Sprintf("Artist %d", j)
+	}
 	return map[string]any{"id": fmt.Sprintf("al%d.%d", al, j), "title": fmt.Sprintf("Song %d", j), "album": fmt.Sprintf("Album %03d", al),
-		"albumId": fmt.Sprintf("al%d", al), "artist": "Artist", "year": 2020, "discNumber": 1, "track": j + 1,
+		"albumId": fmt.Sprintf("al%d", al), "artist": artist, "year": 2020, "discNumber": 1, "track": j + 1,
 		"duration": 100, "size": 1000, "suffix": "flac"}
 }
 
 func (n *nav) album(i int) map[string]any {
-	return map[string]any{"id": fmt.Sprintf("al%d", i), "name": fmt.Sprintf("Album %03d", i), "artist": "Artist", "year": 2020, "songCount": n.songsPer}
+	artist := "Artist"
+	if n.various {
+		artist = "Various Artists"
+	}
+	return map[string]any{"id": fmt.Sprintf("al%d", i), "name": fmt.Sprintf("Album %03d", i), "artist": artist, "year": 2020, "songCount": n.songsPer}
 }
 
 func (n *nav) playlist(k int) map[string]any {
@@ -892,5 +901,24 @@ func TestPausedRefusedSaysWhy(t *testing.T) {
 	err := fmt.Errorf("%w: %w", syncer.ErrRefused, &subsonic.APIError{Op: "get", HTTP: 200, Code: 50, Msg: "User not authorized"})
 	if _, ok := find(d.syncRows(syncer.Snapshot{State: "paused", Err: err}), "Downloads are turned off for this account on the server"); !ok {
 		t.Error(titles(d.syncRows(syncer.Snapshot{State: "paused", Err: err})))
+	}
+}
+
+// On a server without OpenSubsonic's displayAlbumArtist, a compilation's songs take the album's
+// artist, so it syncs as one folder, not one per track artist (M41).
+func TestCompilationOneFolder(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 3, various: true}, "", true)
+	d.do("toggle", "album:al0")
+	d.preview(t)
+	d.mu.Lock()
+	p := d.daemon.preview.plan
+	d.mu.Unlock()
+	if len(p.Add) != 3 {
+		t.Fatalf("%+v", p)
+	}
+	for _, w := range p.Add {
+		if !strings.HasPrefix(w.Path, filepath.Join(d.card, "Subsonic", "Various Artists")+"/") {
+			t.Errorf("%s", w.Path)
+		}
 	}
 }

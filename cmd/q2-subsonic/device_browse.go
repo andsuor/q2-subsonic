@@ -177,7 +177,7 @@ func (d *daemon) itemPage(ctx context.Context, cl *subsonic.Client, arg, cursor 
 	var err error
 	switch kind {
 	case selection.KindAlbum:
-		_, songs, err = cl.Album(ctx, id)
+		_, songs, err = getAlbum(ctx, cl, id)
 	case selection.KindPlaylist:
 		_, songs, err = cl.Playlist(ctx, id)
 	case selection.KindArtist:
@@ -241,6 +241,20 @@ func (d *daemon) search(ctx context.Context, cl *subsonic.Client, term, cursor s
 	return page(rows, cursor)
 }
 
+// getAlbum is cl.Album with each song's album artist taken from the album where the server sent
+// none (no OpenSubsonic displayAlbumArtist, so the song's own artist stood in): a compilation stays
+// one folder, not one per track artist (M41).
+// ponytail: here, not in subsonic.Client.Album, which another change owns; move it there later.
+func getAlbum(ctx context.Context, cl *subsonic.Client, id string) (subsonic.Album, []subsonic.Song, error) {
+	a, songs, err := cl.Album(ctx, id)
+	for i, s := range songs {
+		if a.Artist != "" && s.AlbumArtist == s.Artist {
+			songs[i].AlbumArtist = a.Artist
+		}
+	}
+	return a, songs, err
+}
+
 // songsOf fetches a selected item's songs (an artist's: every album's), and keeps them for the
 // status subtitles.
 func (d *daemon) songsOf(ctx context.Context, cl *subsonic.Client, kind selection.Kind, id string) ([]subsonic.Song, string, error) {
@@ -254,7 +268,7 @@ func (d *daemon) songsOf(ctx context.Context, cl *subsonic.Client, kind selectio
 		}
 		songs, name = s, p.Name
 	case selection.KindAlbum:
-		a, s, err := cl.Album(ctx, id)
+		a, s, err := getAlbum(ctx, cl, id)
 		if err != nil {
 			return nil, "", err
 		}
@@ -266,7 +280,7 @@ func (d *daemon) songsOf(ctx context.Context, cl *subsonic.Client, kind selectio
 		}
 		name = a.Name
 		for _, al := range als {
-			_, s, err := cl.Album(ctx, al.ID)
+			_, s, err := getAlbum(ctx, cl, al.ID)
 			if err != nil {
 				return nil, "", err
 			}
