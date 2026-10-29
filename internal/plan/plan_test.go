@@ -323,3 +323,15 @@ func TestPlanPrefersAlbumArtist(t *testing.T) {
 		}
 	}
 }
+
+// Opus originals stay as they are, as before M22: the Q2's scan lists .opus, and an already
+// synced .opus is not fetched again as MP3 (review G1, Minor 4).
+func TestPlanOpusStaysOriginal(t *testing.T) {
+	s := song("s1", "One")
+	s.Suffix = "opus"
+	sel := selection.Set{Items: []selection.Item{item("song", "s1", "original")}}
+	p := Compute(sel, map[string][]subsonic.Song{"song:s1": {s}}, nil, manifest(entry(s, "original", 1000, "song:s1")), root, big)
+	if len(p.Add)+len(p.Replace)+len(p.Rename) != 0 {
+		t.Fatalf("plan = %+v", p)
+	}
+}
