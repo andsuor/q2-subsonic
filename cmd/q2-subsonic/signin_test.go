@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -143,6 +144,9 @@ func TestSigninNeedsKeyOrPIN(t *testing.T) {
 	resp, _ = noRedirect().Do(req)
 	if resp.StatusCode != 200 {
 		t.Fatalf("page with cookie: %d", resp.StatusCode)
+	}
+	if pg, _ := io.ReadAll(resp.Body); !strings.Contains(string(pg), "unencrypted") {
+		t.Fatal("page does not say the password is sent unencrypted")
 	}
 	// PIN
 	resp, _ = r.post(t, "/api/login", `{"pin":"`+r.s.pin+`"}`, true, nil)
