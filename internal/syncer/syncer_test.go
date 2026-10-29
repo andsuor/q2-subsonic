@@ -37,6 +37,7 @@ type fake struct {
 	slow    map[string]bool     // id -> send in 32 KiB writes, 3 ms apart
 	ranges  map[string][]string // id -> Range headers seen
 	hits    map[string]int
+	sizes   []string // the size asked of getCoverArt
 }
 
 // seen returns the hits and Range headers for id.
@@ -72,6 +73,13 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	noRange := f.noRange
 	f.mu.Unlock()
 	if strings.HasSuffix(r.URL.Path, "/getCoverArt") {
+		f.mu.Lock()
+		f.sizes = append(f.sizes, r.URL.Query().Get("size"))
+		f.mu.Unlock()
+		if strings.HasPrefix(id, "big") {
+			w.Write(bytes.Repeat([]byte("j"), 16<<20+1))
+			return
+		}
 		w.Write([]byte("jpeg-" + id))
 		return
 	}
@@ -1015,4 +1023,28 @@ func TestResumeRefusesOtherVersion(t *testing.T) {
 	}
 	sameFile(t, a.Path, "a")
 	noParts(t, root)
+}
+
+// Covers are asked for at 600 px (M19), and one past 16 MiB is refused, never saved cut short.
+func TestCoverSizedAndWhole(t *testing.T) {
+	f, r, root := setup(t)
+	a, b := want(root, "a", "original"), want(root, "bb", "original")
+	b.Song.Album, b.Song.CoverArt = "Other", "big-cover"
+	b.Path = library.SongPath(root, b.Song, "original", false)
+	r.Start(plan.Plan{Add: []plan.Want{a, b}})
+	s := wait(t, r)
+	if s.State != "done" || s.Failed != 0 || len(s.Failures) != 1 || s.Failures[0].Op != "cover" {
+		t.Fatalf("%+v", s)
+	}
+	if c, err := os.ReadFile(filepath.Dir(a.Path) + "/cover.jpg"); err != nil || string(c) != "jpeg-al-1" {
+		t.Error("cover", err)
+	}
+	if _, err := os.Stat(filepath.Dir(b.Path) + "/cover.jpg"); !os.IsNotExist(err) {
+		t.Error("a cut cover was saved")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.sizes) != 2 || f.sizes[0] != "600" || f.sizes[1] != "600" {
+		t.Errorf("sizes %q", f.sizes)
+	}
 }

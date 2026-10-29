@@ -70,8 +70,8 @@ func TestPlanQualityChangeReplaces(t *testing.T) {
 	if len(p.Replace) != 1 || len(p.Add) != 0 || p.Replace[0].Bytes != 100*320*1000/8 {
 		t.Fatalf("plan = %+v", p)
 	}
-	if p.NeedBytes != 4000000-5000 {
-		t.Fatalf("need = %d", p.NeedBytes)
+	if p.NeedBytes != 4000000-5000 || p.ReplaceBytes != 4000000-5000 { // M20: the preview shows the change
+		t.Fatalf("need = %d, replace = %d", p.NeedBytes, p.ReplaceBytes)
 	}
 }
 
@@ -239,5 +239,45 @@ func TestPlanFormatOrSizeChangeReplaces(t *testing.T) {
 	p = Compute(sel, map[string][]subsonic.Song{"song:s1": {s}}, nil, manifest(e), root, big)
 	if len(p.Replace) != 1 || p.Replace[0].Path != e.Path || p.NeedBytes != 1000 {
 		t.Fatalf("size: plan = %+v", p)
+	}
+}
+
+// A plan that only frees space fits however full the card is: removing is how a user makes room (I11).
+func TestPlanRemovalOnlyFits(t *testing.T) {
+	a := song("s1", "One")
+	p := Compute(selection.Set{}, nil, nil, manifest(entry(a, "original", 1000, "song:s1")), root, 5<<20)
+	if len(p.Remove) != 1 || !p.Fits {
+		t.Fatalf("plan = %+v", p)
+	}
+}
+
+// Original quality of a format the Q2 can't play (WavPack, Musepack) syncs as MP3 320, as the
+// streamer plays it (M22).
+func TestPlanUnplayableOriginalTranscodes(t *testing.T) {
+	fl, wv, mpc := song("s1", "One"), song("s2", "Two"), song("s3", "Three")
+	wv.Suffix, mpc.Suffix = "wv", "mpc"
+	sel := selection.Set{Items: []selection.Item{item("album", "a1", "original")}}
+	p := Compute(sel, map[string][]subsonic.Song{"album:a1": {fl, wv, mpc}}, nil, manifest(), root, big)
+	got := map[string]string{}
+	for _, w := range p.Add {
+		got[w.Song.ID] = w.Quality
+	}
+	if want := map[string]string{"s1": "original", "s2": "mp3-320", "s3": "mp3-320"}; !reflect.DeepEqual(got, want) {
+		t.Fatal(got)
+	}
+}
+
+// Each new album folder counts its cover in the space needed (M19); a folder already on the card
+// has one.
+func TestPlanCountsCovers(t *testing.T) {
+	a, b, c := song("s1", "One"), song("s2", "Two"), song("s3", "Three")
+	a.CoverArt, b.CoverArt, c.CoverArt = "al-1", "al-1", "al-2"
+	c.Album, c.AlbumID = "Other", "a2"
+	sel := selection.Set{Items: []selection.Item{item("album", "a1", "original"), item("album", "a2", "original")}}
+	have := song("s0", "Zero") // already in album a1's folder
+	p := Compute(sel, map[string][]subsonic.Song{"album:a1": {have, a, b}, "album:a2": {c}}, nil,
+		manifest(entry(have, "original", 1000, "album:a1")), root, big)
+	if p.NeedBytes != 3000+coverBytes {
+		t.Fatalf("need = %d", p.NeedBytes)
 	}
 }

@@ -158,7 +158,11 @@ func previewRows(p *plan.Plan) q2spot.Reply {
 		rows = append(rows, list("removed", "−"+plural(len(p.Remove), "song")+" · "+size(b), "", ""))
 	}
 	if len(p.Replace) > 0 {
-		rows = append(rows, info("Replace "+plural(len(p.Replace), "song")))
+		delta := "+" + size(p.ReplaceBytes)
+		if p.ReplaceBytes < 0 {
+			delta = "−" + size(-p.ReplaceBytes)
+		}
+		rows = append(rows, info("Replace "+plural(len(p.Replace), "song")+" · "+delta))
 	}
 	if len(p.Rename) > 0 {
 		rows = append(rows, info("Rename "+plural(len(p.Rename), "song")))

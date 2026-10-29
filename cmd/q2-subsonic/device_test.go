@@ -851,3 +851,15 @@ func TestPausedSyncSaysWhy(t *testing.T) {
 		}
 	}
 }
+
+// The preview shows what a quality change adds or frees (M20).
+func TestPreviewReplaceShowsSize(t *testing.T) {
+	for want, p := range map[string]*plan.Plan{
+		"Replace 2 songs · −5 MB": {Replace: make([]plan.Want, 2), ReplaceBytes: -5e6, Fits: true},
+		"Replace 1 song · +3 MB":  {Replace: make([]plan.Want, 1), ReplaceBytes: 3e6, Fits: true},
+	} {
+		if r := previewRows(p); !strings.Contains(strings.Join(titles(r), "|"), want) {
+			t.Errorf("want %q: %q", want, titles(r))
+		}
+	}
+}

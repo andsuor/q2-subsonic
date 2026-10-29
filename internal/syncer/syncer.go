@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -821,20 +822,39 @@ func (r *Runner) cover(ctx context.Context, w plan.Want) {
 			return err
 		}
 		defer r.Net.Release()
-		resp, err := r.src.Get(ctx, r.src.CoverURL(w.Song.CoverArt), 0)
+		resp, err := r.src.Get(ctx, sized(r.src.CoverURL(w.Song.CoverArt)), 0)
 		if err != nil {
 			return err
 		}
 		defer resp.Body.Close()
-		b, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+		b, err := io.ReadAll(io.LimitReader(resp.Body, maxCover+1))
 		if err != nil {
 			return err
+		}
+		if len(b) > maxCover {
+			return errors.New("cover larger than 16 MiB")
 		}
 		return q2.WriteFile(c, b)
 	}()
 	if err != nil && ctx.Err() == nil {
 		r.fail(w.Song.ID, w.Song.Title, "cover", err)
 	}
+}
+
+const maxCover = 16 << 20
+
+// sized asks getCoverArt for 600 px: the original can be many megabytes (M19), which the plan's
+// space estimate doesn't count.
+// ponytail: here, as subsonic.Client.CoverURL takes no size.
+func sized(u string) string {
+	p, err := url.Parse(u)
+	if err != nil || u == "" {
+		return u
+	}
+	q := p.Query()
+	q.Set("size", "600")
+	p.RawQuery = q.Encode()
+	return p.String()
 }
 
 // NetSlot lets one network transfer run at a time. Priority waiters (the streamer) are served

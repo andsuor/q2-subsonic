@@ -12,7 +12,10 @@ import (
 	"github.com/andsuor/q2-subsonic/internal/subsonic"
 )
 
-const margin = 16 << 20
+const (
+	margin     = 16 << 20
+	coverBytes = 256 << 10 // a cover.jpg at 600 px, counted once per new album folder
+)
 
 type Want struct {
 	Song    subsonic.Song
@@ -31,6 +34,7 @@ type Plan struct {
 	Playlists            map[string][]string
 	PlaylistsStale       bool // recorded .m3u files hold old paths: rewrite them all, even with no song change
 	NeedBytes, FreeBytes int64
+	ReplaceBytes         int64 // what the replaces add, or free when negative
 	Fits                 bool
 }
 
@@ -81,8 +85,8 @@ func Compute(sel selection.Set, resolved map[string][]subsonic.Song, playlistNam
 				multi[s.AlbumID] = true
 			}
 			q := q
-			if q == "original" && !library.SafeSuffix(s.Suffix) {
-				q = "mp3-320" // no usable extension: a transcode is truly an .mp3 (as the streamer does)
+			if q == "original" && !library.Playable(s.Suffix) {
+				q = "mp3-320" // a format the Q2 can't play, or no usable extension: as the streamer does
 			}
 			w := wants[s.ID]
 			if w == nil {
@@ -147,6 +151,7 @@ func Compute(sel selection.Set, resolved map[string][]subsonic.Song, playlistNam
 			// a new format or a re-rip is fetched again, never renamed
 			p.Replace = append(p.Replace, *w)
 			p.NeedBytes += w.Bytes - e.Size
+			p.ReplaceBytes += w.Bytes - e.Size
 		case e.Path != path:
 			p.Rename = append(p.Rename, Move{From: e.Path, To: path, ID: id})
 		}
@@ -154,6 +159,16 @@ func Compute(sel selection.Set, resolved map[string][]subsonic.Song, playlistNam
 	for id, e := range m.Songs {
 		if wants[id] == nil {
 			p.Remove = append(p.Remove, e)
+		}
+	}
+	folders := map[string]bool{} // album folders on the card, which have their cover
+	for _, e := range m.Songs {
+		folders[strings.ToLower(filepath.Dir(e.Path))] = true
+	}
+	for _, w := range append(append([]Want(nil), p.Add...), p.Replace...) {
+		if d := strings.ToLower(filepath.Dir(w.Path)); w.Song.CoverArt != "" && !folders[d] {
+			folders[d] = true
+			p.NeedBytes += coverBytes
 		}
 	}
 
@@ -177,6 +192,6 @@ func Compute(sel selection.Set, resolved map[string][]subsonic.Song, playlistNam
 	sort.Slice(p.Rename, func(i, j int) bool { return p.Rename[i].To < p.Rename[j].To })
 	sort.Slice(p.Remove, func(i, j int) bool { return p.Remove[i].Path < p.Remove[j].Path })
 	p.FreeBytes = free
-	p.Fits = p.NeedBytes+margin <= free
+	p.Fits = p.NeedBytes <= 0 || p.NeedBytes+margin <= free // freeing space always fits
 	return p
 }
