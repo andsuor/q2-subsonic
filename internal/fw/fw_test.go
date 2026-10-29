@@ -196,8 +196,8 @@ func TestRequestLibraryAddLines(t *testing.T) {
 	if got, _ := os.ReadFile(f); string(got) != "7\nscan\nimport "+a+"\nadd "+b+"\n" {
 		t.Fatalf("%q", got)
 	}
-	if seq, imports, adds := ReadRequest(f); seq != 7 || len(imports) != 1 || imports[0] != a || len(adds) != 1 || adds[0] != b {
-		t.Fatal(seq, imports, adds)
+	if seq, sent := ReadRequest(f); seq != 7 || len(sent[0]) != 1 || sent[0][0] != a || len(sent[1]) != 1 || sent[1][0] != b {
+		t.Fatal(seq, sent)
 	}
 	if err := RequestLibrary(f, 8, false, nil, []string{b}); err != nil {
 		t.Fatal(err)
@@ -208,7 +208,7 @@ func TestRequestLibraryAddLines(t *testing.T) {
 	if err := RequestLibrary(f, 9, false, nil, []string{"/mnt/mmc/_explaylist_data/Wait... What.m3u"}); err == nil {
 		t.Fatal("bad add path taken")
 	}
-	if seq, _, _ := ReadRequest(filepath.Join(t.TempDir(), "none")); seq != 0 {
+	if seq, _ := ReadRequest(filepath.Join(t.TempDir(), "none")); seq != 0 {
 		t.Fatal(seq)
 	}
 }

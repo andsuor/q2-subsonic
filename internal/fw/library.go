@@ -63,24 +63,24 @@ func checkM3U(m3u string) error {
 }
 
 // ReadRequest reads back the request at path: its seq (0 when there is none) and the playlist
-// files it imports and adds.
-func ReadRequest(path string) (seq int64, imports, adds []string) {
+// files it names, sent[0] those it imports and sent[1] those it adds.
+func ReadRequest(path string) (seq int64, sent [2][]string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return 0, nil, nil
+		return 0, sent
 	}
 	lines := strings.Split(string(data), "\n")
 	if seq, err = strconv.ParseInt(lines[0], 10, 64); err != nil {
-		return 0, nil, nil
+		return 0, sent
 	}
 	for _, l := range lines[1:] {
 		if p, ok := strings.CutPrefix(l, "import "); ok {
-			imports = append(imports, p)
+			sent[0] = append(sent[0], p)
 		} else if p, ok := strings.CutPrefix(l, "add "); ok {
-			adds = append(adds, p)
+			sent[1] = append(sent[1], p)
 		}
 	}
-	return seq, imports, adds
+	return seq, sent
 }
 
 // LibraryDone reads the library done file at path.

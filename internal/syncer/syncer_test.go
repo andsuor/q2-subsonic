@@ -1151,7 +1151,7 @@ func TestImported(t *testing.T) {
 		put(t, f, "#EXTM3U\n")
 	}
 	(&library.Manifest{Playlists: map[string]string{"Mix": mix, "Rock": rock, "Fav": fav}, Imported: map[string]bool{}}).Save(root, root+"/.subsonic/manifest.json")
-	again, clash, err := r.Imported(nil, []string{mix, rock, fav}, []string{rock, fav})
+	again, clash, err := r.Imported([2][]string{nil, {mix, rock, fav}}, []string{rock, fav})
 	rockS := root + "/_explaylist_data/Rock (Subsonic).m3u"
 	if err != nil || !reflect.DeepEqual(again, []string{rockS}) || !reflect.DeepEqual(clash, []string{fav}) {
 		t.Fatal(again, clash, err)

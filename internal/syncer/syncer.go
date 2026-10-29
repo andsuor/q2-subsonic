@@ -178,14 +178,15 @@ func (r *Runner) Refresh(keep []plan.Want) error {
 	return r.edit(func(m *library.Manifest) (bool, error) { return applyKeep(m, keep), nil })
 }
 
-// Imported takes the firmware's answer to a library request that imported imports, added adds,
+// Imported takes the firmware's answer to a library request that imported sent[0], added sent[1],
 // and skipped exists (R35). What it imported or added is now a Q2 playlist the app made, so later
 // requests replace it by name. A skipped add still under its playlist's own name met a playlist
 // the user made: it is renamed "<name> (Subsonic).m3u" and returned in again, to add once more.
 // One skipped under that name too is a clash. Only an exists naming exactly an add of the request
 // counts; any other is logged and ignored, and then no add is recorded (one may have been
 // skipped: the guard fails closed). ErrBusy while a sync runs.
-func (r *Runner) Imported(imports, adds, exists []string) (again, clash []string, err error) {
+func (r *Runner) Imported(sent [2][]string, exists []string) (again, clash []string, err error) {
+	imports, adds := sent[0], sent[1]
 	added, skipped, trusted := map[string]bool{}, map[string]bool{}, true
 	for _, f := range adds {
 		added[f] = true

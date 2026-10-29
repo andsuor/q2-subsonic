@@ -54,7 +54,7 @@ func TestImportedTrustsOnlySentAdds(t *testing.T) {
 		put(t, f, "#EXTM3U\n")
 	}
 	(&library.Manifest{Playlists: map[string]string{"Mix": mix, "Rock": rock}, Imported: map[string]bool{rock: true}}).Save(root, root+"/.subsonic/manifest.json")
-	again, clash, err := r.Imported([]string{rock}, []string{mix}, []string{"/mnt/mmc/_explaylist_data/Mix.m3u", rock})
+	again, clash, err := r.Imported([2][]string{{rock}, {mix}}, []string{"/mnt/mmc/_explaylist_data/Mix.m3u", rock})
 	if err != nil || len(again)+len(clash) != 0 {
 		t.Fatal(again, clash, err)
 	}

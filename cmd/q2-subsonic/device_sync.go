@@ -382,7 +382,7 @@ func (d *daemon) libFailedRows(msg string, at time.Time) []q2spot.Row {
 // unchanged playlist is harmless. d.mu is held.
 func (d *daemon) sendLibrary() (*libJob, error) {
 	d.libPoll()
-	if seq, _, _ := fw.ReadRequest(d.libReq()); seq != 0 && seq != d.libTaken { // still awaiting its answer
+	if seq, _ := fw.ReadRequest(d.libReq()); seq != 0 && seq != d.libTaken { // still awaiting its answer
 		d.libAgain = true
 		if d.lib == nil || d.lib.seq != seq {
 			d.lib = &libJob{seq: seq}
@@ -437,7 +437,7 @@ func (d *daemon) libState() (done, ok bool, msg string, at time.Time) {
 // taken too (taking one twice changes nothing). Called every second (tick) and by the pages that
 // show it. d.mu is held.
 func (d *daemon) libPoll() {
-	seq, imports, adds := fw.ReadRequest(d.libReq())
+	seq, sent := fw.ReadRequest(d.libReq())
 	if seq == 0 || seq == d.libTaken {
 		return
 	}
@@ -446,7 +446,7 @@ func (d *daemon) libPoll() {
 		return
 	}
 	if ok {
-		again, clash, err := d.runner.Imported(imports, adds, exists)
+		again, clash, err := d.runner.Imported(sent, exists)
 		switch {
 		case errors.Is(err, syncer.ErrBusy):
 			return // a sync holds the manifest: taken once it ends
