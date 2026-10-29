@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -161,7 +163,7 @@ func sameFile(t *testing.T, path, id string) {
 func noParts(t *testing.T, root string) {
 	t.Helper()
 	filepath.Walk(root, func(p string, _ os.FileInfo, _ error) error {
-		if strings.HasSuffix(p, ".part") || strings.HasSuffix(p, ".tmp") {
+		if strings.HasSuffix(p, ".part") || strings.HasSuffix(p, ".tmp") || strings.HasSuffix(p, ".key") {
 			t.Errorf("left over: %s", p)
 		}
 		return nil
@@ -302,15 +304,13 @@ func TestRunCardGone(t *testing.T) {
 	if s.State != "paused" || !errors.Is(s.Err, q2.ErrNoCard) {
 		t.Fatalf("%+v", s)
 	}
-	m := manifest(t, root)
-	for id, e := range m.Songs { // whatever the manifest names is whole
+	// A yanked card loses the records not saved yet (M18); whatever the manifest names is whole.
+	m, _ := library.LoadManifest(root + "/.subsonic/manifest.json")
+	for id, e := range m.Songs {
 		sameFile(t, e.Path, id)
 	}
 	if m.Songs["ccc"] != nil {
 		t.Fatal("manifest names a song never fetched")
-	}
-	if _, err := os.Stat(root + "/.subsonic/pending.json"); err != nil {
-		t.Fatal("pending plan lost", err)
 	}
 
 	r.CardMounted = func() bool { return true }
@@ -339,7 +339,9 @@ func TestDeletesAfterDownloads(t *testing.T) {
 	var ops []string
 	r.onOp = func(op, path string) {
 		mu.Lock()
-		ops = append(ops, op)
+		if op == "download" || op == "remove" {
+			ops = append(ops, op)
+		}
 		mu.Unlock()
 	}
 	r.Start(plan.Plan{Add: []plan.Want{a, b}, Remove: []*library.Entry{z}, Playlists: map[string][]string{}})
@@ -830,4 +832,187 @@ func TestPlaylistNamesWhereTheSongIs(t *testing.T) {
 	if b, _ := os.ReadFile(library.PlaylistFile(root, "Mix")); string(b) != "#EXTM3U\n"+from+"\n" {
 		t.Fatalf("%q", b)
 	}
+}
+
+// Nothing is removed while a wanted song failed: the card never ends with less than before (I2).
+func TestRemovesWaitForFailedDownloads(t *testing.T) {
+	f, r, root := setup(t)
+	a := want(root, "a", "original")
+	f.status["a"] = 404
+	z := &library.Entry{ID: "z", Path: root + "/Subsonic/Z/z/01 - z.flac", Quality: "original"}
+	put(t, z.Path, "z")
+	stale := library.PlaylistFile(root, "Gone")
+	put(t, stale, "#EXTM3U\n")
+	(&library.Manifest{Songs: map[string]*library.Entry{"z": z}, Playlists: map[string]string{"Gone": stale}}).Save(root, root+"/.subsonic/manifest.json")
+	r.Start(plan.Plan{Add: []plan.Want{a}, Remove: []*library.Entry{z}, Playlists: map[string][]string{}})
+	if s := wait(t, r); s.State != "done" || s.Failed != 1 {
+		t.Fatalf("%+v", s)
+	}
+	for _, p := range []string{z.Path, stale} {
+		if _, err := os.Stat(p); err != nil {
+			t.Error("removed after a failed download:", p)
+		}
+	}
+	if m := manifest(t, root); m.Songs["z"] == nil || m.Playlists["Gone"] != stale {
+		t.Errorf("%+v %+v", m.Songs, m.Playlists)
+	}
+}
+
+// Losing the server (no Wi-Fi, server down) pauses the sync after two songs in a row, with the
+// reason, instead of failing every remaining song for hours (I3).
+func TestOfflinePauses(t *testing.T) {
+	srv := httptest.NewTLSServer(http.NotFoundHandler())
+	c, err := subsonic.New(subsonic.Creds{Server: srv.URL, User: "u", Password: "pw"}, srv.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Close()
+	root := t.TempDir()
+	r := New(root, c, nil)
+	r.Backoff, r.CardMounted, r.Net = []time.Duration{time.Millisecond, time.Millisecond}, func() bool { return true }, NewNetSlot()
+	var tries atomic.Int32
+	r.onOp = func(op, _ string) {
+		if op == "try" {
+			tries.Add(1)
+		}
+	}
+	z := &library.Entry{ID: "z", Path: root + "/Subsonic/Z/z/01 - z.flac", Quality: "original"}
+	put(t, z.Path, "z")
+	r.Start(plan.Plan{Add: []plan.Want{want(root, "a", "original"), want(root, "bb", "original"), want(root, "ccc", "original"),
+		want(root, "dddd", "original")}, Remove: []*library.Entry{z}})
+	s := wait(t, r)
+	if s.State != "paused" || !errors.Is(s.Err, ErrOffline) || !errors.Is(s.Err, subsonic.ErrUnreachable) {
+		t.Fatalf("%+v", s)
+	}
+	if n := tries.Load(); n != 4 {
+		t.Errorf("%d tries, want 2 songs × 2", n)
+	}
+	if _, err := os.Stat(z.Path); err != nil {
+		t.Error("removed while offline")
+	}
+}
+
+func TestStopReason(t *testing.T) {
+	full := &os.PathError{Op: "write", Path: "/mnt/mmc/x.part", Err: syscall.ENOSPC}
+	if err := stopReason(full); !errors.Is(err, ErrCardFull) {
+		t.Error("ENOSPC:", err)
+	}
+	if err := stopReason(&net.OpError{Op: "read", Err: syscall.ECONNRESET}); !errors.Is(err, ErrOffline) {
+		t.Error("reset:", err)
+	}
+	if err := stopReason(&subsonic.APIError{Op: "get", HTTP: 404}); err != nil {
+		t.Error("404 is the song's own:", err)
+	}
+}
+
+// Removals are dropped from the manifest before their files go, so a stop (Pause, Cancel, the card
+// going, power) never leaves a song recorded as on the card that isn't (I4).
+func TestInterruptedRemovalsRecorded(t *testing.T) {
+	_, r, root := setup(t)
+	m := &library.Manifest{Songs: map[string]*library.Entry{}}
+	var rm []*library.Entry
+	for _, id := range []string{"x", "y", "z"} {
+		e := &library.Entry{ID: id, Path: root + "/Subsonic/Z/z/" + id + ".flac", Quality: "original"}
+		put(t, e.Path, id)
+		m.Songs[id], rm = e, append(rm, e)
+	}
+	m.Save(root, root+"/.subsonic/manifest.json")
+	r.onOp = func(op, _ string) {
+		if op == "remove" {
+			r.mu.Lock()
+			r.stopAs = "paused"
+			r.cancel() // Pause, from inside the run
+			r.mu.Unlock()
+		}
+	}
+	r.Start(plan.Plan{Remove: rm, Playlists: map[string][]string{}})
+	wait(t, r)
+	for id, e := range manifest(t, root).Songs {
+		if _, err := os.Stat(e.Path); err != nil {
+			t.Errorf("%s recorded, file gone: %v", id, err)
+		}
+	}
+}
+
+// The playlist phase stops at once when the card goes (USB storage gives the app 3 s) and never
+// writes the manifest onto the Q2's own storage once the card is gone (M15).
+func TestCardGoneDuringPlaylists(t *testing.T) {
+	_, r, root := setup(t)
+	var gone atomic.Bool
+	r.CardMounted = func() bool { return !gone.Load() }
+	r.onOp = func(op, _ string) {
+		if op == "playlist" && !gone.Load() {
+			gone.Store(true)
+			os.RemoveAll(root + "/.subsonic") // unmounted: the card's folders are no longer there
+		}
+	}
+	r.Start(plan.Plan{Playlists: map[string][]string{"A": nil, "B": nil, "C": nil}})
+	if s := wait(t, r); s.State != "paused" {
+		t.Fatalf("%+v", s)
+	}
+	if got, _ := filepath.Glob(root + "/_explaylist_data/*.m3u"); len(got) != 1 {
+		t.Errorf("written after the card went: %q", got)
+	}
+	if _, err := os.Stat(root + "/.subsonic"); !os.IsNotExist(err) {
+		t.Error(".subsonic written after the card went")
+	}
+}
+
+// The manifest is saved in batches, not after every song (M18): a crash re-fetches at most a batch.
+func TestManifestSavedInBatches(t *testing.T) {
+	_, r, root := setup(t)
+	var ws []plan.Want
+	for i := 0; i < 30; i++ {
+		ws = append(ws, want(root, fmt.Sprint("s", i), "mp3-320"))
+	}
+	saves := 0
+	r.onOp = func(op, _ string) {
+		if op == "save" {
+			saves++
+		}
+	}
+	r.Start(plan.Plan{Add: ws})
+	if s := wait(t, r); s.State != "done" || s.Done != 30 {
+		t.Fatalf("%+v", s)
+	}
+	if saves > 5 {
+		t.Errorf("%d manifest saves for 30 songs", saves)
+	}
+	if m := manifest(t, root); len(m.Songs) != 30 {
+		t.Errorf("%d songs recorded", len(m.Songs))
+	}
+}
+
+// Start keeps no copy of the plan on the card (an Entire Library plan ran the app out of memory);
+// an older build's pending.json goes (I16).
+func TestStartWritesNoPendingPlan(t *testing.T) {
+	f, r, root := setup(t)
+	put(t, root+"/.subsonic/pending.json", "{}")
+	a := want(root, "a", "original")
+	f.block["a"] = make(chan struct{})
+	r.Start(plan.Plan{Add: []plan.Want{a}})
+	_, err := os.Stat(root + "/.subsonic/pending.json")
+	close(f.block["a"])
+	wait(t, r)
+	if !os.IsNotExist(err) {
+		t.Fatal("pending.json while running:", err)
+	}
+}
+
+// A .part left by another version of the file (a transcode, then Original; or a re-rip) is fetched
+// again whole, never continued with Range into a spliced song (M14).
+func TestResumeRefusesOtherVersion(t *testing.T) {
+	f, r, root := setup(t)
+	a := want(root, "a", "original")
+	put(t, a.Path+".part", "TRANSCODED")
+	put(t, a.Path+".part.key", "mp3-320 4000")
+	r.Start(plan.Plan{Add: []plan.Want{a}})
+	if s := wait(t, r); s.State != "done" {
+		t.Fatalf("%+v", s)
+	}
+	if _, rg := f.seen("a"); len(rg) != 1 || rg[0] != "" {
+		t.Errorf("ranges %q", rg)
+	}
+	sameFile(t, a.Path, "a")
+	noParts(t, root)
 }

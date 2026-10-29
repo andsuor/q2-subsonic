@@ -836,3 +836,18 @@ func TestLibraryRequestSkipsDottedPlaylist(t *testing.T) {
 		t.Fatalf("%q %v", b, err)
 	}
 }
+
+// A sync paused because the server went away or the card filled says why, with Resume (I3).
+func TestPausedSyncSaysWhy(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "", true)
+	d.client()
+	for err, want := range map[error]string{syncer.ErrOffline: "Can't reach 127.0.0.1", syncer.ErrCardFull: "The card is full"} {
+		r := d.syncRows(syncer.Snapshot{State: "paused", Err: err})
+		if _, ok := find(r, want); !ok {
+			t.Errorf("%v: %q", err, titles(r))
+		}
+		if _, ok := find(r, "Resume"); !ok {
+			t.Errorf("%v: no Resume: %q", err, titles(r))
+		}
+	}
+}

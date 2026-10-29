@@ -14,8 +14,8 @@ import (
 // Fast path (no Subsonic/): one rename of the folder, so finished files, stray .part files and
 // covers all move along. Slow path (Subsonic/ exists): each manifest entry's file, and its .part,
 // moves on its own; whatever the manifest doesn't know stays in Navidrome/. Either way manifest
-// paths are rewritten, the recorded playlists are marked for rewrite (their paths changed) and
-// pending.json goes, since the next sync plans again. On error nothing is lost: the fast path
+// paths are rewritten, the recorded playlists are marked for rewrite (their paths changed) and an
+// older build's pending.json goes, since the next sync plans again. On error nothing is lost: the fast path
 // renames back, the slow path saves the entries it did move, and the error says what was left.
 func Migrate(root string, logf func(string, ...any)) error {
 	manPath := filepath.Join(root, ".subsonic", "manifest.json")

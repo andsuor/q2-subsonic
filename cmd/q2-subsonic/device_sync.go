@@ -197,8 +197,13 @@ func (d *daemon) syncRows(s syncer.Snapshot) q2spot.Reply {
 		rows = append(rows, info("Now: "+s.Current))
 	}
 	if s.State == "paused" {
-		if errors.Is(s.Err, q2.ErrNoCard) {
+		switch {
+		case errors.Is(s.Err, q2.ErrNoCard):
 			rows = append(rows, info("Card not available"))
+		case errors.Is(s.Err, syncer.ErrCardFull):
+			rows = append(rows, info("The card is full"))
+		case errors.Is(s.Err, syncer.ErrOffline):
+			rows = append(rows, info(subsonic.Message(s.Err, d.hostName())))
 		}
 		rows = append(rows, act("resume", "Resume", ""))
 	} else {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"syscall"
 
 	"github.com/andsuor/q2-subsonic/internal/q2"
@@ -21,6 +22,9 @@ func main() {
 	card := flag.String("card", "/mnt/mmc", "the card's root")
 	tmp := flag.String("tmp", "/tmp", "where the firmware's files and the socket live")
 	flag.Parse()
+	// The Q2 has about 67 MB beside demo and no swap: the GC works harder near this instead of the
+	// kernel's OOM killer picking the app, or demo (I16).
+	debug.SetMemoryLimit(48 << 20)
 	q2.SetupLog("q2-subsonic")
 	q2.Card = *card
 	log.Print("start ", version)
