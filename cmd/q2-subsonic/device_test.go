@@ -1254,7 +1254,7 @@ func TestStreamFolderEmptiedAtStart(t *testing.T) {
 // In a playlist a song the server lacks (70, not found) is skipped: the root says so, with Details.
 func TestRootStreamSkipped(t *testing.T) {
 	d := newTestDaemon(t, &nav{albums: 1, songsPer: 1, mediaErr: 70}, "playlist", true)
-	d.stream.backoff = []time.Duration{time.Millisecond}
+	d.stream.gap = 0
 	d.do("play", "album:al0 0")
 	var r q2spot.Reply
 	eventually(t, "the skip", func() bool { r = d.do("menu"); _, ok := find(r, "Skipped Song 0: Song not found"); return ok })

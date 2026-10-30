@@ -7,8 +7,11 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -52,6 +55,16 @@ func (f *fakeSrc) Get(_ context.Context, u string, _ int64) (*http.Response, err
 	return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(b)), ContentLength: int64(len(b))}, nil
 }
 
+func (f *fakeSrc) tries(id string) int {
+	n := 0
+	for _, u := range f.got() {
+		if strings.Contains(u, ":"+id+":") {
+			n++
+		}
+	}
+	return n
+}
+
 func (f *fakeSrc) got() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -72,6 +85,7 @@ func newEnv(t *testing.T, caps fw.Caps) *env {
 	tmp := t.TempDir()
 	e.play, e.playing = tmp+"/play", tmp+"/playing"
 	e.s = newStreamer(e.root, e.play, e.playing, caps, e.src, func() *library.Manifest { return e.man }, e.net, 5*time.Millisecond)
+	e.s.gap = 0
 	t.Cleanup(e.s.stop)
 	return e
 }
@@ -456,7 +470,9 @@ func TestStreamSkipsSongItsServerLacks(t *testing.T) {
 	e := newEnv(t, fw.Caps{Playlist: true})
 	e.s.backoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
 	e.src.err = errFor(&subsonic.APIError{Op: "stream", HTTP: 404, Msg: "Not Found"}, "s1")
-	e.s.start(songs(4, "flac"), 0)
+	ss := songs(4, "flac")
+	orig := slices.Clone(ss)
+	e.s.start(ss, 0)
 	q, before := e.queue(t) // written whole before start returns
 	st1, _ := os.Stat(q)
 	until(t, "songs 3, 4", func() bool { return exists(e.stream(2, "flac")) && exists(e.stream(3, "flac")) })
@@ -476,6 +492,12 @@ func TestStreamSkipsSongItsServerLacks(t *testing.T) {
 	}
 	if !e.s.active() {
 		t.Fatal("run ended")
+	}
+	if !reflect.DeepEqual(ss, orig) {
+		t.Fatalf("the caller's list changed: %v", ss)
+	}
+	if n := e.src.tries("s1"); n != 3 {
+		t.Fatalf("a bare 404 tried %d times", n) // a proxy or a deploy can answer one for a while
 	}
 }
 
@@ -521,5 +543,125 @@ func TestStreamThirdFailureInARowEnds(t *testing.T) {
 	}
 	if e.s.Err() == nil || e.s.Err().Error() != "Couldn't stream T3" || exists(e.stream(4, "flac")) {
 		t.Fatalf("err %v", e.s.Err())
+	}
+}
+
+// The server's own word that a song is gone (Subsonic 70, HTTP 410) is skipped at its first try,
+// and the next song is fetched at once: the firmware waits for it.
+func TestStreamSkipsGoneSongAtOnce(t *testing.T) {
+	for name, err := range map[string]error{
+		"code 70": &subsonic.APIError{Op: "stream", HTTP: 200, Code: 70, Msg: "Song not found"},
+		"410":     &subsonic.APIError{Op: "stream", HTTP: 410, Msg: "Gone"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t, fw.Caps{Playlist: true})
+			e.s.backoff = []time.Duration{time.Hour, time.Hour, time.Hour}
+			e.s.poll = time.Hour
+			e.src.err = errFor(err, "s1")
+			e.s.start(songs(4, "flac"), 0)
+			until(t, "songs 3, 4", func() bool { return exists(e.stream(2, "flac")) && exists(e.stream(3, "flac")) })
+			if n := e.src.tries("s1"); n != 1 {
+				t.Fatalf("tried %d times", n)
+			}
+			if _, body := e.queue(t); body != "#EXTM3U\n"+e.stream(0, "flac")+"\n"+e.stream(2, "flac")+"\n"+e.stream(3, "flac")+"\n" {
+				t.Fatalf("queue %q", body)
+			}
+		})
+	}
+}
+
+// A song the firmware may have passed is never dropped: one that landed in this run, was trimmed
+// behind the one playing and is fetched again after Prev ends the run as before, the queue as it was.
+func TestStreamLandedSongNeverSkipped(t *testing.T) {
+	e := newEnv(t, fw.Caps{Playlist: true})
+	e.s.backoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	var dead atomic.Bool
+	e.src.err = func(u string) error {
+		if dead.Load() && strings.Contains(u, ":s0:") {
+			return &subsonic.APIError{Op: "stream", HTTP: 404, Msg: "Not Found"}
+		}
+		return nil
+	}
+	e.s.start(songs(8, "flac"), 0)
+	_, before := e.queue(t)
+	until(t, "0-2", func() bool { return exists(e.stream(2, "flac")) })
+	os.WriteFile(e.playing, []byte(e.stream(2, "flac")), 0o644)
+	until(t, "3, 4", func() bool { return exists(e.stream(4, "flac")) })
+	os.WriteFile(e.playing, []byte(e.stream(4, "flac")), 0o644)
+	until(t, "0, 1 trimmed", func() bool { return !exists(e.stream(0, "flac")) && !exists(e.stream(1, "flac")) })
+	dead.Store(true)
+	os.WriteFile(e.playing, []byte(e.stream(0, "flac")), 0o644)
+	until(t, "ended", func() bool { return !e.s.active() })
+	if _, after := e.queue(t); after != before {
+		t.Fatalf("queue %q, was %q", after, before)
+	}
+	if e.s.Err() == nil || e.s.Err().Error() != "Couldn't stream T0" {
+		t.Fatalf("err %v", e.s.Err())
+	}
+}
+
+// A song that can't be written to the card is the card's failure, not the song's: the run ends as
+// before, the queue as it was.
+func TestStreamCardWriteErrorEnds(t *testing.T) {
+	e := newEnv(t, fw.Caps{Playlist: true})
+	e.s.backoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	e.src.err = func(u string) error {
+		if strings.Contains(u, ":s0:") { // song 1's .part becomes a folder that won't go
+			os.MkdirAll(e.stream(1, "flac")+".part/x", 0o755)
+		}
+		return nil
+	}
+	e.s.start(songs(4, "flac"), 0)
+	_, before := e.queue(t)
+	until(t, "ended", func() bool { return !e.s.active() })
+	if _, after := e.queue(t); after != before {
+		t.Fatalf("queue %q, was %q", after, before)
+	}
+	if e.s.Err() == nil || e.s.Err().Error() != "Couldn't stream T1" {
+		t.Fatalf("err %v", e.s.Err())
+	}
+}
+
+// The queue's first line, the list's first song or not, may go too.
+func TestStreamSkipFirstLine(t *testing.T) {
+	for _, c := range []struct {
+		from int
+		dead string
+	}{{0, "s0"}, {1, "s1"}, {1, "s2"}} {
+		t.Run(fmt.Sprint(c.from, c.dead), func(t *testing.T) {
+			e := newEnv(t, fw.Caps{Playlist: true})
+			e.s.backoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+			e.src.err = errFor(&subsonic.APIError{Op: "stream", HTTP: 404, Msg: "Not Found"}, c.dead)
+			e.s.start(songs(4, "flac"), c.from)
+			want := "#EXTM3U\n"
+			for i := c.from; i < 4; i++ {
+				if fmt.Sprint("s", i) != c.dead {
+					want += e.stream(i, "flac") + "\n"
+					until(t, fmt.Sprint("song ", i), func() bool { return exists(e.stream(i, "flac")) })
+				}
+			}
+			if _, body := e.queue(t); body != want {
+				t.Fatalf("queue %q, want %q", body, want)
+			}
+		})
+	}
+}
+
+// Two rewrites of the queue are at least the gap apart, counted from its first write: the firmware
+// notices a change only by the file's mtime, which FAT32 keeps in 2 s.
+func TestStreamQueueRewritesApart(t *testing.T) {
+	e := newEnv(t, fw.Caps{Playlist: true})
+	e.s.gap = 100 * time.Millisecond
+	e.src.err = errFor(&subsonic.APIError{Op: "stream", HTTP: 200, Code: 70, Msg: "Song not found"}, "s1", "s2")
+	e.s.start(songs(5, "flac"), 0)
+	q, _ := e.queue(t)
+	st1, _ := os.Stat(q)
+	until(t, "songs 4, 5", func() bool { return exists(e.stream(3, "flac")) && exists(e.stream(4, "flac")) })
+	st2, _ := os.Stat(q)
+	if d := st2.ModTime().Sub(st1.ModTime()); d < 150*time.Millisecond {
+		t.Fatalf("two rewrites within %v of the first write", d)
+	}
+	if _, body := e.queue(t); body != "#EXTM3U\n"+e.stream(0, "flac")+"\n"+e.stream(3, "flac")+"\n"+e.stream(4, "flac")+"\n" {
+		t.Fatalf("queue %q", body)
 	}
 }

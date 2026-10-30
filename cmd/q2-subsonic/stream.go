@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -45,6 +46,9 @@ type streamer struct {
 	// have ended, and nothing is left to fetch: the firmware leaves .playing alone once it plays
 	// anything else, so this is also how a stream learns that it was left. Default idleAfter.
 	idle time.Duration
+	// gap is the least time between two writes of a queue file: the firmware reads it again when
+	// its mtime's second changes, and FAT32 keeps mtimes in 2 s.
+	gap time.Duration
 
 	errMu sync.Mutex
 	err   *streamErr
@@ -59,7 +63,8 @@ type streamer struct {
 func newStreamer(root, play, playing string, caps fw.Caps, src streamSource, man func() *library.Manifest,
 	net *syncer.NetSlot, poll time.Duration) *streamer {
 	return &streamer{root: root, playFile: play, playingFile: playing, caps: caps, src: src, manifest: man, net: net, poll: poll,
-		backoff: []time.Duration{2 * time.Second, 8 * time.Second, 30 * time.Second}}
+		backoff: []time.Duration{2 * time.Second, 8 * time.Second, 30 * time.Second},
+		gap:     2100 * time.Millisecond} // 2 s and a tick of the kernel's coarse clock
 }
 
 // streamErr is a song that failed all its tries: what the root shows, and its Details.
@@ -149,6 +154,7 @@ type job struct {
 	quality string
 	fails   int       // failed tries
 	next    time.Time // no try before
+	landed  bool      // fetched once in this run: the firmware may have passed it
 }
 
 // synced reports whether e's file can play from the card: it is there, and no sync is about to
@@ -191,7 +197,7 @@ func (s *streamer) start(songs []subsonic.Song, from int) {
 	seq := time.Now().UnixNano() // never reused
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel, s.done = cancel, make(chan struct{})
-	r := &streamRun{s: s, ctx: ctx, songs: songs, jobs: jobs, from: from, last: from, seq: seq,
+	r := &streamRun{s: s, ctx: ctx, songs: slices.Clone(songs), jobs: jobs, from: from, last: from, seq: seq,
 		stale: strings.TrimSpace(string(stale))}
 	if s.caps.Playlist {
 		r.queue = filepath.Join(s.dir(), fmt.Sprintf("queue-%d.m3u", seq))
@@ -214,9 +220,10 @@ type streamRun struct {
 	last      int // the index .playing named last: a song in the list twice is found after it (M25)
 	seq       int64
 	announced bool
-	stale     string // .playing at start: ignored until it changes
-	queue     string // the playlist's file; "" in folder mode
-	skips     int    // songs skipped since the last one fetched
+	stale     string    // .playing at start: ignored until it changes
+	queue     string    // the playlist's file; "" in folder mode
+	wrote     time.Time // when it was last written
+	skips     int       // songs skipped since the last one fetched
 }
 
 // writeQueue writes the queue file whole, a line a song from the first played on, aside and
@@ -227,39 +234,57 @@ func (r *streamRun) writeQueue() error {
 	for _, j := range r.jobs[r.from:] {
 		paths = append(paths, j.path)
 	}
-	return library.WriteM3U(r.s.root, r.queue, paths)
+	if err := library.WriteM3U(r.s.root, r.queue, paths); err != nil {
+		return err
+	}
+	r.wrote = time.Now()
+	return nil
 }
 
-// failed counts a failed try of song i and reports whether the run goes on. A song is tried once
-// a backoff entry. Then, in a playlist, a song the server can't send (gone, a transcode that
-// fails, an error for a body) is dropped from the list and the queue file, and the firmware plays
-// on past it; losing the server, a refusal for the account, or a third song in a row fails every
-// song alike, and the run ends at it, the queue waiting there.
-func (r *streamRun) failed(i int, err error) bool {
+// gone reports the server's own word that a song isn't there (Subsonic 70, HTTP 410), which no
+// retry changes. A bare 404 is retried: a proxy or a deploy can answer one for a while.
+func gone(err error) bool {
+	var ae *subsonic.APIError
+	return errors.As(err, &ae) && (ae.Code == 70 || ae.HTTP == 410)
+}
+
+// failed counts a failed try of song i and reports whether the run goes on, and whether the song
+// was skipped. A song is tried once a backoff entry (in a playlist, once when it is gone). Then,
+// in a playlist, a song the server can't send (gone, a transcode that fails, an error for a body)
+// is dropped from the list and the queue file, and the firmware plays on past it. Losing the
+// server, a refusal for the account, a card that can't be written (StopReason: an errno is a
+// net.Error), a third song in a row, or a song that landed before (the firmware may have passed
+// its line, which must stay) ends the run at it, the queue waiting there.
+func (r *streamRun) failed(i int, err error) (goOn, skipped bool) {
 	j, sg, s := &r.jobs[i], r.songs[i], r.s
 	j.fails++
 	s.logf("stream %q try %d: %v", sg.Title, j.fails, err)
-	if j.fails < len(s.backoff) {
+	if j.fails < len(s.backoff) && !(r.queue != "" && gone(err)) {
 		j.next = time.Now().Add(s.backoff[j.fails-1])
-		return true
+		return true, false
 	}
 	e := &streamErr{title: sg.Title, id: sg.ID, at: time.Now(), err: err}
-	if r.queue == "" || syncer.StopReason(err) != nil || r.skips >= 2 {
+	if r.queue == "" || j.landed || syncer.StopReason(err) != nil || r.skips >= 2 {
 		s.setErr(e)
-		return false
+		return false, false
+	}
+	select {
+	case <-r.ctx.Done():
+		return false, false
+	case <-time.After(s.gap - time.Since(r.wrote)):
 	}
 	r.jobs, r.songs = slices.Delete(r.jobs, i, i+1), slices.Delete(r.songs, i, i+1)
 	if werr := r.writeQueue(); werr != nil {
 		s.logf("stream: queue: %v", werr)
 		s.setErr(e)
-		return false
+		return false, false
 	}
 	r.skips++
 	e.skipped = true
 	s.setErr(e)
 	s.logf("stream: skipped %s (%q): %v", sg.ID, sg.Title, err)
 	r.last = min(r.last, len(r.jobs)-1)
-	return r.from < len(r.jobs) // else nothing is left to play
+	return r.from < len(r.jobs), true // nothing left to play ends the run
 }
 
 func (r *streamRun) announce(path string) {
@@ -319,9 +344,13 @@ func (r *streamRun) run() {
 		fetched := false
 		if want >= 0 && !time.Now().Before(r.jobs[want].next) { // else backing off
 			if err := r.fetch(r.songs[want], r.jobs[want]); err == nil {
-				fetched, r.skips = true, 0
-			} else if r.ctx.Err() != nil || !r.failed(want, err) {
+				fetched, r.skips, r.jobs[want].landed = true, 0, true
+			} else if r.ctx.Err() != nil {
 				return
+			} else if goOn, skipped := r.failed(want, err); !goOn {
+				return
+			} else if skipped {
+				continue // the list changed under cur; and the firmware waits for the next song now
 			}
 		}
 		if !r.announced && exists(r.jobs[r.from].path) {
