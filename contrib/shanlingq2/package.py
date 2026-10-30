@@ -8,8 +8,8 @@ icons icon.png, 52 px, and icon-40.png). The app must be
 a static MIPS32 little-endian executable with soft-float ABI flags (GOMIPS=softfloat), so the
 firmware's -mfp64 doesn't matter; the Q2's kernel still requires the nan2008 ELF flag, which Go
 doesn't set, so it is set here, as q2-librespot's q2-link sets it for rustc's objects. Each entry is
-dated 2026-01-01, so two builds of a commit are byte-identical; System settings -> Apps unpacks only
-the .<app> folder, never a dot-underscore file."""
+dated 2026-01-01, so two builds of a commit are byte-identical; System settings -> App Store unpacks
+only the .<app> folder, never a dot-underscore file."""
 import pathlib, struct, sys, zipfile
 
 EF_MIPS_NAN2008 = 0x400

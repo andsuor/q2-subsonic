@@ -4,7 +4,7 @@ A Subsonic client for the **Shanling Q2** running [Q2 Pod](https://github.com/Di
 
 ## Install
 
-**Over Wi-Fi:** on the Q2, open **System settings → Apps** and press **Subsonic** (once it is listed there).
+**Over Wi-Fi:** on the Q2, open **System settings → App Store** and press **Subsonic**.
 
 **By hand:**
 
@@ -31,7 +31,7 @@ Things to know:
 
 ## Use
 
-The list has **Sync**, **On This Q2**, **Playlists**, **Albums**, **Artists**, **Search** and **Settings**.
+The list has **Sync Entire Library**, **Sync**, **On This Q2**, **Playlists**, **Albums**, **Artists**, **Search** and **Settings**.
 
 **Choosing what to sync:** hold **Play/Pause** on a playlist, album, artist or song to toggle it in Sync, or open it and press **Add to Sync** / **Remove from Sync**. The Q2 answers `Added to Sync · N songs`, `Removed from Sync` or, for a song already covered by something bigger, `Included via <name>`. **On This Q2** lists what you picked, with its status and size on the card; hold Play/Pause there to take one out.
 
@@ -63,19 +63,23 @@ Newer Q2 Pod firmware offers extensions to card apps. Without them everything st
 
 ## Errors and logs
 
-A failure shows a short message on screen. Open its **Details** row for the operation, the HTTP status or Subsonic error code, and the time. The full trail is in `.subsonic/log.txt`; passwords and tokens are never logged. If the app crashed, its trace and exit code are added there at the next start.
+A failure shows a short message on screen. Open its **Details** row for the operation, the HTTP status or Subsonic error code, and the time. The full trail is in `.subsonic/log.txt`; passwords and tokens are never logged. If the app crashed, its trace and exit code are added there at the next start. **Settings** shows the app's version, for a bug report.
 
 ## Update and remove
 
-**System settings → Apps** shows **Update** when a newer release is out. By hand, replace the five files in `.subsonic` listed above. Your login, settings and selection are kept.
+**System settings → App Store** shows **Update** when a newer release is out. By hand, replace the five files in `.subsonic` listed above. Your login, settings and selection are kept.
 
-To remove it, first **Settings → Account → Sign Out**, which deletes the stored login, then press **Subsonic** twice in **System settings → Apps**. That leaves `.subsonic/` on the card with your settings, selection and sync records (and the login, if you didn't sign out): delete the folder to remove everything. Synced music stays in `Subsonic/`; delete that folder to free the space.
+To remove it, first **Settings → Account → Sign Out**, which deletes the stored login, then press **Subsonic** twice in **System settings → App Store**. That leaves `.subsonic/` on the card with your settings, selection and sync records (and the login, if you didn't sign out): delete the folder to remove everything. Synced music stays in `Subsonic/`; delete that folder to free the space.
 
 ## Build
 
     contrib/shanlingq2/build.sh
 
-needs Go 1.22 or later and python3 (no dependencies outside Go's standard library), and leaves the card files in `target/shanlingq2/.subsonic` and the release ZIP beside them. Pushing a tag `q2-vX.Y` that matches `cmd/q2-subsonic/main.go`'s version builds and publishes the release (`.github/workflows/release.yml`). More: [contrib/shanlingq2/README](contrib/shanlingq2/README).
+needs Go 1.22 or later and python3 (no dependencies outside Go's standard library), and leaves the card files in `target/shanlingq2/.subsonic` and the release ZIP beside them. More: [contrib/shanlingq2/README](contrib/shanlingq2/README).
+
+## Changes and contributing
+
+What changed in each release: [CHANGELOG.md](CHANGELOG.md). To report a bug, suggest a feature or send a change, and for how releases are made: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

@@ -1,7 +1,7 @@
 #!/bin/sh
 # q2-subsonic for the Shanling Q2: static Go for 32-bit little-endian MIPS with soft float, staged with
 # its card files in OUT/.subsonic and zipped as a release ships it, OUT/q2-subsonic-vX.Y-SHA.zip, to unzip
-# at the card's root (or for System settings -> Apps to install).
+# at the card's root (or for System settings -> App Store to install).
 #   contrib/shanlingq2/build.sh [OUT]
 # Needs Go 1.22 or later and python3. It has no dependencies.
 set -eu

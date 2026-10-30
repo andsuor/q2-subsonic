@@ -1,11 +1,10 @@
-name: Q2 release
-# Every push to master is tested. A tag q2-vX.Y (matching cmd/q2-subsonic/main.go's version) builds the card files and publishes them
-# as the release's only ZIP, which Q2 Pod's System settings -> Apps installs.
+name: Release
+# A tag q2-vX.Y (made by contrib/release.sh) must match cmd/q2-subsonic/main.go's version and have a
+# CHANGELOG.md section. It builds the card files and publishes them as the release's only ZIP, which
+# Q2 Pod's System settings -> App Store installs, with that section as the release notes.
 on:
   push:
-    branches: [master] # tests only; Publish runs for tags
     tags: ['q2-v*']
-  workflow_dispatch:
 
 permissions:
   contents: write
@@ -15,6 +14,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Check version and changelog
+        run: |
+          v=${GITHUB_REF_NAME#q2-v}
+          want=$(sed -n 's/^const version = "\(q2-v[0-9.]*\)"$/\1/p' cmd/q2-subsonic/main.go)
+          [ "$want" = "$GITHUB_REF_NAME" ] || { echo "::error::tag $GITHUB_REF_NAME, but main.go's version is $want"; exit 1; }
+          contrib/changelog-section.sh "$v" >notes.md || { echo "::error::CHANGELOG.md has no entries under ## [$v]"; exit 1; }
+          compare=$(sed -n "s|^\[$v\]: \(.*/compare/.*\)|\1|p" CHANGELOG.md) # none for the first release
+          { echo; echo '---'; [ -z "$compare" ] || printf '**Full changes:** %s\n\n' "$compare"
+            echo 'Install or update from Q2 Pod: System settings → App Store (or unzip to the card root).'; } >>notes.md
+          cat notes.md
       - uses: actions/setup-go@v5
         with:
           go-version: '1.27' # current, with its security fixes; go.mod's go line is only the minimum (M44)
@@ -27,12 +36,13 @@ jobs:
       - name: Build
         run: contrib/shanlingq2/build.sh target/shanlingq2
       - name: Publish
-        if: startsWith(github.ref, 'refs/tags/q2-v')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          want=$(sed -n 's/^const version = "\(q2-v[0-9.]*\)"$/\1/p' cmd/q2-subsonic/main.go)
-          [ "$want" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME, but the version is $want" >&2; exit 1; }
-          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 ||
-            gh release create "$GITHUB_REF_NAME" --title "q2-subsonic ${GITHUB_REF_NAME#q2-}" --notes "See README.md."
-          gh release upload "$GITHUB_REF_NAME" target/shanlingq2/q2-subsonic-*.zip --clobber
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --notes-file notes.md
+            gh release upload "$GITHUB_REF_NAME" target/shanlingq2/q2-subsonic-*.zip --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" target/shanlingq2/q2-subsonic-*.zip \
+              --title "q2-subsonic ${GITHUB_REF_NAME#q2-}" --notes-file notes.md
+          fi

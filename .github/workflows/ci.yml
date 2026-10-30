@@ -1,0 +1,50 @@
+name: CI
+# Every push to master and every pull request: vet, gofmt, the tests and the Q2 build. A pull request
+# must also add to CHANGELOG.md's Unreleased section, unless it has the label "no changelog".
+on:
+  push:
+    branches: [master]
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled] # labels: the changelog check follows them
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27' # current, with its security fixes; go.mod's go line is only the minimum (M44)
+          check-latest: true
+      - name: Vet and format
+        run: |
+          go vet ./...
+          unformatted=$(gofmt -l .)
+          [ -z "$unformatted" ] || { echo "::error::gofmt -w these files:"; echo "$unformatted"; exit 1; }
+      - name: Test
+        run: |
+          go test -race ./...
+          python3 contrib/shanlingq2/test_launcher.py
+      - name: Build
+        run: contrib/shanlingq2/build.sh target/shanlingq2
+
+  changelog:
+    if: github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'no changelog')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unreleased section changed
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git fetch -q --depth=1 origin "$BASE"
+          old=$(git show "$BASE:CHANGELOG.md" 2>/dev/null | contrib/changelog-section.sh Unreleased - || true)
+          new=$(contrib/changelog-section.sh Unreleased || true)
+          [ "$new" != "$old" ] || {
+            echo "::error file=CHANGELOG.md::Add a line for users under ## [Unreleased], or label the PR 'no changelog'."
+            exit 1
+          }

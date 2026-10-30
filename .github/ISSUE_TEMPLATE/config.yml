@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Q2 Pod firmware
+    url: https://github.com/DiamondBond/q2-pod/issues
+    about: Problems with the Q2 Pod firmware itself, not the Subsonic app
