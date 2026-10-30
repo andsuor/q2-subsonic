@@ -614,14 +614,16 @@ func (j *job) keep() error {
 // recorded ones no longer selected (unless a download failed).
 func (j *job) playlists() error {
 	m, p := j.m, j.p
+	moved := map[string]string{} // a playlist name -> the stale file it was recorded under
 	for name, f := range m.Playlists {
 		switch {
 		case !library.ValidPlaylistFile(j.root, f):
 			j.logf("sync: ignoring bad recorded playlist path %q for %s", f, name)
 			delete(m.Playlists, name)
-		case strings.Contains(filepath.Base(f), ".."): // an older SafeName's; the firmware refuses it
+		case library.StalePlaylistFile(f): // an older build's name, which the Q2 refuses or cuts
 			if m.Remove(j.root, f) == nil {
-				delete(m.Playlists, name) // written again below under a clean name
+				delete(m.Playlists, name) // written again below under a name that fits
+				moved[name] = f
 			}
 		}
 	}
@@ -645,7 +647,11 @@ func (j *job) playlists() error {
 	// one a later sync takes for the user's own (and so writes a "(Subsonic)" copy beside).
 	for _, name := range names {
 		if m.Playlists[name] == "" {
-			m.Playlists[name] = j.freePlaylistFile(m, name, false)
+			f := j.freePlaylistFile(m, name, false)
+			m.Playlists[name] = f
+			if old := moved[name]; m.Imported[old] && library.PlaylistTitle(old) == library.PlaylistTitle(f) {
+				m.Imported[f] = true // the Q2 cut the old name to this one: its playlist is the app's, replaced by name
+			}
 			j.unsaved++
 		}
 	}
@@ -795,10 +801,9 @@ func serverDown(status int) bool {
 }
 
 // freePlaylistFile picks <name>.m3u (unless skipBase), else <name> (Subsonic).m3u, else
-// <name> (Subsonic 2).m3u...: the first neither on the card (a user's own file) nor recorded for
-// another playlist (case-folded: the card is FAT/exFAT).
+// <name> (Subsonic 2).m3u... (library.PlaylistFileN): the first neither on the card (a user's own
+// file) nor recorded for another playlist (case-folded: the card is FAT/exFAT).
 func (r *Runner) freePlaylistFile(m *library.Manifest, name string, skipBase bool) string {
-	base := strings.TrimSuffix(library.PlaylistFile(r.root, name), ".m3u")
 	taken := func(f string) bool {
 		if _, err := os.Lstat(f); err == nil {
 			return true
@@ -810,23 +815,14 @@ func (r *Runner) freePlaylistFile(m *library.Manifest, name string, skipBase boo
 		}
 		return false
 	}
-	file := func(n int) string {
-		switch n {
-		case 0:
-			return base + ".m3u"
-		case 1:
-			return base + " (Subsonic).m3u"
-		}
-		return fmt.Sprintf("%s (Subsonic %d).m3u", base, n)
-	}
 	n := 0
 	if skipBase {
 		n = 1
 	}
-	for taken(file(n)) {
+	for taken(library.PlaylistFileN(r.root, name, n)) {
 		n++
 	}
-	return file(n)
+	return library.PlaylistFileN(r.root, name, n)
 }
 
 // remove deletes path through the guard and, when its album folder is left holding only

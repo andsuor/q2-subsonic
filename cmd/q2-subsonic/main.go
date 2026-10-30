@@ -15,7 +15,7 @@ import (
 	"github.com/andsuor/q2-subsonic/internal/q2"
 )
 
-const version = "q2-v0.1"
+const version = "q2-v0.2"
 
 func main() {
 	dir := flag.String("dir", "/mnt/mmc/.subsonic", "the add-on's folder on the card")

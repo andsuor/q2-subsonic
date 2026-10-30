@@ -35,7 +35,7 @@ type Plan struct {
 	Remove               []*library.Entry
 	Playlists            map[string][]string
 	PlaylistsStale       bool // recorded .m3u files hold old paths: rewrite them all, even with no song change
-	PlaylistsChanged     int  // playlist files to write or delete though no song moves: new, changed or taken out (I10)
+	PlaylistsChanged     int  // playlist files to write or delete though no song moves: new, changed, renamed or taken out (I10)
 	NeedBytes, FreeBytes int64
 	ReplaceBytes         int64 // what the replaces add, or free when negative
 	Fits                 bool
@@ -198,7 +198,7 @@ func Compute(sel selection.Set, resolved map[string][]subsonic.Song, playlistNam
 		p.Playlists[playlistNames[key]] = paths
 	}
 	for name, paths := range p.Playlists {
-		if m.Playlists[name] == "" || m.PlaylistSums[name] != library.PlaylistSum(paths) {
+		if f := m.Playlists[name]; f == "" || library.StalePlaylistFile(f) || m.PlaylistSums[name] != library.PlaylistSum(paths) {
 			p.PlaylistsChanged++
 		}
 	}

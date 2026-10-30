@@ -474,7 +474,7 @@ func (d *daemon) libFailedRows(msg string, at time.Time) []q2spot.Row {
 	if msg == "" {
 		msg = "Library update failed"
 	}
-	return []q2spot.Row{info(msg), list("details", "Details", "", detailsCtx("library", 0, 0, at, ""))}
+	return []q2spot.Row{info(msg), list("details", "Details", "", withErr(detailsCtx("library", 0, 0, at, ""), errors.New(msg)))}
 }
 
 // sendLibrary asks the firmware (F3) to scan and import the playlist files the app has recorded;

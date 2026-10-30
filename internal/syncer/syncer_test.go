@@ -20,6 +20,7 @@ import (
 	"syscall"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/andsuor/q2-subsonic/internal/applog"
 	"github.com/andsuor/q2-subsonic/internal/library"
@@ -736,6 +737,84 @@ func TestDottedPlaylistFileReplaced(t *testing.T) {
 	want := root + "/_explaylist_data/Wait… What.m3u"
 	if _, err := os.Stat(want); err != nil || m.Playlists["Wait... What"] != want {
 		t.Fatal(err, m.Playlists)
+	}
+}
+
+// stem is a playlist file's name without .m3u, which the Q2 keeps 63 bytes of (issue #1).
+func stem(t *testing.T, f string) string {
+	t.Helper()
+	s := strings.TrimSuffix(filepath.Base(f), ".m3u")
+	if len(s) > 63 || !utf8.ValidString(s) {
+		t.Errorf("%q: %d bytes", s, len(s))
+	}
+	return s
+}
+
+// The " (Subsonic)" a clash adds fits in the 63 bytes too.
+func TestLongPlaylistSuffixFits(t *testing.T) {
+	long := strings.Repeat("曲", 30)
+	var user string
+	root, m := syncPlaylists(t, func(root string) {
+		user = library.PlaylistFile(root, long)
+		put(t, user, "mine")
+	}, long)
+	f := m.Playlists[long]
+	if s := stem(t, f); !strings.HasSuffix(s, " (Subsonic)") || f == user || filepath.Dir(f) != root+"/_explaylist_data" {
+		t.Fatal(f)
+	}
+	if b, _ := os.ReadFile(user); string(b) != "mine" {
+		t.Fatalf("user file changed: %q", b)
+	}
+}
+
+// Two long names that cut to the same 63 bytes get two files.
+func TestLongPlaylistNamesCutAlike(t *testing.T) {
+	a, b := strings.Repeat("Песня", 10)+" A", strings.Repeat("Песня", 10)+" B"
+	_, m := syncPlaylists(t, nil, a, b)
+	fa, fb := m.Playlists[a], m.Playlists[b]
+	stem(t, fa)
+	stem(t, fb)
+	if strings.EqualFold(fa, fb) {
+		t.Fatal(fa, fb)
+	}
+	for _, f := range []string{fa, fb} {
+		if _, err := os.Stat(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A playlist an older build recorded under a name longer than the Q2 keeps is moved to one that
+// fits; the Q2's playlist, cut to the same 63 bytes, stays the app's (imported, so replaced by
+// name), unless the Q2 cut it mid-character, so another name. A user's file is never touched.
+func TestLongPlaylistFileMigrated(t *testing.T) {
+	cjk, cyr := strings.Repeat("曲", 30), strings.Repeat("Песня", 10)
+	var oldCJK, oldCyr, user string
+	root, m := syncPlaylists(t, func(root string) {
+		dir := root + "/_explaylist_data/"
+		oldCJK, oldCyr, user = dir+cjk+".m3u", dir+cyr+".m3u", dir+strings.Repeat("曲", 25)+".m3u"
+		for _, f := range []string{oldCJK, oldCyr, user} {
+			put(t, f, "#EXTM3U\n")
+		}
+		(&library.Manifest{Playlists: map[string]string{cjk: oldCJK, cyr: oldCyr},
+			Imported: map[string]bool{oldCJK: true, oldCyr: true}}).Save(root, root+"/.subsonic/manifest.json")
+	}, cjk, cyr)
+	for _, f := range []string{oldCJK, oldCyr} {
+		if _, err := os.Stat(f); !os.IsNotExist(err) {
+			t.Error("old file left:", f)
+		}
+	}
+	if _, err := os.Stat(user); err != nil {
+		t.Error("user file removed")
+	}
+	newCJK, newCyr := library.PlaylistFile(root, cjk), library.PlaylistFile(root, cyr)
+	if m.Playlists[cjk] != newCJK || m.Playlists[cyr] != newCyr {
+		t.Fatal(m.Playlists)
+	}
+	stem(t, newCJK)
+	stem(t, newCyr)
+	if !m.Imported[newCJK] || m.Imported[newCyr] {
+		t.Fatalf("imported %v", m.Imported)
 	}
 }
 

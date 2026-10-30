@@ -286,6 +286,24 @@ func TestPlaylistFileNoPrefix(t *testing.T) {
 	}
 }
 
+// The Q2 keeps 63 bytes of a playlist's name and never finds a longer one by name again, so every
+// import adds a copy (issue #1): the file's name before .m3u is cut to 63 bytes on a character
+// boundary, and never to a dot (".." before .m3u is refused).
+func TestPlaylistFileFitsQ2Name(t *testing.T) {
+	for name, n := range map[string]int{
+		strings.Repeat("曲", 30):                63, // CJK: 3 bytes each
+		strings.Repeat("Песня", 10):            62, // Cyrillic: 2 bytes each, 63 would cut one in half
+		strings.Repeat("x", 62) + ". and more": 62,
+		"Short":                                5,
+	} {
+		base := filepath.Base(PlaylistFile("/r", name))
+		stem := strings.TrimSuffix(base, ".m3u")
+		if len(stem) != n || !utf8.ValidString(stem) || !strings.HasPrefix(name, stem) || strings.Contains(base, "..") {
+			t.Errorf("%q -> %q (%d bytes)", name, stem, len(stem))
+		}
+	}
+}
+
 func TestOwnedPlaylistsOnlyRecorded(t *testing.T) {
 	root := t.TempDir()
 	rec, other := PlaylistFile(root, "Mine"), PlaylistFile(root, "Other")

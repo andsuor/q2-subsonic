@@ -33,9 +33,14 @@ func SafeName(s string) string {
 	if strings.HasPrefix(s, ".") {
 		s = "_" + s[1:]
 	}
-	if len(s) > maxComponent {
-		n := maxComponent
-		for !utf8.RuneStart(s[n]) {
+	return cutName(s, maxComponent)
+}
+
+// cutName cuts s to at most n bytes on a UTF-8 boundary, then drops trailing dots and spaces; "_"
+// when nothing is left.
+func cutName(s string, n int) string {
+	if len(s) > n {
+		for n > 0 && !utf8.RuneStart(s[n]) {
 			n--
 		}
 		s = s[:n]
@@ -126,9 +131,41 @@ func PlaylistSum(paths []string) string {
 	return hex.EncodeToString(h[:8])
 }
 
+// maxPlaylistName is the most of a playlist's name, in bytes, the Q2 keeps (char title[64]). It
+// cuts a longer one when it creates the playlist, then looks playlists up by the whole name, so
+// never finds that one again: every import would add a copy (issue #1).
+const maxPlaylistName = 63
+
 // PlaylistFile is <root>/_explaylist_data/<name>.m3u, the name the Q2's Import playlist shows.
-func PlaylistFile(root, name string) string {
-	return filepath.Join(root, "_explaylist_data", SafeName(name)+".m3u")
+func PlaylistFile(root, name string) string { return PlaylistFileN(root, name, 0) }
+
+// PlaylistFileN is the n-th file name for playlist name, for a clash: n 0 is "<name>.m3u", 1
+// "<name> (Subsonic).m3u", 2 "<name> (Subsonic 2).m3u"... The name before .m3u, suffix included,
+// is cut to the maxPlaylistName bytes the Q2 keeps.
+func PlaylistFileN(root, name string, n int) string {
+	suffix := ""
+	switch {
+	case n == 1:
+		suffix = " (Subsonic)"
+	case n > 1:
+		suffix = fmt.Sprintf(" (Subsonic %d)", n)
+	}
+	return filepath.Join(root, "_explaylist_data", cutName(SafeName(name), maxPlaylistName-len(suffix))+suffix+".m3u")
+}
+
+// StalePlaylistFile reports whether a recorded playlist file has a name PlaylistFileN no longer
+// makes: one the Q2 refuses (an older SafeName's "..") or cuts (longer than it keeps). The sync
+// moves it.
+func StalePlaylistFile(f string) bool {
+	b := filepath.Base(f)
+	return strings.Contains(b, "..") || len(strings.TrimSuffix(b, ".m3u")) > maxPlaylistName
+}
+
+// PlaylistTitle is the name the Q2 gives the playlist imported from f: the file's name without
+// .m3u, cut to maxPlaylistName bytes as the firmware cuts it (mid-character too).
+func PlaylistTitle(f string) string {
+	s := strings.TrimSuffix(filepath.Base(f), ".m3u")
+	return s[:min(len(s), maxPlaylistName)]
 }
 
 // LegacyPlaylistFile is the old "Navidrome - <name>.m3u", kept only so a sync can migrate it.

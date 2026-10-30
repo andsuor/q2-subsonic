@@ -875,6 +875,26 @@ func TestLibraryRowShowsFirmwareError(t *testing.T) {
 	}
 }
 
+// A firmware that refuses a playlist name longer than it keeps answers "error Name too long: <name>"
+// (issue #1): shown as any firmware error, with the message in Details too.
+func TestLibraryRowShowsNameTooLong(t *testing.T) {
+	d := syncAlbum(t)
+	seq := d.libReqSeq(t)
+	msg := "Name too long: " + strings.Repeat("曲", 22)
+	os.WriteFile(filepath.Join(d.tmp, "q2-subsonic.library.done"), []byte(seq+" error "+msg+"\n"), 0o644)
+	r := d.do("sync")
+	if _, ok := find(r, msg); !ok {
+		t.Errorf("error rows %q", titles(r))
+	}
+	det, ok := find(r, "Details")
+	if !ok {
+		t.Fatalf("no Details: %q", titles(r))
+	}
+	if _, ok := find(d.do("details", det.Context), "Error: "+msg); !ok {
+		t.Errorf("details %q", titles(d.do("details", det.Context)))
+	}
+}
+
 func TestLibraryRowNoDoubleRequest(t *testing.T) {
 	d := syncAlbum(t)
 	seq := d.libReqSeq(t)

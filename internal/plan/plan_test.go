@@ -323,6 +323,21 @@ func TestPlanPlaylistsChanged(t *testing.T) {
 	}
 }
 
+// A playlist recorded under a name longer than the Q2 keeps (issue #1) is an update in the preview,
+// though its songs are the same: the sync moves it to a name that fits.
+func TestPlanPlaylistLongNameChanged(t *testing.T) {
+	a := song("s1", "One")
+	m := manifest(entry(a, "original", 1000, "album:a1"))
+	long := strings.Repeat("曲", 30)
+	m.Playlists = map[string]string{long: "/x/_explaylist_data/" + long + ".m3u"}
+	m.PlaylistSums = map[string]string{long: library.PlaylistSum([]string{m.Songs["s1"].Path})}
+	sel := selection.Set{Items: []selection.Item{item("album", "a1", "original"), item("playlist", "p1", "original")}}
+	res := map[string][]subsonic.Song{"album:a1": {a}, "playlist:p1": {a}}
+	if p := Compute(sel, res, map[string]string{"playlist:p1": long}, m, root, big); p.PlaylistsChanged != 1 {
+		t.Fatalf("changed %d", p.PlaylistsChanged)
+	}
+}
+
 // A song resolved through its album (with the album's own artist) and through a playlist (with only
 // its track artist, on a server without displayAlbumArtist) gets the album's artist whichever item
 // comes first, so its folder doesn't depend on the selection's order (review G1, Minor 2).
