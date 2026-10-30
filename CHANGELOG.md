@@ -6,6 +6,8 @@ A few features need Q2 Pod 1.5.9 or later. Each one says so, and what the app do
 
 ## [Unreleased]
 
+## [0.4] - 2026-10-30
+
 ### Added
 
 - **Settings** shows the app's version, to quote in a bug report.
@@ -58,7 +60,8 @@ First release. It needs Q2 Pod with card apps and a Subsonic or OpenSubsonic ser
 - Passwords, tokens, API keys and a `user:password@` in the server address never reach `log.txt` or the Account page.
 - The app changes only `Subsonic/`, the playlist files it wrote and `.subsonic/`, and deletes only what a sync put there, after the downloads have finished.
 
-[Unreleased]: https://github.com/andsuor/q2-subsonic/compare/q2-v0.3...HEAD
+[Unreleased]: https://github.com/andsuor/q2-subsonic/compare/q2-v0.4...HEAD
+[0.4]: https://github.com/andsuor/q2-subsonic/compare/q2-v0.3...q2-v0.4
 [0.3]: https://github.com/andsuor/q2-subsonic/compare/q2-v0.2...q2-v0.3
 [0.2]: https://github.com/andsuor/q2-subsonic/compare/q2-v0.1...q2-v0.2
 [0.1]: https://github.com/andsuor/q2-subsonic/releases/tag/q2-v0.1
