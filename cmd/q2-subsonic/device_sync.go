@@ -497,8 +497,8 @@ func (d *daemon) sendLibrary() (*libJob, error) {
 	var imports, adds []string
 	if m, _ := library.LoadManifest(filepath.Join(d.card, ".subsonic", "manifest.json")); m != nil {
 		for _, f := range m.Playlists {
-			if _, err := os.Stat(f); err != nil || !library.ValidPlaylistFile(d.card, f) {
-				continue
+			if _, err := os.Stat(f); err != nil || !library.ValidPlaylistFile(d.card, f) || library.LongPlaylistFile(f) {
+				continue // an older version's name, longer than the Q2 keeps, waits for the sync that moves it
 			}
 			if m.Imported[f] {
 				imports = append(imports, f)

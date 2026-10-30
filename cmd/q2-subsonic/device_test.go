@@ -1064,6 +1064,36 @@ func TestLibraryAddsThenImports(t *testing.T) {
 	}
 }
 
+// A playlist file an older version recorded under a name longer than the Q2 keeps is never sent
+// (issue #1): the Q2 would add another copy, or refuse the whole request. The next sync moves it.
+func TestLibraryNeverSendsLongName(t *testing.T) {
+	d := syncPlaylist(t)
+	dir := filepath.Join(d.card, "_explaylist_data")
+	mix := filepath.Join(dir, "Mix.m3u")
+	seq, _ := d.libReq(t)
+	d.answer(seq + " ok")
+	d.do("sync")
+	imp, add := filepath.Join(dir, strings.Repeat("曲", 30)+".m3u"), filepath.Join(dir, strings.Repeat("Песня", 10)+".m3u")
+	m := d.manifest()
+	m.Playlists["Long 1"], m.Playlists["Long 2"], m.Imported[imp] = imp, add, true
+	for _, f := range []string{imp, add} {
+		os.WriteFile(f, []byte("#EXTM3U\n"), 0o644)
+	}
+	if err := m.Save(d.card, filepath.Join(d.card, ".subsonic", "manifest.json")); err != nil {
+		t.Fatal(err)
+	}
+	d.syncDone(plan.Plan{PlaylistsStale: true})
+	seq2, lines := d.libReq(t)
+	for _, l := range lines {
+		if _, f, ok := strings.Cut(l, " "); ok && len(strings.TrimSuffix(filepath.Base(f), ".m3u")) > 63 {
+			t.Errorf("sent %q", l)
+		}
+	}
+	if seq2 == seq || strings.Join(lines, "|") != "scan|import "+mix {
+		t.Fatalf("request %s %q", seq2, lines)
+	}
+}
+
 // R35: a playlist of the same name already on the Q2 (the user's own) is never replaced: the file
 // is renamed "Mix (Subsonic).m3u" and added again; a second clash is an error with Details.
 func TestLibraryExistsRenamesThenClash(t *testing.T) {
@@ -1274,7 +1304,7 @@ func TestLibraryRequestSplit(t *testing.T) {
 	m := &library.Manifest{Playlists: map[string]string{}, Imported: map[string]bool{}}
 	want := map[string]bool{}
 	for i := 0; i < 400; i++ {
-		name := fmt.Sprintf("%03d %s", i, strings.Repeat("x", 100))
+		name := fmt.Sprintf("%03d %s", i, strings.Repeat("x", 59)) // 63 bytes, the most the Q2 keeps
 		f := filepath.Join(d.card, "_explaylist_data", name+".m3u")
 		os.MkdirAll(filepath.Dir(f), 0o755)
 		os.WriteFile(f, []byte("#EXTM3U\n"), 0o644)

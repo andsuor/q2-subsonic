@@ -44,7 +44,7 @@ The list has **Sync**, **On This Q2**, **Playlists**, **Albums**, **Artists**, *
 ## Sync rules
 
 - An artist includes albums added to the server later. A playlist follows the server, order and duplicates included. A song reached through several items is stored once.
-- Songs land at `Subsonic/<Album Artist>/<Year> - <Album>/<Disc>-<Track> - <Title>.<ext>`, and each playlist as `_explaylist_data/<name>.m3u`, its name cut to the 63 bytes the Q2 keeps.
+- Songs land at `Subsonic/<Album Artist>/<Year> - <Album>/<Disc>-<Track> - <Title>.<ext>`, and each playlist as `_explaylist_data/<name>.m3u`, its name cut to the 63 bytes the Q2 keeps. An older version wrote longer names, and the Q2 added another copy of such a playlist at each sync: the next sync moves the file to a name that fits, but the copies already on the Q2 stay until you delete them.
 - Deletions happen only after the downloads have finished, and only for what the sync put there.
 
 ## What it touches

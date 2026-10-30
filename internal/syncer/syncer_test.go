@@ -785,8 +785,8 @@ func TestLongPlaylistNamesCutAlike(t *testing.T) {
 }
 
 // A playlist an older build recorded under a name longer than the Q2 keeps is moved to one that
-// fits; the Q2's playlist, cut to the same 63 bytes, stays the app's (imported, so replaced by
-// name), unless the Q2 cut it mid-character, so another name. A user's file is never touched.
+// fits, and goes out as "add" again: the old build's Imported never proved the Q2 playlist of the
+// cut name is the app's, and "import" would replace it (R35). A user's file is never touched.
 func TestLongPlaylistFileMigrated(t *testing.T) {
 	cjk, cyr := strings.Repeat("曲", 30), strings.Repeat("Песня", 10)
 	var oldCJK, oldCyr, user string
@@ -813,8 +813,47 @@ func TestLongPlaylistFileMigrated(t *testing.T) {
 	}
 	stem(t, newCJK)
 	stem(t, newCyr)
-	if !m.Imported[newCJK] || m.Imported[newCyr] {
+	if m.Imported[newCJK] || m.Imported[newCyr] {
 		t.Fatalf("imported %v", m.Imported)
+	}
+}
+
+// A user's file already at the name that fits: the moved playlist takes "<name> (Subsonic).m3u".
+func TestLongPlaylistMigratedBesideUserFile(t *testing.T) {
+	long := strings.Repeat("曲", 30)
+	var old, user string
+	root, m := syncPlaylists(t, func(root string) {
+		old, user = root+"/_explaylist_data/"+long+".m3u", library.PlaylistFile(root, long)
+		put(t, old, "#EXTM3U\n")
+		put(t, user, "mine")
+		(&library.Manifest{Playlists: map[string]string{long: old}, Imported: map[string]bool{old: true}}).Save(root, root+"/.subsonic/manifest.json")
+	}, long)
+	if f := m.Playlists[long]; f != library.PlaylistFileN(root, long, 1) || m.Imported[f] {
+		t.Fatal(f, m.Imported)
+	}
+	stem(t, m.Playlists[long])
+	if b, _ := os.ReadFile(user); string(b) != "mine" {
+		t.Fatalf("user file changed: %q", b)
+	}
+	if _, err := os.Stat(old); !os.IsNotExist(err) {
+		t.Error("old file left")
+	}
+}
+
+// A stale playlist file the sync can't remove is logged; it stays recorded for the next sync.
+func TestStalePlaylistRemoveFailureLogged(t *testing.T) {
+	_, r, root := setup(t)
+	r.log = applog.Open(root+"/log.txt", 1<<20)
+	long := root + "/_explaylist_data/" + strings.Repeat("曲", 30) + ".m3u"
+	put(t, long+"/x", "") // a folder with something in it: os.Remove fails
+	(&library.Manifest{Playlists: map[string]string{"L": long}}).Save(root, root+"/.subsonic/manifest.json")
+	r.Start(plan.Plan{Playlists: map[string][]string{}})
+	wait(t, r)
+	if b, _ := os.ReadFile(root + "/log.txt"); !strings.Contains(string(b), long) {
+		t.Fatalf("%q", b)
+	}
+	if manifest(t, root).Playlists["L"] != long {
+		t.Fatal("not kept")
 	}
 }
 

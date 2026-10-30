@@ -154,18 +154,15 @@ func PlaylistFileN(root, name string, n int) string {
 }
 
 // StalePlaylistFile reports whether a recorded playlist file has a name PlaylistFileN no longer
-// makes: one the Q2 refuses (an older SafeName's "..") or cuts (longer than it keeps). The sync
-// moves it.
+// makes: an older SafeName's "..", or one LongPlaylistFile. The sync moves it.
 func StalePlaylistFile(f string) bool {
-	b := filepath.Base(f)
-	return strings.Contains(b, "..") || len(strings.TrimSuffix(b, ".m3u")) > maxPlaylistName
+	return strings.Contains(filepath.Base(f), "..") || LongPlaylistFile(f)
 }
 
-// PlaylistTitle is the name the Q2 gives the playlist imported from f: the file's name without
-// .m3u, cut to maxPlaylistName bytes as the firmware cuts it (mid-character too).
-func PlaylistTitle(f string) string {
-	s := strings.TrimSuffix(filepath.Base(f), ".m3u")
-	return s[:min(len(s), maxPlaylistName)]
+// LongPlaylistFile reports whether f's name before .m3u is longer than the Q2 keeps: the Q2 would
+// add another copy of its playlist at each import, or refuse it.
+func LongPlaylistFile(f string) bool {
+	return len(strings.TrimSuffix(filepath.Base(f), ".m3u")) > maxPlaylistName
 }
 
 // LegacyPlaylistFile is the old "Navidrome - <name>.m3u", kept only so a sync can migrate it.

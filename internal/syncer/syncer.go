@@ -614,16 +614,16 @@ func (j *job) keep() error {
 // recorded ones no longer selected (unless a download failed).
 func (j *job) playlists() error {
 	m, p := j.m, j.p
-	moved := map[string]string{} // a playlist name -> the stale file it was recorded under
 	for name, f := range m.Playlists {
 		switch {
 		case !library.ValidPlaylistFile(j.root, f):
 			j.logf("sync: ignoring bad recorded playlist path %q for %s", f, name)
 			delete(m.Playlists, name)
 		case library.StalePlaylistFile(f): // an older build's name, which the Q2 refuses or cuts
-			if m.Remove(j.root, f) == nil {
-				delete(m.Playlists, name) // written again below under a name that fits
-				moved[name] = f
+			if err := m.Remove(j.root, f); err != nil {
+				j.logf("sync: remove stale playlist %s: %v", f, err) // kept, and tried again next sync
+			} else {
+				delete(m.Playlists, name) // written again below under a name that fits, and sent as "add" (R35)
 			}
 		}
 	}
@@ -647,11 +647,7 @@ func (j *job) playlists() error {
 	// one a later sync takes for the user's own (and so writes a "(Subsonic)" copy beside).
 	for _, name := range names {
 		if m.Playlists[name] == "" {
-			f := j.freePlaylistFile(m, name, false)
-			m.Playlists[name] = f
-			if old := moved[name]; m.Imported[old] && library.PlaylistTitle(old) == library.PlaylistTitle(f) {
-				m.Imported[f] = true // the Q2 cut the old name to this one: its playlist is the app's, replaced by name
-			}
+			m.Playlists[name] = j.freePlaylistFile(m, name, false)
 			j.unsaved++
 		}
 	}
@@ -819,10 +815,12 @@ func (r *Runner) freePlaylistFile(m *library.Manifest, name string, skipBase boo
 	if skipBase {
 		n = 1
 	}
-	for taken(library.PlaylistFileN(r.root, name, n)) {
+	f := library.PlaylistFileN(r.root, name, n)
+	for taken(f) {
 		n++
+		f = library.PlaylistFileN(r.root, name, n)
 	}
-	return library.PlaylistFileN(r.root, name, n)
+	return f
 }
 
 // remove deletes path through the guard and, when its album folder is left holding only
