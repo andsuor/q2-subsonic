@@ -69,7 +69,7 @@ A failure shows a short message on screen. Open its **Details** row for the oper
 
 **System settings → App Store** shows **Update** when a newer release is out. By hand, replace the five files in `.subsonic` listed above. Your login, settings and selection are kept.
 
-To remove it, first **Settings → Account → Sign Out**, which deletes the stored login, then press **Subsonic** twice in **System settings → App Store**. That leaves `.subsonic/` on the card with your settings, selection and sync records (and the login, if you didn't sign out): delete the folder to remove everything. Synced music stays in `Subsonic/`; delete that folder to free the space.
+To remove it, press **Subsonic** twice in **System settings → App Store**. On Q2 Pod 1.5.9 or later that deletes all of `.subsonic/`: your login, settings, selection and sync records. On older Q2 Pod it leaves that folder, login included, so first **Settings → Account → Sign Out**, which deletes the stored login, and delete the folder afterwards to remove everything. Synced music stays in `Subsonic/`, and its playlists stay as `.m3u` files in `_explaylist_data/`, beside your other playlists. Delete `Subsonic/` and those playlist files to free the space and start clean: an install after a remove starts with no sync records, so it downloads your selection again and saves its playlists under new names beside the old ones.
 
 ## Build
 

@@ -20,16 +20,19 @@ dir=$2
 (
     child=
     # A TERM keeps a crash for the next start: a crash loop stopped from the Q2 is when it matters.
-    trap '[ -n "$child" ] && kill -TERM $child 2>/dev/null && wait $child; rm -f $pid /tmp/q2-subsonic.bin /tmp/q2-subsonic.run /tmp/q2-subsonic.err; exit 0' TERM INT
+    # An app that hasn't ended 2 s after its TERM is killed, so the loop is gone within the 3 s Q2
+    # Pod waits (addon.c's AWAY_MS).
+    trap '[ -n "$child" ] && kill -TERM $child 2>/dev/null && { (sleep 2; kill -KILL $child) 2>/dev/null & w=$!; wait $child; kill $w 2>/dev/null; }; rm -f $pid /tmp/q2-subsonic.bin /tmp/q2-subsonic.run /tmp/q2-subsonic.err; exit 0' TERM INT
     delay=5
     while :; do
         /tmp/q2-subsonic.bin -dir "$dir" 2>/tmp/q2-subsonic.err &
         child=$!
         wait $child
-        code=$?
+        code=$? child=
         [ $code = 0 ] && break
         { cat /tmp/q2-subsonic.err; echo "exit $code"; } >/tmp/q2-subsonic.crash
-        sleep $delay
+        sleep $delay &
+        wait $! # not sleep alone: a TERM interrupts a wait, but waits for a foreground sleep
         [ $delay -lt 60 ] && delay=$((delay * 2))
     done
     rm -f $pid /tmp/q2-subsonic.bin /tmp/q2-subsonic.run /tmp/q2-subsonic.err /tmp/q2-subsonic.crash

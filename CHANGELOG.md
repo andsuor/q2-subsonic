@@ -10,6 +10,10 @@ A few features need Q2 Pod 1.5.9 or later. Each one says so, and what the app do
 
 - **Settings** shows the app's version, to quote in a bug report.
 
+### Fixed
+
+- Stopping the app from the Q2 can no longer hang: if the app hasn't ended 2 s after it's asked to, the launcher kills it, so USB storage and the App Store don't wait on it.
+
 ## [0.3] - 2026-10-30
 
 ### Changed
