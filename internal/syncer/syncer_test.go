@@ -1022,21 +1022,21 @@ func TestOfflinePauses(t *testing.T) {
 
 func TestStopReason(t *testing.T) {
 	full := &os.PathError{Op: "write", Path: "/mnt/mmc/x.part", Err: syscall.ENOSPC}
-	if err := stopReason(full); !errors.Is(err, ErrCardFull) {
+	if err := StopReason(full); !errors.Is(err, ErrCardFull) {
 		t.Error("ENOSPC:", err)
 	}
-	if err := stopReason(&net.OpError{Op: "read", Err: syscall.ECONNRESET}); !errors.Is(err, ErrOffline) {
+	if err := StopReason(&net.OpError{Op: "read", Err: syscall.ECONNRESET}); !errors.Is(err, ErrOffline) {
 		t.Error("reset:", err)
 	}
-	if err := stopReason(&subsonic.APIError{Op: "get", HTTP: 404}); err != nil {
+	if err := StopReason(&subsonic.APIError{Op: "get", HTTP: 404}); err != nil {
 		t.Error("404 is the song's own:", err)
 	}
 	for _, code := range []int{40, 41, 44, 50} { // the account, not the song (R39)
-		if err := stopReason(&subsonic.APIError{Op: "get", HTTP: 200, Code: code}); !errors.Is(err, ErrRefused) || errors.Is(err, ErrOffline) {
+		if err := StopReason(&subsonic.APIError{Op: "get", HTTP: 200, Code: code}); !errors.Is(err, ErrRefused) || errors.Is(err, ErrOffline) {
 			t.Error(code, err)
 		}
 	}
-	if err := stopReason(&subsonic.APIError{Op: "get", HTTP: 200, Code: 70}); err != nil {
+	if err := StopReason(&subsonic.APIError{Op: "get", HTTP: 200, Code: 70}); err != nil {
 		t.Error("70 (not found) is the song's own:", err)
 	}
 }

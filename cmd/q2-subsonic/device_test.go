@@ -1251,6 +1251,19 @@ func TestStreamFolderEmptiedAtStart(t *testing.T) {
 	}
 }
 
+// In a playlist a song the server lacks (70, not found) is skipped: the root says so, with Details.
+func TestRootStreamSkipped(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 1, mediaErr: 70}, "playlist", true)
+	d.stream.backoff = []time.Duration{time.Millisecond}
+	d.do("play", "album:al0 0")
+	var r q2spot.Reply
+	eventually(t, "the skip", func() bool { r = d.do("menu"); _, ok := find(r, "Skipped Song 0: Song not found"); return ok })
+	det := r.Rows[len(r.Rows)-1]
+	if got := strings.Join(titles(d.do(det.URI, det.Context)), "|"); !strings.Contains(got, "Code: 70") {
+		t.Fatalf("details %q", got)
+	}
+}
+
 // A stream holds the Q2 awake only while it fetches: with the songs around the one playing on the
 // card, hold=1 goes, though the stream still runs (I14).
 func TestNoHoldWhileStreamWaits(t *testing.T) {

@@ -23,6 +23,7 @@ type fakeSrc struct {
 	urls  []string
 	onGet func()
 	fail  func(u string) bool
+	err   func(u string) error              // optional: the error Get answers u with (nil: none)
 	body  func(u string) (io.Reader, int64) // optional: the answer's body and its Content-Length (-1: none sent)
 }
 
@@ -37,6 +38,11 @@ func (f *fakeSrc) Get(_ context.Context, u string, _ int64) (*http.Response, err
 	}
 	if f.fail != nil && f.fail(u) {
 		return nil, fmt.Errorf("boom")
+	}
+	if f.err != nil {
+		if err := f.err(u); err != nil {
+			return nil, err
+		}
 	}
 	if f.body != nil {
 		b, n := f.body(u)
@@ -431,3 +437,89 @@ func TestStreamBodyBounds(t *testing.T) {
 type zeros struct{}
 
 func (zeros) Read(p []byte) (int, error) { clear(p); return len(p), nil }
+
+// errFor answers the songs named with err; the others play.
+func errFor(err error, ids ...string) func(string) error {
+	return func(u string) error {
+		for _, id := range ids {
+			if strings.Contains(u, ":"+id+":") {
+				return err
+			}
+		}
+		return nil
+	}
+}
+
+// A song the server can't send (404) is dropped from the queue, which is rewritten aside and
+// renamed into place with every line before it as it was, and the songs after it play on.
+func TestStreamSkipsSongItsServerLacks(t *testing.T) {
+	e := newEnv(t, fw.Caps{Playlist: true})
+	e.s.backoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	e.src.err = errFor(&subsonic.APIError{Op: "stream", HTTP: 404, Msg: "Not Found"}, "s1")
+	e.s.start(songs(4, "flac"), 0)
+	q, before := e.queue(t) // written whole before start returns
+	st1, _ := os.Stat(q)
+	until(t, "songs 3, 4", func() bool { return exists(e.stream(2, "flac")) && exists(e.stream(3, "flac")) })
+	_, after := e.queue(t)
+	head := "#EXTM3U\n" + e.stream(0, "flac") + "\n"
+	if !strings.HasPrefix(before, head+e.stream(1, "flac")+"\n") || after != head+e.stream(2, "flac")+"\n"+e.stream(3, "flac")+"\n" {
+		t.Fatalf("queue %q, was %q", after, before)
+	}
+	if st2, _ := os.Stat(q); os.SameFile(st1, st2) {
+		t.Fatal("queue written in place, not aside and renamed")
+	}
+	if m, _ := filepath.Glob(e.root + "/.subsonic/stream/*.tmp"); len(m) != 0 {
+		t.Fatal(m)
+	}
+	if err := e.s.Err(); err == nil || err.Error() != "Skipped T1: Not Found" {
+		t.Fatalf("err %v", err)
+	}
+	if !e.s.active() {
+		t.Fatal("run ended")
+	}
+}
+
+// Losing the server, a proxy's answer that it is down, or a refusal for the account fails every
+// song alike: the run ends at the song, as before, and the queue is left as it was.
+func TestStreamConnectionLossEnds(t *testing.T) {
+	for name, err := range map[string]error{
+		"offline":   &subsonic.APIError{Op: "stream", Msg: "connection refused"},
+		"proxy 502": &subsonic.APIError{Op: "stream", HTTP: 502, Msg: "Bad Gateway"},
+		"429":       &subsonic.APIError{Op: "stream", HTTP: 429, Msg: "Too Many Requests"},
+		"code 50":   &subsonic.APIError{Op: "stream", HTTP: 200, Code: 50, Msg: "not authorized"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t, fw.Caps{Playlist: true})
+			e.s.backoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+			e.src.err = errFor(err, "s1")
+			e.s.start(songs(4, "flac"), 0)
+			_, before := e.queue(t)
+			until(t, "ended", func() bool { return !e.s.active() })
+			if _, after := e.queue(t); after != before {
+				t.Fatalf("queue %q, was %q", after, before)
+			}
+			if e.s.Err() == nil || e.s.Err().Error() != "Couldn't stream T1" || exists(e.stream(2, "flac")) {
+				t.Fatalf("err %v", e.s.Err())
+			}
+		})
+	}
+}
+
+// Two songs skipped is two songs' own; a third in a row means it isn't: the run ends there, the
+// queue still waiting at that song.
+func TestStreamThirdFailureInARowEnds(t *testing.T) {
+	e := newEnv(t, fw.Caps{Playlist: true})
+	e.s.backoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	e.src.err = errFor(&subsonic.APIError{Op: "stream", HTTP: 404, Msg: "Not Found"}, "s1", "s2", "s3")
+	e.s.start(songs(6, "flac"), 0)
+	until(t, "ended", func() bool { return !e.s.active() })
+	_, body := e.queue(t)
+	want := "#EXTM3U\n" + e.stream(0, "flac") + "\n" + e.stream(3, "flac") + "\n" + e.stream(4, "flac") + "\n" +
+		e.stream(5, "flac") + "\n"
+	if body != want {
+		t.Fatalf("queue %q, want %q", body, want)
+	}
+	if e.s.Err() == nil || e.s.Err().Error() != "Couldn't stream T3" || exists(e.stream(4, "flac")) {
+		t.Fatalf("err %v", e.s.Err())
+	}
+}

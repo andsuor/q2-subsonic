@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -66,13 +67,19 @@ type streamErr struct {
 	title, id string
 	at        time.Time
 	err       error // the last try's
+	skipped   bool  // dropped from the queue, and the list played on
 }
 
-func (e *streamErr) Error() string { return "Couldn't stream " + e.title }
+func (e *streamErr) Error() string {
+	if e.skipped {
+		return "Skipped " + e.title + ": " + subsonic.Message(e.err, "")
+	}
+	return "Couldn't stream " + e.title
+}
 func (e *streamErr) Unwrap() error { return e.err }
 
-// Err is set when a song failed all its tries; prefetching stops at that song. A new list or a
-// stop clears it.
+// Err is set when a song failed all its tries; prefetching stops at that song, unless it was
+// skipped. A new list or a stop clears it.
 func (s *streamer) Err() *streamErr {
 	s.errMu.Lock()
 	defer s.errMu.Unlock()
@@ -83,6 +90,12 @@ func (s *streamer) setErr(err *streamErr) {
 	s.errMu.Lock()
 	s.err = err
 	s.errMu.Unlock()
+}
+
+func (s *streamer) logf(format string, a ...any) {
+	if s.log != nil {
+		s.log.Printf("%s", applog.Redact(fmt.Sprintf(format, a...)))
+	}
 }
 
 func (s *streamer) dir() string { return filepath.Join(s.root, ".subsonic", "stream") }
@@ -134,6 +147,8 @@ type job struct {
 	path    string
 	fetch   bool
 	quality string
+	fails   int       // failed tries
+	next    time.Time // no try before
 }
 
 // synced reports whether e's file can play from the card: it is there, and no sync is about to
@@ -177,20 +192,15 @@ func (s *streamer) start(songs []subsonic.Song, from int) {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel, s.done = cancel, make(chan struct{})
 	r := &streamRun{s: s, ctx: ctx, songs: songs, jobs: jobs, from: from, last: from, seq: seq,
-		stale: strings.TrimSpace(string(stale)), fails: map[int]int{}, next: map[int]time.Time{}}
+		stale: strings.TrimSpace(string(stale))}
 	if s.caps.Playlist {
-		// Written once, whole: the firmware has queued these lines and waits for missing files.
-		var paths []string
-		for _, j := range jobs[from:] {
-			paths = append(paths, j.path)
-		}
-		q := filepath.Join(s.dir(), fmt.Sprintf("queue-%d.m3u", seq))
-		if err := library.WriteM3U(s.root, q, paths); err != nil {
+		r.queue = filepath.Join(s.dir(), fmt.Sprintf("queue-%d.m3u", seq))
+		if err := r.writeQueue(); err != nil {
 			cancel()
 			close(s.done)
 			return
 		}
-		r.announce(q)
+		r.announce(r.queue)
 	}
 	go func() { defer close(s.done); r.run() }()
 }
@@ -205,8 +215,51 @@ type streamRun struct {
 	seq       int64
 	announced bool
 	stale     string // .playing at start: ignored until it changes
-	fails     map[int]int
-	next      map[int]time.Time
+	queue     string // the playlist's file; "" in folder mode
+	skips     int    // songs skipped since the last one fetched
+}
+
+// writeQueue writes the queue file whole, a line a song from the first played on, aside and
+// renamed into place. The firmware waits at a song not there yet and has queued the lines before
+// it, so only that song and the ones after it may change.
+func (r *streamRun) writeQueue() error {
+	var paths []string
+	for _, j := range r.jobs[r.from:] {
+		paths = append(paths, j.path)
+	}
+	return library.WriteM3U(r.s.root, r.queue, paths)
+}
+
+// failed counts a failed try of song i and reports whether the run goes on. A song is tried once
+// a backoff entry. Then, in a playlist, a song the server can't send (gone, a transcode that
+// fails, an error for a body) is dropped from the list and the queue file, and the firmware plays
+// on past it; losing the server, a refusal for the account, or a third song in a row fails every
+// song alike, and the run ends at it, the queue waiting there.
+func (r *streamRun) failed(i int, err error) bool {
+	j, sg, s := &r.jobs[i], r.songs[i], r.s
+	j.fails++
+	s.logf("stream %q try %d: %v", sg.Title, j.fails, err)
+	if j.fails < len(s.backoff) {
+		j.next = time.Now().Add(s.backoff[j.fails-1])
+		return true
+	}
+	e := &streamErr{title: sg.Title, id: sg.ID, at: time.Now(), err: err}
+	if r.queue == "" || syncer.StopReason(err) != nil || r.skips >= 2 {
+		s.setErr(e)
+		return false
+	}
+	r.jobs, r.songs = slices.Delete(r.jobs, i, i+1), slices.Delete(r.songs, i, i+1)
+	if werr := r.writeQueue(); werr != nil {
+		s.logf("stream: queue: %v", werr)
+		s.setErr(e)
+		return false
+	}
+	r.skips++
+	e.skipped = true
+	s.setErr(e)
+	s.logf("stream: skipped %s (%q): %v", sg.ID, sg.Title, err)
+	r.last = min(r.last, len(r.jobs)-1)
+	return r.from < len(r.jobs) // else nothing is left to play
 }
 
 func (r *streamRun) announce(path string) {
@@ -264,23 +317,11 @@ func (r *streamRun) run() {
 		}
 		r.s.xfer.Store(want >= 0)
 		fetched := false
-		if want >= 0 && !time.Now().Before(r.next[want]) { // else backing off
-			if err := r.fetch(r.songs[want], r.jobs[want]); err != nil {
-				if r.ctx.Err() != nil {
-					return
-				}
-				r.fails[want]++
-				s := r.s
-				if s.log != nil {
-					s.log.Printf("%s", applog.Redact(fmt.Sprintf("stream %q try %d: %v", r.songs[want].Title, r.fails[want], err)))
-				}
-				if r.fails[want] >= len(s.backoff) {
-					s.setErr(&streamErr{title: r.songs[want].Title, id: r.songs[want].ID, at: time.Now(), err: err})
-					return
-				}
-				r.next[want] = time.Now().Add(s.backoff[r.fails[want]-1])
-			} else {
-				fetched = true
+		if want >= 0 && !time.Now().Before(r.jobs[want].next) { // else backing off
+			if err := r.fetch(r.songs[want], r.jobs[want]); err == nil {
+				fetched, r.skips = true, 0
+			} else if r.ctx.Err() != nil || !r.failed(want, err) {
+				return
 			}
 		}
 		if !r.announced && exists(r.jobs[r.from].path) {

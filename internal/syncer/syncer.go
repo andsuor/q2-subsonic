@@ -560,7 +560,7 @@ func (j *job) downloads() error {
 			}
 			j.fail(id, w.Song.Title, "download", err)
 			j.failed = true
-			switch stop := stopReason(err); {
+			switch stop := StopReason(err); {
 			case errors.Is(stop, ErrRefused): // the server's answer for the account: at once
 				return stop
 			case stop == nil:
@@ -766,11 +766,11 @@ var (
 	ErrRefused  = errors.New("the server refused this account") // wraps the server's error: its code says why
 )
 
-// stopReason tells a failure the whole sync shares from one of this song's own (an HTTP error, or
+// StopReason tells a failure the whole sync shares from one of this song's own (an HTTP error, or
 // a Subsonic one such as 70, not found): ErrOffline (no answer, or a proxy's answer that the
 // server is down, wrapping err), ErrCardFull, or ErrRefused (wrapping err) for an answer about the
 // account: the sign-in (40-44) or downloads turned off for it (50, R39). nil for the song's own.
-func stopReason(err error) error {
+func StopReason(err error) error {
 	var ae *subsonic.APIError
 	var ne net.Error
 	switch {
@@ -923,7 +923,7 @@ func (r *Runner) fetchTries(ctx context.Context, w plan.Want) (int64, error) {
 		if n, err = r.fetch(ctx, w); err == nil {
 			return n, nil
 		}
-		if ctx.Err() != nil || !r.CardMounted() || errors.Is(stopReason(err), ErrRefused) {
+		if ctx.Err() != nil || !r.CardMounted() || errors.Is(StopReason(err), ErrRefused) {
 			return 0, err // a refusal for the account is the same on every try
 		}
 		r.logf("sync: %s try %d: %s", w.Song.ID, i+1, err)

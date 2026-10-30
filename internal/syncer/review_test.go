@@ -32,12 +32,12 @@ func TestProxyErrorPauses(t *testing.T) {
 		t.Errorf("went on after two songs: %d requests for the third", h)
 	}
 	for _, st := range []int{429, 503, 504, 520, 527} {
-		if err := stopReason(&subsonic.APIError{Op: "download", HTTP: st}); !errors.Is(err, ErrOffline) {
+		if err := StopReason(&subsonic.APIError{Op: "download", HTTP: st}); !errors.Is(err, ErrOffline) {
 			t.Error(st, err)
 		}
 	}
 	for _, st := range []int{404, 500} {
-		if err := stopReason(&subsonic.APIError{Op: "download", HTTP: st}); err != nil {
+		if err := StopReason(&subsonic.APIError{Op: "download", HTTP: st}); err != nil {
 			t.Error(st, "is the song's own:", err)
 		}
 	}
