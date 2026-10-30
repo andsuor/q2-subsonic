@@ -426,7 +426,8 @@ func (d *daemon) settingsOp(op string) q2spot.Reply {
 	user := d.user
 	d.mu.Unlock()
 	return q2spot.Reply{Rows: []q2spot.Row{act("defq", "Default Quality: "+qualityName(s.def()), ""),
-		act("streamq", "Streaming Quality: "+qualityName(s.stream()), ""), list("account", "Account", user, "")}}
+		act("streamq", "Streaming Quality: "+qualityName(s.stream()), ""), list("account", "Account", user, ""),
+		info("Version " + strings.TrimPrefix(version, "q2-v"))}}
 }
 
 func (d *daemon) account(cl *subsonic.Client) q2spot.Reply {
