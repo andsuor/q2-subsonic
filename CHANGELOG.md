@@ -6,6 +6,8 @@ A few features need Q2 Pod 1.5.9 or later. Each one says so, and what the app do
 
 ## [Unreleased]
 
+## [0.5] - 2026-11-07
+
 ### Fixed
 
 - A chosen album, artist, playlist or song that the server no longer has no longer stops the whole sync with "Album not found". This happens when the server's library is reorganised and the item gets a new id. The rest of your selection now syncs. The missing item reads **Not on the server** in On This Q2, and its songs stay on the Q2 until you remove it there. If the server can't be reached, the sync still stops, so songs are never removed because of a network problem.
@@ -64,7 +66,8 @@ First release. It needs Q2 Pod with card apps and a Subsonic or OpenSubsonic ser
 - Passwords, tokens, API keys and a `user:password@` in the server address never reach `log.txt` or the Account page.
 - The app changes only `Subsonic/`, the playlist files it wrote and `.subsonic/`, and deletes only what a sync put there, after the downloads have finished.
 
-[Unreleased]: https://github.com/andsuor/q2-subsonic/compare/q2-v0.4...HEAD
+[Unreleased]: https://github.com/andsuor/q2-subsonic/compare/q2-v0.5...HEAD
+[0.5]: https://github.com/andsuor/q2-subsonic/compare/q2-v0.4...q2-v0.5
 [0.4]: https://github.com/andsuor/q2-subsonic/compare/q2-v0.3...q2-v0.4
 [0.3]: https://github.com/andsuor/q2-subsonic/compare/q2-v0.2...q2-v0.3
 [0.2]: https://github.com/andsuor/q2-subsonic/compare/q2-v0.1...q2-v0.2
