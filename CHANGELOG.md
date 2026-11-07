@@ -6,6 +6,10 @@ A few features need Q2 Pod 1.5.9 or later. Each one says so, and what the app do
 
 ## [Unreleased]
 
+### Fixed
+
+- A chosen album, artist, playlist or song that the server no longer has no longer stops the whole sync with "Album not found". This happens when the server's library is reorganised and the item gets a new id. The rest of your selection now syncs. The missing item reads **Not on the server** in On This Q2, and its songs stay on the Q2 until you remove it there. If the server can't be reached, the sync still stops, so songs are never removed because of a network problem.
+
 ## [0.4] - 2026-10-30
 
 ### Added

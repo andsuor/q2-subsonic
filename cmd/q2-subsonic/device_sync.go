@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -148,13 +149,15 @@ func (d *daemon) migrate() q2spot.Reply {
 }
 
 // computePreview resolves every selected item to its songs, 4 at a time, and plans the sync. Any
-// failure fails the preview: a missing item's songs would otherwise read as removed. ctx ends with
-// the preview (dropPreview).
+// failure fails the preview: a missing item's songs would otherwise read as removed. The one
+// exception is a chosen item the server answers "not found" for (deleted, or a new id after the
+// library was reorganised): it is gone, the rest syncs, and its songs stay on the card until it is
+// taken out (Plan.Hold). ctx ends with the preview (dropPreview).
 func (d *daemon) computePreview(ctx context.Context, cl *subsonic.Client, p *preview) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	sel, err := d.selection()
-	resolved, names := map[string][]subsonic.Song{}, map[string]string{}
+	resolved, names, gone := map[string][]subsonic.Song{}, map[string]string{}, map[string]bool{}
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 4)
@@ -194,6 +197,10 @@ func (d *daemon) computePreview(ctx context.Context, cl *subsonic.Client, p *pre
 			key := selection.Key(it.Kind, it.ID)
 			mu.Lock()
 			defer mu.Unlock()
+			if errors.Is(e, subsonic.ErrNotFound) {
+				gone[key] = true
+				return
+			}
 			if e != nil && werr == nil {
 				werr = e
 				cancel()
@@ -211,7 +218,13 @@ func (d *daemon) computePreview(ctx context.Context, cl *subsonic.Client, p *pre
 		if derr := d.runner.DropMissing(); derr != nil && !errors.Is(derr, syncer.ErrBusy) {
 			d.log.Printf("sync: %v", derr)
 		}
-		pl = plan.Compute(sel, resolved, names, d.manifest(), d.card, d.free(d.card))
+		// A gone item is planned as not chosen (a gone playlist's file goes), then held: its songs stay.
+		chosen := sel
+		chosen.Items = slices.DeleteFunc(slices.Clone(sel.Items), func(it selection.Item) bool {
+			return gone[selection.Key(it.Kind, it.ID)]
+		})
+		pl = plan.Compute(chosen, resolved, names, d.manifest(), d.card, d.free(d.card))
+		pl.Hold(gone)
 		// The items holding songs already on the card, recorded now: an up-to-date preview starts
 		// no sync, and status reads them after a restart (I12). A running sync records its own.
 		if rerr := d.runner.Refresh(pl.Keep); rerr != nil && !errors.Is(rerr, syncer.ErrBusy) {
@@ -220,6 +233,9 @@ func (d *daemon) computePreview(ctx context.Context, cl *subsonic.Client, p *pre
 	}
 	d.mu.Lock()
 	p.done, p.plan, p.err, p.at = true, &pl, err, time.Now()
+	if err == nil {
+		d.gone = gone
+	}
 	d.mu.Unlock()
 }
 
@@ -229,10 +245,14 @@ func changes(p plan.Plan) bool {
 }
 
 func previewRows(p *plan.Plan) q2spot.Reply {
-	if !changes(*p) {
-		return q2spot.Reply{Rows: []q2spot.Row{info("Everything is up to date")}}
-	}
 	var rows []q2spot.Row
+	if p.Held > 0 { // its songs stay; On This Q2 marks it, to take out
+		rows = append(rows, q2spot.Row{Kind: "info", Title: plural(p.Held, "item") + " no longer on the server",
+			Subtitle: "Its songs stay · Remove it in On This Q2"})
+	}
+	if !changes(*p) {
+		return q2spot.Reply{Rows: append(rows, info("Everything is up to date"))}
+	}
 	if len(p.Add) > 0 {
 		var b int64
 		for _, w := range p.Add {

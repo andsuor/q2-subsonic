@@ -356,3 +356,20 @@ func TestPlanPrefersAlbumArtist(t *testing.T) {
 		}
 	}
 }
+
+// Hold keeps the songs of a chosen item the server no longer has: not removed, while the songs of
+// an item taken out still go.
+func TestPlanHoldKeepsGoneItemSongs(t *testing.T) {
+	gone, out := song("s1", "One"), song("s2", "Two")
+	gone.AlbumID, out.AlbumID = "a1", "a2"
+	sel := selection.Set{Items: []selection.Item{item(selection.KindAlbum, "a1", "original")}}
+	m := manifest(entry(gone, "original", 1000, "album:a1"), entry(out, "original", 1000, "album:a2"))
+	p := Compute(sel, map[string][]subsonic.Song{}, nil, m, root, big)
+	if len(p.Remove) != 2 {
+		t.Fatalf("before Hold: %d removals, want 2", len(p.Remove))
+	}
+	p.Hold(map[string]bool{"album:a1": true})
+	if len(p.Remove) != 1 || p.Remove[0].ID != "s2" || p.Held != 1 {
+		t.Fatalf("after Hold: remove %v, held %d", p.Remove, p.Held)
+	}
+}

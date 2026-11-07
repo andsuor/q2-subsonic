@@ -35,15 +35,16 @@ type view struct {
 	pending map[string]bool
 	quality map[string]string // chosen item key -> its quality
 	libQ    string            // Entire Library's quality, "" while it is off
+	gone    map[string]bool   // chosen item keys the server no longer has, as last previewed
 }
 
 func (d *daemon) view() view {
 	sel, _ := d.selection()
 	m := d.manifest()
 	d.mu.Lock()
-	res, artists := maps.Clone(d.resolved), maps.Clone(d.artistAlbums)
+	res, artists, gone := maps.Clone(d.resolved), maps.Clone(d.artistAlbums), maps.Clone(d.gone)
 	d.mu.Unlock()
-	v := view{sel: sel, m: m, res: res, artists: artists, keyed: map[string][]string{}, albumOn: map[string]map[string]bool{},
+	v := view{sel: sel, m: m, res: res, artists: artists, gone: gone, keyed: map[string][]string{}, albumOn: map[string]map[string]bool{},
 		pending: map[string]bool{}, quality: map[string]string{}}
 	for _, it := range sel.Items {
 		q := cmp.Or(it.Quality, "original")
@@ -142,6 +143,8 @@ func (v view) status(kind selection.Kind, id string, total int) string {
 		}
 	}
 	switch {
+	case selected && v.gone[key]:
+		return "Not on the server" // its songs stay until it is taken out
 	case v.pending[key]:
 		return "Waiting to sync"
 	case selected && resolved && total == 0:
@@ -179,7 +182,7 @@ func (d *daemon) syncNowRow() (q2spot.Row, bool) {
 	v := d.view()
 	n := 0
 	for _, it := range v.sel.Items {
-		if v.status(it.Kind, it.ID, 0) != "On Q2" {
+		if st := v.status(it.Kind, it.ID, 0); st != "On Q2" && st != "Not on the server" { // a sync can't bring it
 			n++
 		}
 	}

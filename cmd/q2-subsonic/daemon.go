@@ -144,6 +144,7 @@ type daemon struct {
 	libRest            [2][]string                 // the import and add paths the request on file had no room for (I20)
 	resolved           map[string][]subsonic.Song  // selection key -> its songs, as last fetched
 	artistAlbums       map[string][]subsonic.Album // artist id -> its albums, as last fetched
+	gone               map[string]bool             // chosen item keys the server answered "not found" for, as last previewed
 	libCount           [2]int                      // albums, playlists of the Entire Library, as last resolved
 	playSeq            int                         // the latest play request; an older one still waiting is dropped
 	playMu             sync.Mutex                  // one streamer.start at a time

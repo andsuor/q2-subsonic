@@ -35,6 +35,7 @@ type nav struct {
 	errCode          int           // every API call fails with this Subsonic code
 	block            chan struct{} // downloads wait for it
 	failID           string        // getAlbum fails for this album only
+	failCode         int           // the Subsonic code failID fails with; 0 means 70, "Album not found"
 	albumReqs        atomic.Int32  // getAlbum calls served
 	playlists        int           // playlists pl1..plN ("Mix", "Mix 2"…); 0 means 1. pl<k> holds al<k-1>'s songs
 	empty            bool          // every list reply is empty
@@ -141,8 +142,12 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if q.Get("id") == n.failID {
+			code, msg := 70, "Album not found"
+			if n.failCode != 0 {
+				code, msg = n.failCode, "Server busy"
+			}
 			json.NewEncoder(w).Encode(map[string]any{"subsonic-response": map[string]any{"status": "failed",
-				"error": map[string]any{"code": 70, "message": "Album not found"}}})
+				"error": map[string]any{"code": code, "message": msg}}})
 			return
 		}
 		a := n.album(albumOf(q.Get("id")))
@@ -549,18 +554,63 @@ func TestStateHoldDuringSync(t *testing.T) {
 
 // A fast failure while the preview is still starting its workers (run with -race).
 func TestPreviewFailsFastWithoutRace(t *testing.T) {
-	d := newTestDaemon(t, &nav{albums: 40, songsPer: 1, failID: "al0"}, "", true)
+	d := newTestDaemon(t, &nav{albums: 40, songsPer: 1, failID: "al0", failCode: 10}, "", true)
 	sel := selection.Set{Version: 1}
 	for i := 0; i < 40; i++ {
 		sel.Toggle(selection.Item{Kind: selection.KindAlbum, ID: fmt.Sprintf("al%d", i), Name: "x", Quality: "original"})
 	}
 	sel.Save(filepath.Join(d.dir, "selection.json"))
 	r := d.preview(t)
-	if r.Rows[0].Title != "Album not found" {
+	if r.Rows[0].Title != "Server busy" {
 		t.Fatalf("preview rows %q", titles(r))
 	}
 	if _, ok := find(r, "Start Sync"); ok {
 		t.Fatal("a failed preview offers Start Sync")
+	}
+}
+
+// A chosen album the server no longer has (code 70, after a library reorganisation) no longer fails
+// the whole sync: the rest syncs, the album reads as not on the server, and its songs stay on the
+// card until it is taken out of the selection.
+func TestPreviewGoneItemKeepsItsSongs(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 2, songsPer: 2}, "", true)
+	d.do("toggle", "album:al0")
+	d.do("toggle", "album:al1")
+	d.preview(t)
+	d.do("start")
+	eventually(t, "the first sync to finish", func() bool { return d.runner.Snapshot().State == "done" })
+
+	d2 := newTestDaemonOn(t, filepath.Dir(d.dir), &nav{albums: 3, songsPer: 2, failID: "al0"}, "", true)
+	d2.do("toggle", "album:al2")
+	r := d2.preview(t)
+	if _, ok := find(r, "1 item no longer on the server"); !ok {
+		t.Errorf("no gone row: %q", titles(r))
+	}
+	if _, ok := find(r, "Start Sync"); !ok {
+		t.Fatalf("a gone album failed the preview: %q", titles(r))
+	}
+	if _, ok := find(r, "−"); ok {
+		t.Fatalf("the gone album's songs are planned for removal: %q", titles(r))
+	}
+	q := d2.do("onq2")
+	row, ok := find(q, "Album 000")
+	if !ok || !strings.Contains(row.Subtitle, "Not on the server") {
+		t.Fatalf("gone album row %+v in %q", row, titles(q))
+	}
+	if r, _ := d2.syncNowRow(); strings.Contains(r.Subtitle, "2 waiting") {
+		t.Errorf("the gone album counts as waiting: %+v", r)
+	}
+
+	d2.do("start")
+	eventually(t, "the second sync to finish", func() bool { return d2.runner.Snapshot().State == "done" })
+	if n := len(d2.manifest().Songs); n != 6 {
+		t.Fatalf("%d songs on the card, want al0's 2 kept + al1 + al2", n)
+	}
+
+	d2.do("toggle", "album:al0") // taken out by hand: now its songs go
+	r = d2.preview(t)
+	if _, ok := find(r, "−2 songs"); !ok {
+		t.Fatalf("taking the gone album out doesn't remove its songs: %q", titles(r))
 	}
 }
 

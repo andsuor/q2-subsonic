@@ -39,6 +39,17 @@ type Plan struct {
 	NeedBytes, FreeBytes int64
 	ReplaceBytes         int64 // what the replaces add, or free when negative
 	Fits                 bool
+	Held                 int // chosen items the server no longer has, whose songs stay (Hold)
+}
+
+// Hold keeps on the card the songs of held items (item keys): chosen, but gone from the server.
+// They are not removed because the server lost them, only once the item is taken out of the
+// selection. Removals don't count in NeedBytes, so the space check stands.
+func (p *Plan) Hold(held map[string]bool) {
+	p.Held = len(held)
+	p.Remove = slices.DeleteFunc(p.Remove, func(e *library.Entry) bool {
+		return slices.ContainsFunc(e.Items, func(k string) bool { return held[k] })
+	})
 }
 
 func rank(q string) int {

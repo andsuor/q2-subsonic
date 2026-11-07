@@ -20,6 +20,9 @@ var (
 	ErrAuthKey = fmt.Errorf("wrong password or API key: %w", ErrAuth)
 	// ErrStalled is a body that stopped arriving; it is ErrUnreachable too.
 	ErrStalled = fmt.Errorf("server stopped sending: %w", ErrUnreachable)
+	// ErrNotFound is an item the server doesn't have (code 70): deleted, or given a new id when the
+	// library was reorganised.
+	ErrNotFound = errors.New("not on the server")
 )
 
 // APIError keeps what the Details row shows. It unwraps to one of the Err values when the
@@ -38,13 +41,15 @@ func (e *APIError) Error() string {
 func (e *APIError) Unwrap() error { return e.kind }
 
 // codeKind is the Err value a Subsonic error code unwraps to: 40 and 44 are wrong credentials,
-// 41-43 a sign-in method the server won't take for this user (an LDAP user, say).
+// 41-43 a sign-in method the server won't take for this user (an LDAP user, say), 70 data not found.
 func codeKind(code int) error {
 	switch code {
 	case 40, 44:
 		return ErrAuth
 	case 41, 42, 43:
 		return ErrAuthMethod
+	case 70:
+		return ErrNotFound
 	}
 	return nil
 }
