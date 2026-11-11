@@ -15,7 +15,7 @@ func TestQ2AppName(t *testing.T) { // package.py zips this file as it is
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, w := range []string{"name=Subsonic\n", "search=Search Subsonic\n"} {
+	for _, w := range []string{"name=Subsonic\n", "search=Search Subsonic\n", "goto=1\n"} {
 		if !strings.Contains(string(b), w) {
 			t.Errorf("q2app lacks %q", w)
 		}

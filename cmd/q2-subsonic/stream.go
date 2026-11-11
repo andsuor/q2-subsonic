@@ -217,6 +217,19 @@ func (s *streamer) format(sg subsonic.Song) (ext, q string) {
 	return ext, q
 }
 
+// streamID is the song id in a streamed file's name, "NNNN - <title> [<id>].<ext>" as start writes
+// it; "" for any other name.
+// ponytail: an id SafeName changed (FAT-reserved characters, over 120 bytes) or one holding " ["
+// does not come back; keep path→id in the streamer if a server's ids need it.
+func streamID(path string) string {
+	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	i := strings.LastIndex(name, " [")
+	if i < 0 || !strings.HasSuffix(name, "]") {
+		return ""
+	}
+	return name[i+2 : len(name)-1]
+}
+
 // start replaces whatever streams with songs, playing from index from.
 func (s *streamer) start(songs []subsonic.Song, from int) {
 	s.mu.Lock()

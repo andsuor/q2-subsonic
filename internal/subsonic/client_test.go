@@ -186,7 +186,7 @@ func TestListings(t *testing.T) {
 		t.Fatal(ar, al, so, err, q)
 	}
 	_, c = serve(t, "song.json", nil)
-	if s, err := c.Song(ctx, "s1"); err != nil || s.Title != "One" {
+	if s, err := c.Song(ctx, "s1"); err != nil || s.Title != "One" || s.ArtistID != "ar1" {
 		t.Fatal(s, err)
 	}
 }

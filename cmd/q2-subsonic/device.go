@@ -276,6 +276,8 @@ func (d *daemon) reply(req q2spot.Request) q2spot.Reply {
 			list("albums", "By Artist", "", "artist"), list("albums", "By Year", "", "year")}}
 	case "artist", "album", "playlist":
 		return d.withLead(d.itemPage(ctx, cl, req.Arg(0), req.Arg(1)), req.Arg(1), false)
+	case "goto": // the firmware's, for Go to Album and Go to Artist on a song streamed here (q2app's goto=1)
+		return d.withLead(d.gotoPage(ctx, cl, req.Arg(0), req.Arg(1), req.Arg(2)), req.Arg(2), false)
 	case "search":
 		return d.withLead(d.search(ctx, cl, req.Arg(0), req.Arg(1)), req.Arg(1), false)
 	case "discover":

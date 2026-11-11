@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -394,7 +395,37 @@ func (d *daemon) itemPage(ctx context.Context, cl *subsonic.Client, arg, cursor 
 		rows = append(rows, v.item(selection.KindAlbum, a.ID, a.Name, year, a.SongCount))
 		covers[rows[len(rows)-1].Context] = a.CoverArt
 	}
+	if kind == selection.KindArtist && len(albums) == 0 { // Go to Artist on a guest or a compilation's track
+		rows = append(rows, info("No albums"))
+	}
 	return d.withArt(d.page(rows, cursor), covers, cursor)
+}
+
+// gotoPage answers the firmware's goto: Go to Album or Go to Artist (kind) held on a song streamed
+// here, by its file's path. It is that album's or artist's own page. The song is asked for once
+// and kept, for the page's later rows and a second Go to.
+func (d *daemon) gotoPage(ctx context.Context, cl *subsonic.Client, kind, path, cursor string) q2spot.Reply {
+	id := streamID(path)
+	if kind != "album" && kind != "artist" || id == "" || filepath.Dir(path) != d.stream.dir() {
+		return q2spot.Fail(q2spot.Bad, "Not a Subsonic song")
+	}
+	d.mu.Lock()
+	songs := d.resolved[selection.Key(selection.KindSong, id)]
+	d.mu.Unlock()
+	if len(songs) == 0 {
+		var err error
+		if songs, _, err = d.songsOf(ctx, cl, selection.KindSong, id); err != nil {
+			return d.listErr(err, cursor)
+		}
+	}
+	to := songs[0].AlbumID
+	if kind == "artist" {
+		to = songs[0].ArtistID
+	}
+	if to == "" {
+		return q2spot.Reply{Rows: []q2spot.Row{info("The server doesn't say this song's " + kind)}}
+	}
+	return d.itemPage(ctx, cl, kind+":"+to, cursor)
 }
 
 // found is artists, albums and songs: a search's answer, or what is starred.

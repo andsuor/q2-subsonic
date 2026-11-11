@@ -68,6 +68,8 @@ type nav struct {
 	simCode          int                                                     // getSimilarSongs2 fails with this Subsonic code
 	art              bool                                                    // albums and playlists name a cover: their own id
 	cover            func(id string, w http.ResponseWriter, r *http.Request) // getCoverArt's answer; nil is a 64 px JPEG
+	noArtistID       bool                                                    // songs name no artistId
+	noAlbums         bool                                                    // getArtist lists no albums
 	reqMu            sync.Mutex
 	reqN             map[string]int        // requests served, by endpoint
 	lastQ            map[string]url.Values // the latest request's query, by endpoint
@@ -90,9 +92,13 @@ func (n *nav) song(al, j int) map[string]any {
 	if n.various {
 		artist = fmt.Sprintf("Artist %d", j)
 	}
-	return map[string]any{"id": fmt.Sprintf("al%d.%d", al, j), "title": fmt.Sprintf("Song %d", j), "album": fmt.Sprintf("Album %03d", al),
+	s := map[string]any{"id": fmt.Sprintf("al%d.%d", al, j), "title": fmt.Sprintf("Song %d", j), "album": fmt.Sprintf("Album %03d", al),
 		"albumId": fmt.Sprintf("al%d", al), "artist": artist, "year": 2020, "discNumber": 1, "track": j + 1,
 		"duration": 100, "size": 1000, "suffix": "flac"}
+	if !n.noArtistID {
+		s["artistId"] = "ar1"
+	}
+	return s
 }
 
 func (n *nav) album(i int) map[string]any {
@@ -239,6 +245,10 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		ok("artists", map[string]any{"index": ix})
 	case "getArtist":
+		if n.noAlbums {
+			ok("artist", map[string]any{"id": "ar1", "name": "Artist"})
+			return
+		}
 		ok("artist", map[string]any{"id": "ar1", "name": "Artist", "albumCount": 2, "album": []any{n.album(0), n.album(1)}})
 	case "getScanStatus":
 		ls, _ := n.lastScan.Load().(string)
