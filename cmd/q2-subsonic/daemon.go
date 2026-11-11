@@ -155,8 +155,8 @@ func cached[T any](d *daemon, cl *subsonic.Client, key string, fetch func() (T, 
 	return v, nil
 }
 
-// songList is the songs of Starred, Top Songs or a search as last shown, so a song pressed there
-// plays on through them. Its key is the rows' list key: "starred:", "top:<artist id>" or "q:".
+// songList is the songs of Top Songs or a search as last shown (50 at most), so a song pressed
+// there plays on through them. Its key is the rows' list key: "top:<artist id>" or "q:".
 type songList struct {
 	key   string
 	songs []subsonic.Song

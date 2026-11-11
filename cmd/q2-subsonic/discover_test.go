@@ -164,6 +164,25 @@ func TestStarred(t *testing.T) {
 	}
 }
 
+// Starred has no bound, so its songs live in the one-minute cache only: a song pressed plays on
+// through the list, and nothing holds the list once the cache dropped it.
+func TestStarredNotKept(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 2, songsPer: 2}, "playlist", true)
+	r := d.do("starred")
+	d.browseTTL = 0
+	d.tick()
+	d.mu.Lock()
+	kept := len(d.cache) + len(d.listed.songs)
+	d.mu.Unlock()
+	if kept != 0 {
+		t.Fatalf("starred songs still held after the cache dropped them: %d", kept)
+	}
+	if r := d.do("play", r.Rows[2].Context); r.Message != "Playing Song 0" {
+		t.Fatalf("play: %+v", r)
+	}
+	d.waitQueued(t, 2)
+}
+
 func TestShuffle(t *testing.T) {
 	n := &nav{albums: 2, songsPer: 3}
 	d := newTestDaemon(t, n, "playlist", true)

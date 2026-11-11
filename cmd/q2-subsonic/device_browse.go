@@ -338,12 +338,8 @@ type found struct {
 	songs []subsonic.Song
 }
 
-// foundRows lists f, artists then albums then songs, and keeps the songs as the list shown last
-// under listKey, so one pressed plays on through them.
+// foundRows lists f, artists then albums then songs; the songs' rows play in the list listKey.
 func (d *daemon) foundRows(f found, listKey string) []q2spot.Row {
-	d.mu.Lock()
-	d.listed = songList{listKey, f.songs}
-	d.mu.Unlock()
 	v := d.view()
 	var rows []q2spot.Row
 	for _, a := range f.ars {
@@ -368,6 +364,9 @@ func (d *daemon) search(ctx context.Context, cl *subsonic.Client, term, cursor s
 	if err != nil {
 		return d.listErr(err, cursor)
 	}
+	d.mu.Lock()
+	d.listed = songList{"q:", f.songs} // one pressed plays on through them
+	d.mu.Unlock()
 	rows := d.foundRows(f, "q:")
 	if len(rows) == 0 {
 		rows = []q2spot.Row{info("No results")}
@@ -590,10 +589,18 @@ func (d *daemon) play(ctx context.Context, cl *subsonic.Client, arg string) q2sp
 	case "starred", "top", "q":
 		// The list as last shown, when it still has the pressed song at that row: "q:" names no
 		// term, and the firmware asks a level again after every press and Back, so the list kept
-		// may be a newer answer than the one pressed in. Else the song alone.
+		// may be a newer answer than the one pressed in. Else the song alone. Starred has no
+		// bound, so it is not kept in d.listed: it is asked for again once the cache dropped it.
 		d.mu.Lock()
 		l := d.listed
 		d.mu.Unlock()
+		if kind == "starred" {
+			var st found
+			if st, err = d.starredFound(ctx, cl); err != nil {
+				return d.errToast(err)
+			}
+			l = songList{f[0], st.songs}
+		}
 		if l.key == f[0] && i >= 0 && i < len(l.songs) && l.songs[i].ID == pressed {
 			songs = l.songs
 			break

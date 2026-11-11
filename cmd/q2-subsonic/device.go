@@ -24,7 +24,7 @@ import (
 // message; a held Play/Pause sends the row's Position ("toggle") with its Context ("kind:id").
 // Item pages take "kind:id" too, since one Context serves both press and hold. A song row's Context
 // is "song:<id> <list key> <index>": toggle reads the first field, play the rest. The list key is
-// the page's "kind:id", or "starred:", "top:<artist id>" or "q:" (search) for a list kept in
+// the page's "kind:id", or "starred:", or "top:<artist id>" or "q:" (search) for a list kept in
 // d.listed.
 
 var qualities = []string{"original", "mp3-320", "mp3-128"}

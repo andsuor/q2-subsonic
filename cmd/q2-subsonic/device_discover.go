@@ -111,11 +111,16 @@ func (d *daemon) albumLists(ctx context.Context, cl *subsonic.Client, typ, curso
 	return page(rows, cursor)
 }
 
-func (d *daemon) starred(ctx context.Context, cl *subsonic.Client, cursor string) q2spot.Reply {
-	f, err := cached(d, cl, "starred", func() (f found, err error) {
+// starredFound is what is starred, held for browseTTL only: a server may have thousands.
+func (d *daemon) starredFound(ctx context.Context, cl *subsonic.Client) (found, error) {
+	return cached(d, cl, "starred", func() (f found, err error) {
 		f.ars, f.als, f.songs, err = cl.Starred(ctx)
 		return f, err
 	})
+}
+
+func (d *daemon) starred(ctx context.Context, cl *subsonic.Client, cursor string) q2spot.Reply {
+	f, err := d.starredFound(ctx, cl)
 	if err != nil {
 		return d.listErr(err, cursor)
 	}
