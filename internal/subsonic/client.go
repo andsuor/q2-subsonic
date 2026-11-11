@@ -533,7 +533,9 @@ func (c *Client) Song(ctx context.Context, id string) (Song, error) {
 	if err := c.call(ctx, "getSong", url.Values{"id": {id}}, &r); err != nil {
 		return Song{}, err
 	}
-	return r.Song.song(), nil
+	s := r.Song.song()
+	s.ArtistID = r.Song.ArtistID
+	return s, nil
 }
 
 // Scrobble reports a song to the server: playing now (submission false), or played at the time at

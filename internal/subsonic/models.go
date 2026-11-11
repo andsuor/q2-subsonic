@@ -6,7 +6,9 @@ type Song struct {
 	Size                                           int64
 	Suffix, CoverArt                               string
 	BitRate                                        int
-	ArtistID                                       string // the track artist's; "" when the server names none
+	// The track artist's, from getSong alone ("" when the server names none): a list's songs, the
+	// Entire Library's among them, neither hold it nor write it to library.json.
+	ArtistID string `json:",omitempty"`
 }
 
 type Album struct {
@@ -58,7 +60,7 @@ func (w wireSong) song() Song {
 		aa = w.Artist
 	}
 	return Song{w.ID, w.Title, w.Album, w.AlbumID, w.Artist, aa, w.Year, w.Disc, w.Track, w.Duration,
-		w.Size, w.Suffix, w.CoverArt, w.BitRate, w.ArtistID}
+		w.Size, w.Suffix, w.CoverArt, w.BitRate, ""}
 }
 
 func songs(ws []wireSong) []Song {

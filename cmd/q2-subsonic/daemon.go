@@ -270,7 +270,7 @@ func newDaemon(dir, card, tmp string) *daemon {
 		}
 		return tlsroots.Now()
 	}
-	d.stream.clean() // a stream an earlier run left (M26)
+	d.stream.cleanLeft() // a stream an earlier run left (M26)
 	d.art = newArtCache(d, filepath.Join(tmp, "q2-subsonic.art"))
 	d.state.Write(nil)
 	d.migrateErr, d.migrateAt = library.Migrate(card, lg.Printf), time.Now()

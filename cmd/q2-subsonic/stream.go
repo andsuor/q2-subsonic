@@ -186,6 +186,18 @@ func (s *streamer) clean() {
 	}
 }
 
+// cleanLeft is clean at a daemon start, but for a stream the firmware may still play: .playing
+// names a song of the folder that is there. The app exits when idle with the queue still playing,
+// and Go to starts it again from Now Playing. Such a folder goes at the next Play, or at a start
+// after the Q2's own restart, which empties /tmp.
+func (s *streamer) cleanLeft() {
+	if p, _ := s.playingNow(); filepath.Dir(p) == s.dir() && exists(p) {
+		s.dropURLs()
+		return
+	}
+	s.clean()
+}
+
 // job is one song of the list: where it plays from, and how to fetch it when it is not synced.
 type job struct {
 	path    string

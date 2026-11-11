@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -842,5 +843,14 @@ func TestScrobble(t *testing.T) {
 	var ae *APIError
 	if err := serveJSON(t, failed(70)).Scrobble(context.Background(), "s1", at, true); !errors.As(err, &ae) || ae.Code != 70 || errors.Is(err, ErrUnreachable) {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// Only getSong's answer keeps the artist id: the songs of a list, the Entire Library's among them,
+// neither hold it in RAM nor write it to library.json.
+func TestArtistIDOnlyFromGetSong(t *testing.T) {
+	s := wireSong{ID: "s1", ArtistID: "ar1"}.song()
+	if b, _ := json.Marshal(s); s.ArtistID != "" || strings.Contains(string(b), "ArtistID") {
+		t.Fatalf("a list's song holds the artist id: %s", b)
 	}
 }

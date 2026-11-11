@@ -1454,6 +1454,31 @@ func TestStreamFolderEmptiedAtStart(t *testing.T) {
 	}
 }
 
+// But not while the firmware may still play them: the app exits when idle and Go to starts it
+// again from Now Playing, with .playing naming a song of that folder.
+func TestStreamFolderKeptAtStartWhilePlaying(t *testing.T) {
+	card, tmp := t.TempDir(), t.TempDir()
+	dir := filepath.Join(card, ".subsonic", "stream")
+	os.MkdirAll(dir, 0o755)
+	now, next, queue := filepath.Join(dir, "0003 - Song [x].flac"), filepath.Join(dir, "0004 - Song [y].flac"), filepath.Join(dir, "queue-1.m3u")
+	for _, f := range []string{now, next, queue, filepath.Join(tmp, "q2-subsonic.urls")} {
+		os.WriteFile(f, []byte("x"), 0o644)
+	}
+	os.WriteFile(filepath.Join(tmp, "q2-subsonic.playing"), []byte(now+"\n"), 0o644)
+	newDaemon(filepath.Join(card, ".subsonic"), card, tmp)
+	if !exists(now) || !exists(next) || !exists(queue) {
+		t.Fatal("the playing stream's files went")
+	}
+	if exists(filepath.Join(tmp, "q2-subsonic.urls")) {
+		t.Error("the URL queue is left in /tmp")
+	}
+	os.Remove(now) // .playing names a song that is gone: an older stream
+	newDaemon(filepath.Join(card, ".subsonic"), card, tmp)
+	if exists(next) || exists(queue) {
+		t.Fatal("left on the card")
+	}
+}
+
 // In a playlist a song the server lacks (70, not found) is skipped: the root says so, with Details.
 func TestRootStreamSkipped(t *testing.T) {
 	d := newTestDaemon(t, &nav{albums: 1, songsPer: 1, mediaErr: 70}, "playlist", true)
