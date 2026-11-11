@@ -429,8 +429,8 @@ func (d *daemon) menu(sec string) q2spot.Reply {
 		list("onq2", "On This Q2", onq2, ""),
 		list("playlists", "Playlists", "", ""), list("albums", "Albums", "", ""), list("artists", "Artists", "", ""),
 		list("discover", "Discover", "", ""), searchRow, list("settings", "Settings", "", "")}
-	if d.caps.Sections { // Home: the lists are tabs of their own
-		rows = []q2spot.Row{searchRow, rows[0], rows[1], rows[2], rows[8]}
+	if d.caps.Sections { // Home keeps the lists' rows: tabs change by swipe only, the wheel can't reach them
+		rows = append([]q2spot.Row{searchRow}, append(rows[:7:7], rows[8])...)
 	}
 	// Last, so the rows above keep their places under the cursor (M33).
 	if e := d.stream.Err(); e != nil {

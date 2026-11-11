@@ -21,7 +21,7 @@ A few features need a newer Q2 Pod. Each one says so, and what the app does on o
 
 ### Changed
 
-- The first page is now tabs: **Home** (Sync Entire Library, Sync, On This Q2 and Settings), **Discover**, **Playlists**, **Albums** and **Artists**. Swipe left or right to move between them; the title says which one you are on, such as Albums 4/5. A skipped or failed song is reported on Home. Requires Q2 Pod 1.7.3 or later; on older Q2 Pod the first page is one list, as before.
+- The first page is now tabs: **Home** (the whole list as before, so everything is still reachable with the wheel), **Discover**, **Playlists**, **Albums** and **Artists**. Swipe left or right to move between them; the title says which one you are on, such as Albums 4/5. A skipped or failed song is reported on Home. Requires Q2 Pod 1.7.3 or later; on older Q2 Pod the first page is one list, as before.
 - **Search** is a magnifying glass at the right of the title bar on every tab; tap it to search. Under **Theme: Classic**, which has no title bar, it is the first row of each tab. Requires Q2 Pod 1.7.3 or later; on older Q2 Pod Search stays a row in the list.
 - A song pressed in search results plays on through the songs found, instead of alone.
 - With **Sync Entire Library** on, the "Checking server…" step of Sync is faster. The app asks for the songs 500 at a time instead of album by album. When the server says its library hasn't changed since the last check, less than a day ago, only the playlists are checked again (Navidrome says so; the songs it found are kept in `.subsonic/library.json`, for a library of up to 20,000 songs). A server that can't do either is checked album by album, as before. **Check Again** always checks everything.

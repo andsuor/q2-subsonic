@@ -33,13 +33,13 @@ func TestTabsHome(t *testing.T) {
 	d := newTestDaemon(t, &nav{albums: 1, songsPer: 2, mediaErr: 70}, "sections", true)
 	r := d.do("menu", "home")
 	if got := strings.Join(titles(r), "|"); r.Message != "refresh" || r.Rows[0].Kind != "search" ||
-		got != "Search|Sync Entire Library|Sync|On This Q2|Settings" {
+		got != "Search|Sync Entire Library|Sync|On This Q2|Playlists|Albums|Artists|Discover|Settings" {
 		t.Fatalf("message %q, rows %q", r.Message, got)
 	}
 	d.stream.backoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
 	d.do("play", "album:al0 0")
 	eventually(t, "the stream error", func() bool { r = d.do("menu", "home"); _, ok := find(r, "Couldn't stream Song 0"); return ok })
-	if n := len(r.Rows); n != 7 || r.Rows[n-1].Title != "Details" || r.Rows[0].Kind != "search" {
+	if n := len(r.Rows); n != 11 || r.Rows[n-1].Title != "Details" || r.Rows[0].Kind != "search" {
 		t.Fatalf("rows %q", titles(r))
 	}
 }
