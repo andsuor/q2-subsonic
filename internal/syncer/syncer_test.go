@@ -1537,3 +1537,19 @@ func TestAlbumRecorded(t *testing.T) {
 		t.Error("a Refresh with nothing new rewrote the manifest")
 	}
 }
+
+// DropMissing looks where the caller's manifest says, and drops from the one on the card: a song
+// that has moved since is kept.
+func TestDropMissingChecksTheCard(t *testing.T) {
+	_, r, root := setup(t)
+	a, b := want(root, "a", "original"), want(root, "bb", "original")
+	put(t, b.Path+".moved", "bb")
+	seen := &library.Manifest{Songs: map[string]*library.Entry{"a": {ID: "a", Path: a.Path}, "bb": {ID: "bb", Path: b.Path}}}
+	(&library.Manifest{Songs: map[string]*library.Entry{"a": {ID: "a", Path: a.Path}, "bb": {ID: "bb", Path: b.Path + ".moved"}}}).Save(root, root+"/.subsonic/manifest.json")
+	if err := r.DropMissing(seen); err != nil {
+		t.Fatal(err)
+	}
+	if m := manifest(t, root); m.Songs["a"] != nil || m.Songs["bb"] == nil || len(seen.Songs) != 2 {
+		t.Errorf("%+v", m.Songs)
+	}
+}

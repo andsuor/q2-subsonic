@@ -24,7 +24,7 @@ A few features need a newer Q2 Pod. Each one says so, and what the app does on o
 - **Search** is a magnifying glass at the right of the title bar on every tab; tap it to search. Under **Theme: Classic**, which has no title bar, it is the first row of each tab. Requires Q2 Pod 1.7.3 or later; on older Q2 Pod Search stays a row in the list.
 - A song pressed in search results plays on through the songs found, instead of alone.
 - With **Sync Entire Library** on, the "Checking server…" step of Sync is faster. The app asks for the songs 500 at a time instead of album by album. When the server says its library hasn't changed since the last check, less than a day ago, only the playlists are checked again (Navidrome says so; the songs it found are kept in `.subsonic/library.json`, for a library of up to 20,000 songs). A server that can't do either is checked album by album, as before. **Check Again** always checks everything.
-- While it checks, the Sync page counts, such as `4500 of 10000 songs`, then `3 of 12 playlists`.
+- While it checks, the Sync page counts, such as `4500 of 10000 songs`, then `3 of 12 playlists`. Once the server has answered it says `Working out the changes…` while it compares them with the card, which takes a while with a large library.
 - The check no longer gives up after 10 minutes on a large library. It stops when the server stops answering.
 - Artists, Playlists, a long playlist or album and search results are fetched from the server once, not once for every 50 rows, so long lists fill faster. A song pressed on a page you just opened starts without fetching its list again. A change made on the server can take a minute to show.
 

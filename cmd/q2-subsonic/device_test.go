@@ -13,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -2481,5 +2482,28 @@ func TestAlbumBackfilledByCheck(t *testing.T) {
 	d3 := newTestDaemonOn(t, d.card, n, "", true)
 	if row, _ := find(d3.do("albums"), "Album 000"); row.Subtitle != "Artist · On Q2" {
 		t.Errorf("after a restart: %q", row.Subtitle)
+	}
+}
+
+// Once the server has answered, the Sync page says what it does next instead of the last count,
+// and each check leaves one line in the log with how long its parts took.
+func TestSyncPageAfterFetches(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 3, songsPer: 2, playlists: 3}, "", true)
+	hold := make(chan struct{})
+	release := sync.OnceFunc(func() { close(hold) })
+	defer release()
+	d.free = func(string) int64 { <-hold; return 1 << 40 } // asked for once the fetches are done
+	d.do("toggle", "library:all")
+	d.do("sync")
+	eventually(t, "the fetches to end", func() bool {
+		r := d.do("sync")
+		return r.Message == "refresh" && r.Rows[0].Title == "Checking server…" && r.Rows[0].Subtitle == "Working out the changes…"
+	})
+	release()
+	d.preview(t)
+	b, _ := os.ReadFile(filepath.Join(d.dir, "log.txt"))
+	line := regexp.MustCompile(`(?m) sync: check: fetch \S+, library cache \S+, drop-missing \S+, plan \S+, refresh \S+, total \S+$`)
+	if n := len(line.FindAll(b, -1)); n != 1 {
+		t.Errorf("%d timing lines in the log:\n%s", n, b)
 	}
 }

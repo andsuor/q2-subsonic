@@ -33,6 +33,9 @@ import (
 
 const planMargin = 16 << 20 // plan.Compute's headroom on top of what a sync needs
 
+// working is the Sync page's note once the server has answered and the rest is the Q2's own work.
+const working = "Working out the changes…"
+
 // syncPage is the Sync screen: the running sync, the one just finished, or the preview, computed
 // in the background while the page refreshes.
 func (d *daemon) syncPage(cl *subsonic.Client) q2spot.Reply {
@@ -159,10 +162,19 @@ func (d *daemon) migrate() q2spot.Reply {
 // failure fails the preview: a missing item's songs would otherwise read as removed. The one
 // exception is a chosen item the server answers "not found" for (deleted, or a new id after the
 // library was reorganised): it is gone, the rest syncs, and its songs stay on the card until it is
-// taken out (Plan.Hold). ctx ends with the preview (dropPreview).
+// taken out (Plan.Hold). ctx ends with the preview (dropPreview). Each check logs one line with
+// how long its parts took: the Q2 is slow at the ones after the fetches.
 func (d *daemon) computePreview(ctx context.Context, cl *subsonic.Client, p *preview) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	start := time.Now()
+	lapAt := start
+	lap := func() time.Duration { // since the lap before
+		t := time.Since(lapAt)
+		lapAt = lapAt.Add(t)
+		return t.Round(time.Millisecond)
+	}
+	var fetch, cache, drop, planning, refresh time.Duration
 	sel, err := d.selection()
 	resolved, names, gone := map[string][]subsonic.Song{}, map[string]string{}, map[string]bool{}
 	var mu sync.Mutex
@@ -190,6 +202,7 @@ func (d *daemon) computePreview(ctx context.Context, cl *subsonic.Client, p *pre
 					werr = e
 					cancel()
 				}
+				cache = lib.cacheTook.Round(time.Millisecond)
 				key := selection.Key(it.Kind, it.ID)
 				resolved[key] = lib.songs
 				for _, p := range lib.playlists {
@@ -220,16 +233,21 @@ func (d *daemon) computePreview(ctx context.Context, cl *subsonic.Client, p *pre
 		}(it)
 	}
 	wg.Wait()
+	fetch = lap() - cache
 	if err == nil {
 		err = werr
 	}
 	var pl plan.Plan
 	var reclaim int64
 	if err == nil {
+		d.mu.Lock()
+		p.note = working
+		d.mu.Unlock()
 		// Songs deleted from the card are planned again, not taken as there (I9).
-		if derr := d.runner.DropMissing(); derr != nil && !errors.Is(derr, syncer.ErrBusy) {
+		if derr := d.runner.DropMissing(d.manifest()); derr != nil && !errors.Is(derr, syncer.ErrBusy) {
 			d.log.Printf("sync: %v", derr)
 		}
+		drop = lap()
 		// A gone item is planned as not chosen (a gone playlist's file goes), then held: its songs stay.
 		chosen := sel
 		chosen.Items = slices.DeleteFunc(slices.Clone(sel.Items), func(it selection.Item) bool {
@@ -243,12 +261,16 @@ func (d *daemon) computePreview(ctx context.Context, cl *subsonic.Client, p *pre
 			}
 		}
 		pl.Hold(gone)
+		planning = lap()
 		// The items holding songs already on the card, recorded now: an up-to-date preview starts
 		// no sync, and status reads them after a restart (I12). A running sync records its own.
 		if rerr := d.runner.Refresh(pl.Keep); rerr != nil && !errors.Is(rerr, syncer.ErrBusy) {
 			d.log.Printf("sync: refresh: %v", rerr)
 		}
+		refresh = lap()
 	}
+	d.log.Printf("sync: check: fetch %v, library cache %v, drop-missing %v, plan %v, refresh %v, total %v",
+		fetch, cache, drop, planning, refresh, time.Since(start).Round(time.Millisecond))
 	d.mu.Lock()
 	p.done, p.plan, p.err, p.at, p.reclaim = true, &pl, err, time.Now(), reclaim
 	if err == nil {
@@ -685,6 +707,7 @@ type libPlaylist struct {
 type libResult struct {
 	songs     []subsonic.Song
 	playlists []libPlaylist
+	cacheTook time.Duration // writing library.json, when it was written
 }
 
 const (
@@ -831,13 +854,16 @@ func (d *daemon) resolveLibrary(ctx context.Context, cl *subsonic.Client, sem ch
 	if err != nil {
 		return libResult{}, err
 	}
+	note(working) // the last count would stand through the cache's write and the plan
 	if !reuse && lastScan != "" && len(c.Songs) <= maxCacheSongs {
 		now, known := libNow()
 		if ls, n := status(); known && ls == lastScan && n == count {
+			t := time.Now()
 			b, _ := json.Marshal(libCache{libCacheFmt, account, lastScan, count, now, c.Albums, c.Songs})
 			if err := library.WriteOwned(d.card, file, b); err != nil {
 				d.log.Printf("sync: library cache: %v", err)
 			}
+			res.cacheTook = time.Since(t)
 		}
 	}
 	d.mu.Lock()

@@ -322,17 +322,15 @@ func (r *Runner) RetryFailed() {
 	}
 }
 
-// DropMissing forgets the songs whose files are gone from the card (deleted by hand, or with the
-// folder after the app was removed), so the next plan fetches them again (I9). The card is read
-// without the lock, which a reply may wait for; nothing is dropped while the card is away, when
-// every file would seem gone. ErrBusy while a sync runs.
-func (r *Runner) DropMissing() error {
+// DropMissing forgets the songs of m, the manifest as the caller has it, whose files are gone from
+// the card (deleted by hand, or with the folder after the app was removed), so the next plan
+// fetches them again (I9). m is only read, for where to look: a song is dropped from the manifest
+// on the card, read then, and only if it still has that path. The card is read without the lock,
+// which a reply may wait for; nothing is dropped while the card is away, when every file would
+// seem gone. ErrBusy while a sync runs.
+func (r *Runner) DropMissing(m *library.Manifest) error {
 	if !r.CardMounted() {
 		return q2.ErrNoCard
-	}
-	m, err := library.LoadManifest(r.manifestPath())
-	if err != nil {
-		return err
 	}
 	gone := map[string]string{} // id -> its path
 	for id, e := range m.Songs {
