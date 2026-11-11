@@ -35,6 +35,18 @@ func TestCapsWords(t *testing.T) {
 	}
 }
 
+// Every word Q2 Pod writes is known; "game" and "audio", which this app has no use for, and a
+// word of a later Q2 Pod are passed over.
+func TestCapsEveryWord(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "caps")
+	os.WriteFile(f, []byte("playlist progress pages library goto sleep game audio sections art window urls sort later\n"), 0o644)
+	want := Caps{Playlist: true, Progress: true, Library: true, Pages: true, Goto: true, Sleep: true,
+		Sections: true, Art: true, Window: true, URLs: true, Sort: true}
+	if got := ReadCaps(f); got != want {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+}
+
 func TestRequestLibraryFormat(t *testing.T) {
 	// RequestLibrary should write exact bytes
 	tmpdir := t.TempDir()

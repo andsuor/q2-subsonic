@@ -31,7 +31,7 @@ Things to know:
 
 ## Use
 
-The list has **Sync Entire Library**, **Sync**, **On This Q2**, **Playlists**, **Albums**, **Artists**, **Search** and **Settings**.
+The list has **Sync Entire Library**, **Sync**, **On This Q2**, **Playlists**, **Albums**, **Artists**, **Search** and **Settings**. A list you opened is kept for a minute, so a change made on the server can take that long to show.
 
 **Choosing what to sync:** hold **Play/Pause** on a playlist, album, artist or song to toggle it in Sync, or open it and press **Add to Sync** / **Remove from Sync**. The Q2 answers `Added to Sync · N songs`, `Removed from Sync` or, for a song already covered by something bigger, `Included via <name>`. **On This Q2** lists what you picked, with its status and size on the card; hold Play/Pause there to take one out.
 
@@ -64,7 +64,7 @@ Newer Q2 Pod firmware offers extensions to card apps. Without them everything st
 
 ## Errors and logs
 
-A failure shows a short message on screen. Open its **Details** row for the operation, the HTTP status or Subsonic error code, and the time. The full trail is in `.subsonic/log.txt`; passwords and tokens are never logged. If the app crashed, its trace and exit code are added there at the next start. **Settings** shows the app's version, for a bug report.
+A failure shows a short message on screen. Open its **Details** row for the operation, the HTTP status or Subsonic error code, and the time. The full trail is in `.subsonic/log.txt`; passwords and tokens are never logged. An internal error while one page is answered shows "Something went wrong" with **Retry**, and its trace goes there too; a sync or stream carries on. If the app crashed, its trace and exit code are added there at the next start. **Settings** shows the app's version, for a bug report.
 
 ## Update and remove
 

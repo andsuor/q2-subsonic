@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -33,6 +34,8 @@ const (
 	previewTTL  = time.Minute      // a preview older than this is computed again when Sync is opened
 	pingEvery   = 30 * time.Second
 	qrLeftAfter = 5 * time.Second // a gap this long in the signed-out menu's 2 s refresh: the QR page was open
+	browseTTL   = time.Minute     // a list fetched for browsing serves its pages, and a song pressed on it, this long
+	cacheMax    = 4               // lists kept at most: the newest
 )
 
 var errSignedOut = errors.New("signed out")
@@ -116,6 +119,42 @@ type libJob struct {
 	doneAt time.Time
 }
 
+// cacheEntry is one list as the server answered it (never rows: every page's subtitles are built
+// from the selection and the card as they are), for the client that asked.
+type cacheEntry struct {
+	key string
+	cl  *subsonic.Client
+	at  time.Time
+	v   any
+}
+
+// cached is fetch's answer for key, fetched at most once per browseTTL and client: the firmware
+// asks for a list 50 rows at a time, and a pressed song asks for its list again. d.mu is never
+// held across fetch, which may take seconds. A failure is not kept.
+// ponytail: bounded by count, not bytes: four lists of a huge server are a few MB for a minute.
+func cached[T any](d *daemon, cl *subsonic.Client, key string, fetch func() (T, error)) (T, error) {
+	d.mu.Lock()
+	for _, e := range d.cache {
+		if v, ok := e.v.(T); ok && e.key == key && e.cl == cl && time.Since(e.at) < d.browseTTL {
+			d.mu.Unlock()
+			return v, nil
+		}
+	}
+	d.mu.Unlock()
+	v, err := fetch()
+	if err != nil {
+		return v, err
+	}
+	d.mu.Lock()
+	d.cache = slices.DeleteFunc(d.cache, func(e cacheEntry) bool { return e.key == key })
+	if len(d.cache) >= cacheMax {
+		d.cache = slices.Delete(d.cache, 0, len(d.cache)-cacheMax+1)
+	}
+	d.cache = append(d.cache, cacheEntry{key, cl, time.Now(), v})
+	d.mu.Unlock()
+	return v, nil
+}
+
 // daemon is the running app: the Q2SPOT/1 handler (device) and what it drives.
 type daemon struct {
 	dir, card, tmp string // the app folder (.subsonic), the card's root, /tmp
@@ -157,6 +196,8 @@ type daemon struct {
 	migrateErr         error     // the one-time Navidrome/ -> Subsonic/ move failed; Sync shows it
 	migrateAt          time.Time // when it ran
 	wasBusy            bool      // the runner, at the last tick
+	cache              []cacheEntry
+	browseTTL          time.Duration
 
 	bg sync.WaitGroup // the work replies leave running (ping, preview, play, sign-out's stops); tests wait for it
 }
@@ -176,7 +217,7 @@ func newDaemon(dir, card, tmp string) *daemon {
 		newClient: func(c subsonic.Creds) (*subsonic.Client, error) {
 			return subsonic.New(c, tlsroots.Client(15*time.Second))
 		},
-		free: freeBytes, answerIn: answerIn, signinPort: signinPort,
+		free: freeBytes, answerIn: answerIn, signinPort: signinPort, browseTTL: browseTTL,
 		lastReq: time.Now(), resolved: map[string][]subsonic.Song{}, artistAlbums: map[string][]subsonic.Album{}}
 	d.signin = &signin{dir: dir, state: d.state, newClient: func(c subsonic.Creds) (*subsonic.Client, error) {
 		cl, err := d.newClient(c)
@@ -261,6 +302,7 @@ func (d *daemon) signOut() {
 	creds.Remove(d.dir)
 	d.mu.Lock()
 	d.cl, d.pinged = nil, false
+	d.cache = nil
 	d.dropPreview()
 	d.playSeq++ // a play still waiting for playMu is dropped
 	d.mu.Unlock()
@@ -381,6 +423,7 @@ func (d *daemon) tick() {
 		d.lastReq = time.Now()
 	}
 	d.wasBusy = busy
+	d.cache = slices.DeleteFunc(d.cache, func(e cacheEntry) bool { return time.Since(e.at) >= d.browseTTL })
 	d.mu.Unlock()
 	d.state.setHold(busy || d.signin.active() || d.stream.busy())
 	if d.caps.Library {

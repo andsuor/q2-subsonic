@@ -236,7 +236,7 @@ func (d *daemon) browse(ctx context.Context, cl *subsonic.Client, op, cursor str
 		}
 		return r
 	case "playlists":
-		pls, err := cl.Playlists(ctx)
+		pls, err := cached(d, cl, op, func() ([]subsonic.Playlist, error) { return cl.Playlists(ctx) })
 		if err != nil {
 			return d.listErr(err, cursor)
 		}
@@ -247,7 +247,7 @@ func (d *daemon) browse(ctx context.Context, cl *subsonic.Client, op, cursor str
 			rows = []q2spot.Row{{Kind: "info", Title: "No playlists", Subtitle: "Playlists must be public on the server to show here"}}
 		}
 	case "artists":
-		ars, err := cl.Artists(ctx)
+		ars, err := cached(d, cl, op, func() ([]subsonic.Artist, error) { return cl.Artists(ctx) })
 		if err != nil {
 			return d.listErr(err, cursor)
 		}
@@ -261,34 +261,56 @@ func (d *daemon) browse(ctx context.Context, cl *subsonic.Client, op, cursor str
 	return page(rows, cursor)
 }
 
+// itemData is an album's or playlist's songs, or an artist's albums.
+type itemData struct {
+	songs  []subsonic.Song
+	albums []subsonic.Album
+}
+
+var errBadKind = errors.New("bad kind")
+
+// item fetches an album, playlist or artist for its page (cached: its later pages, and a song
+// pressed on it, use the same answer), and keeps it for the status subtitles.
+func (d *daemon) item(ctx context.Context, cl *subsonic.Client, kind selection.Kind, id string) (itemData, error) {
+	key := selection.Key(kind, id)
+	return cached(d, cl, key, func() (it itemData, err error) {
+		switch kind {
+		case selection.KindAlbum:
+			_, it.songs, err = getAlbum(ctx, cl, id)
+		case selection.KindPlaylist:
+			_, it.songs, err = cl.Playlist(ctx, id)
+		case selection.KindArtist:
+			_, it.albums, err = cl.Artist(ctx, id)
+		default:
+			err = errBadKind
+		}
+		if err != nil {
+			return it, err
+		}
+		d.mu.Lock()
+		if it.songs != nil {
+			d.resolved[key] = it.songs
+		}
+		if kind == selection.KindArtist {
+			d.artistAlbums[id] = it.albums
+		}
+		d.mu.Unlock()
+		return it, nil
+	})
+}
+
 // itemPage is an artist's, album's or playlist's own page: Add/Remove, Quality, Play, then its contents.
 func (d *daemon) itemPage(ctx context.Context, cl *subsonic.Client, arg, cursor string) q2spot.Reply {
 	kind, id := parseKey(arg)
 	key := selection.Key(kind, id)
-	var songs []subsonic.Song
-	var albums []subsonic.Album
-	var err error
-	switch kind {
-	case selection.KindAlbum:
-		_, songs, err = getAlbum(ctx, cl, id)
-	case selection.KindPlaylist:
-		_, songs, err = cl.Playlist(ctx, id)
-	case selection.KindArtist:
-		_, albums, err = cl.Artist(ctx, id)
-	default:
+	it, err := d.item(ctx, cl, kind, id)
+	if err == errBadKind {
 		return q2spot.Fail(q2spot.Bad, "Bad request")
 	}
 	if err != nil {
 		return d.listErr(err, cursor)
 	}
-	d.mu.Lock()
-	if songs != nil {
-		d.resolved[key] = songs
-	}
-	if kind == selection.KindArtist {
-		d.artistAlbums[id] = albums
-	}
-	d.mu.Unlock()
+	songs, albums := it.songs, it.albums
 	v := d.view()
 	rows := []q2spot.Row{act("toggle", "Add to Sync", key)}
 	if v.sel.Has(selection.KindLibrary, "all") { // a press could neither add nor remove it (R30, M37)
@@ -321,10 +343,19 @@ func (d *daemon) itemPage(ctx context.Context, cl *subsonic.Client, arg, cursor 
 // search lists what Navidrome found, artists then albums then songs.
 // ponytail: one search3 call, 50 of each kind; page past that when someone needs more.
 func (d *daemon) search(ctx context.Context, cl *subsonic.Client, term, cursor string) q2spot.Reply {
-	ars, als, songs, err := cl.Search(ctx, term, 0)
+	type found struct {
+		ars   []subsonic.Artist
+		als   []subsonic.Album
+		songs []subsonic.Song
+	}
+	f, err := cached(d, cl, "search:"+term, func() (f found, err error) {
+		f.ars, f.als, f.songs, err = cl.Search(ctx, term, 0)
+		return f, err
+	})
 	if err != nil {
 		return d.listErr(err, cursor)
 	}
+	ars, als, songs := f.ars, f.als, f.songs
 	v := d.view()
 	var rows []q2spot.Row
 	for _, a := range ars {
@@ -543,7 +574,15 @@ func (d *daemon) play(ctx context.Context, cl *subsonic.Client, arg string) q2sp
 	}
 	i, _ := strconv.Atoi(f[1])
 	kind, id := parseKey(f[0])
-	songs, _, err := d.songsOf(ctx, cl, kind, id)
+	var songs []subsonic.Song
+	var err error
+	if kind == selection.KindAlbum || kind == selection.KindPlaylist { // the page it was pressed on
+		var it itemData
+		it, err = d.item(ctx, cl, kind, id)
+		songs = it.songs
+	} else {
+		songs, _, err = d.songsOf(ctx, cl, kind, id)
+	}
 	if err != nil {
 		return d.errToast(err)
 	}

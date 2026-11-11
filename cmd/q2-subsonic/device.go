@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -115,11 +117,40 @@ func parseKey(arg string) (selection.Kind, string) {
 	return selection.Kind(k), id
 }
 
-func (d *daemon) device(req q2spot.Request) q2spot.Reply {
-	r := d.reply(req)
+// For the tests: how the app ends, and how long a recovered panic waits for d.mu.
+var (
+	exit     = os.Exit
+	lockWait = 3 * time.Second
+)
+
+func (d *daemon) device(req q2spot.Request) (r q2spot.Reply) {
+	// A panic while answering is this request's failure, not the app's end, which would take a
+	// running sync or stream with it. Only this goroutine is covered: one in the background work,
+	// the runner or the streamer still ends the app.
+	defer func() {
+		p := recover()
+		if p == nil {
+			return
+		}
+		d.log.Printf("panic in %s: %v\n%s", req.Op, p, debug.Stack())
+		r = q2spot.Fail(q2spot.Error, "Something went wrong")
+		// Most sections unlock d.mu without defer: a panic inside one left it held, and every
+		// later request would hang. Then exit as the panic would have: the launcher starts the
+		// app again. The wait is for another request's honest hold.
+		for end := time.Now().Add(lockWait); !d.mu.TryLock(); time.Sleep(10 * time.Millisecond) {
+			if !time.Now().Before(end) {
+				d.log.Printf("the panic left the app locked, exiting")
+				exit(2)
+				return
+			}
+		}
+		d.mu.Unlock()
+	}()
+	r = d.reply(req)
 	// F-R8: the firmware auto-pages a list only when its Message is "pages" and it has a cursor;
-	// otherwise it shows a More… row. Refresh levels keep "refresh" and never page.
-	if r.Cursor != "" && r.Message == "" {
+	// otherwise it shows a More… row, as Q2 Pod without the "pages" word does for any message.
+	// Refresh levels keep "refresh" and never page.
+	if r.Cursor != "" && r.Message == "" && d.caps.Pages {
 		r.Message = "pages"
 	}
 	return r
@@ -415,11 +446,15 @@ func (d *daemon) settingsOp(op string) q2spot.Reply {
 	switch op {
 	case "defq":
 		s.DefaultQuality = nextQuality(s.def())
-		d.saveSettings(s)
+		if err := d.saveSettings(s); err != nil {
+			return d.settingErr(err)
+		}
 		return q2spot.Reply{Message: "Default Quality: " + qualityName(s.def())}
 	case "streamq":
 		s.StreamQuality = nextQuality(s.stream())
-		d.saveSettings(s)
+		if err := d.saveSettings(s); err != nil {
+			return d.settingErr(err)
+		}
 		return q2spot.Reply{Message: "Streaming Quality: " + qualityName(s.stream())}
 	}
 	d.mu.Lock()
@@ -428,6 +463,11 @@ func (d *daemon) settingsOp(op string) q2spot.Reply {
 	return q2spot.Reply{Rows: []q2spot.Row{act("defq", "Default Quality: "+qualityName(s.def()), ""),
 		act("streamq", "Streaming Quality: "+qualityName(s.stream()), ""), list("account", "Account", user, ""),
 		info("Version " + strings.TrimPrefix(version, "q2-v"))}}
+}
+
+func (d *daemon) settingErr(err error) q2spot.Reply {
+	d.log.Printf("settings: %v", err)
+	return q2spot.Fail(q2spot.Error, "Couldn't save the setting")
 }
 
 func (d *daemon) account(cl *subsonic.Client) q2spot.Reply {

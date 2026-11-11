@@ -63,6 +63,14 @@ type nav struct {
 	scanning         atomic.Bool   // getScanStatus's scanning
 	scanMoves        bool          // lastScan is another at every call
 	scanReqs         atomic.Int32  // getScanStatus calls served
+	reqMu            sync.Mutex
+	reqN             map[string]int // requests served, by endpoint
+}
+
+func (n *nav) reqs(op string) int {
+	n.reqMu.Lock()
+	defer n.reqMu.Unlock()
+	return n.reqN[op]
 }
 
 func (n *nav) song(al, j int) map[string]any {
@@ -117,6 +125,12 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"subsonic-response": m})
 	}
 	op := path.Base(r.URL.Path)
+	n.reqMu.Lock()
+	if n.reqN == nil {
+		n.reqN = map[string]int{}
+	}
+	n.reqN[op]++
+	n.reqMu.Unlock()
 	if n.errCode != 0 && op != "download" && op != "stream" {
 		json.NewEncoder(w).Encode(map[string]any{"subsonic-response": map[string]any{"status": "failed",
 			"error": map[string]any{"code": n.errCode, "message": "Data not found"}}})
@@ -293,6 +307,7 @@ func newTestDaemonOn(t *testing.T, card string, n *nav, caps string, signedIn bo
 	d := newDaemon(filepath.Join(card, ".subsonic"), card, tmp)
 	d.newClient = func(c subsonic.Creds) (*subsonic.Client, error) { return subsonic.New(c, srv.Client()) }
 	d.signinPort = 0
+	d.browseTTL = 0 // tests see the server as it is; the cache's own tests set it
 	d.runner.CardMounted = func() bool { return true }
 	d.free = func(string) int64 { return 1 << 40 }
 	if signedIn {
@@ -456,7 +471,7 @@ func TestStatusSubtitles(t *testing.T) {
 }
 
 func TestPagingMore(t *testing.T) {
-	d := newTestDaemon(t, &nav{albums: 120, songsPer: 1}, "", true)
+	d := newTestDaemon(t, &nav{albums: 120, songsPer: 1}, "pages", true)
 	r := d.do("albums")
 	if len(r.Rows) != 50 || r.Cursor == "" {
 		t.Fatalf("first page: %d rows, cursor %q", len(r.Rows), r.Cursor)
@@ -1523,7 +1538,7 @@ func TestArtistsFastOnBigLibrary(t *testing.T) {
 
 // On This Q2 pages like every list: past 50 chosen items, More… (I21).
 func TestOnQ2Pages(t *testing.T) {
-	d := newTestDaemon(t, &nav{albums: 70, songsPer: 1}, "", true)
+	d := newTestDaemon(t, &nav{albums: 70, songsPer: 1}, "pages", true)
 	sel := selection.Set{Version: 1}
 	for i := 0; i < 70; i++ {
 		sel.Toggle(selection.Item{Kind: selection.KindAlbum, ID: fmt.Sprintf("al%d", i), Name: fmt.Sprintf("Album %03d", i), Quality: "original"})

@@ -10,6 +10,8 @@ type Caps struct {
 	Playlist bool
 	Progress bool
 	Library  bool
+	// Words of Q2 Pod 1.5.9 and later. "game" and "audio" are not for this app.
+	Pages, Goto, Sleep, Sections, Art, Window, URLs, Sort bool
 }
 
 // ReadCaps reads the firmware capabilities from path. A missing file gives all false.
@@ -31,6 +33,22 @@ func ReadCaps(path string) Caps {
 			caps.Progress = true
 		case "library":
 			caps.Library = true
+		case "pages":
+			caps.Pages = true
+		case "goto":
+			caps.Goto = true
+		case "sleep":
+			caps.Sleep = true
+		case "sections":
+			caps.Sections = true
+		case "art":
+			caps.Art = true
+		case "window":
+			caps.Window = true
+		case "urls":
+			caps.URLs = true
+		case "sort":
+			caps.Sort = true
 		}
 	}
 	return caps
