@@ -3,6 +3,8 @@ package main
 import (
 	"cmp"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -68,26 +70,30 @@ func (d *daemon) syncPage(cl *subsonic.Client) q2spot.Reply {
 	if _, err := d.selection(); err != nil {
 		return damagedSelection()
 	}
-	checking := q2spot.Reply{Message: "refresh", Rows: []q2spot.Row{info("Checking server…")}}
+	checking := func(note string) q2spot.Reply {
+		return q2spot.Reply{Message: "refresh", Rows: []q2spot.Row{{Kind: "info", Title: "Checking server…", Subtitle: note}}}
+	}
 	d.mu.Lock()
 	p := d.preview
 	if p == nil || p.gen != d.gen || p.done && time.Since(p.at) > previewTTL {
 		d.dropPreview()
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		p = &preview{gen: d.gen, at: time.Now(), cancel: cancel}
-		d.preview = p
+		// No ceiling: a large library takes as long as it takes. A request that gets no answer
+		// ends it (the client's 15 s for headers, 30 s for a silent body), or dropPreview.
+		ctx, cancel := context.WithCancel(context.Background())
+		p = &preview{gen: d.gen, at: time.Now(), cancel: cancel, full: d.fullCheck}
+		d.preview, d.fullCheck = p, false
 		d.mu.Unlock()
 		d.spawn(func() { defer cancel(); d.computePreview(ctx, cl, p) })
-		return checking
+		return checking("")
 	}
-	done, pl, err := p.done, p.plan, p.err
+	done, pl, err, note := p.done, p.plan, p.err, p.note
 	if done && err != nil {
 		d.preview = nil // shown once; the next Sync tries again
 	}
 	d.mu.Unlock()
 	switch {
 	case !done:
-		return checking
+		return checking(note)
 	case err != nil:
 		return d.errRows(err, "")
 	}
@@ -172,7 +178,11 @@ func (d *daemon) computePreview(ctx context.Context, cl *subsonic.Client, p *pre
 			defer wg.Done()
 			if it.Kind == selection.KindLibrary {
 				// Holds no slot itself: its requests take them, so 4 stay the most in flight.
-				lib, e := d.resolveLibrary(ctx, cl, sem)
+				lib, e := d.resolveLibrary(ctx, cl, sem, func(s string) {
+					d.mu.Lock()
+					p.note = s
+					d.mu.Unlock()
+				}, p.full)
 				mu.Lock()
 				defer mu.Unlock()
 				if e != nil && werr == nil {
@@ -450,7 +460,7 @@ func (d *daemon) syncAction(op string) q2spot.Reply {
 		d.mu.Unlock()
 	case "check":
 		d.mu.Lock()
-		d.showDone = false
+		d.showDone, d.fullCheck = false, true
 		d.dropPreview()
 		d.mu.Unlock()
 	}
@@ -659,64 +669,60 @@ type libResult struct {
 	playlists []libPlaylist
 }
 
-const maxAlbums = 100_000 // what Entire Library lists at most: past that the server is broken, or the Q2 too small
+const (
+	maxAlbums     = 100_000 // what Entire Library lists at most: past that the server is broken, or the Q2 too small
+	songPage      = 500     // songs asked for at a time
+	maxCacheSongs = 20_000  // the largest library kept in library.json: it is read whole (about 6 MB)
+	libCacheFor   = 24 * time.Hour
+	libCacheFmt   = 1 // another number when subsonic.Song or libCache changes
+)
 
-// resolveLibrary lists every album (500 a page) and every playlist, then fetches each one's songs.
-// Every request takes a slot of sem, so the library never runs more than the preview's 4 at once.
-// Albums keep their listing order; so do playlists.
-func (d *daemon) resolveLibrary(ctx context.Context, cl *subsonic.Client, sem chan struct{}) (libResult, error) {
-	ctx, cancel := context.WithCancel(ctx) // the first failure stops the queued fetches
+// libCache is .subsonic/library.json: the Entire Library's songs as the newest full check resolved
+// them, used again while the server says its library is as it was. Account is a hash, so the file
+// names neither the server nor the user.
+type libCache struct {
+	Format   int
+	Account  string
+	LastScan string
+	Count    int64
+	At       time.Time
+	Albums   int
+	Songs    []subsonic.Song
+}
+
+// loadLibCache reads the cache at file when it is this account's, for this lastScan and count, and
+// under a day old (by a clock that hasn't gone back since).
+func loadLibCache(file, account, lastScan string, count int64) (libCache, bool) {
+	var c libCache
+	b, err := os.ReadFile(file)
+	if err != nil || json.Unmarshal(b, &c) != nil {
+		return c, false
+	}
+	age := time.Since(c.At)
+	return c, c.Format == libCacheFmt && c.Account == account && c.LastScan == lastScan && c.Count == count &&
+		age >= 0 && age < libCacheFor
+}
+
+// inSlots runs f for 0..n-1, each holding a slot, taken before its goroutine starts: fetches run in
+// order, a failure stops the rest at once, and a large library never parks thousands of goroutines
+// on the semaphore. It returns the first failure, or ctx's when that ended first.
+func inSlots(ctx context.Context, slot func() func(), n int, f func(ctx context.Context, i int) error) error {
+	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	slot := func() func() { sem <- struct{}{}; return func() { <-sem } }
-	var albums []subsonic.Album
-	seen := map[string]bool{}
-	for off := 0; ; {
-		release := slot()
-		page, err := cl.Albums(ctx, off, 500)
-		release()
-		if err != nil {
-			return libResult{}, err
-		}
-		n := len(albums)
-		for _, a := range page {
-			if !seen[a.ID] {
-				seen[a.ID] = true
-				albums = append(albums, a)
-			}
-		}
-		// A short page is the last; a page with nothing new is a server that ignores the offset (M10).
-		if len(page) < 500 || len(albums) == n {
-			break
-		}
-		if len(albums) > maxAlbums {
-			return libResult{}, fmt.Errorf("The library has more than %d albums", maxAlbums)
-		}
-		off += len(page)
-	}
-	release := slot()
-	pls, err := cl.Playlists(ctx)
-	release()
-	if err != nil {
-		return libResult{}, err
-	}
-	res := libResult{playlists: make([]libPlaylist, len(pls))}
-	albumSongs := make([][]subsonic.Song, len(albums))
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var first error
-	// The slot is taken before the goroutine starts: fetches run in order, a failure stops the
-	// rest at once, and a large library never parks thousands of goroutines on the semaphore.
-	run := func(f func() error) {
+	for i := 0; i < n; i++ {
 		release := slot()
 		if ctx.Err() != nil {
 			release()
-			return
+			break
 		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			defer release()
-			if e := f(); e != nil {
+			if e := f(ctx, i); e != nil {
 				mu.Lock()
 				first = cmp.Or(first, e)
 				mu.Unlock()
@@ -724,28 +730,195 @@ func (d *daemon) resolveLibrary(ctx context.Context, cl *subsonic.Client, sem ch
 			}
 		}()
 	}
-	for i, a := range albums {
-		run(func() (err error) { _, albumSongs[i], err = getAlbum(ctx, cl, a.ID); return })
-	}
-	for i, p := range pls {
-		run(func() (err error) {
-			var pl subsonic.Playlist
-			pl, res.playlists[i].songs, err = cl.Playlist(ctx, p.ID)
-			res.playlists[i].id, res.playlists[i].name = p.ID, cmp.Or(pl.Name, p.Name)
-			return
-		})
-	}
 	wg.Wait()
-	if first != nil {
-		return libResult{}, first
+	return cmp.Or(first, ctx.Err())
+}
+
+// resolveLibrary is every song and playlist on the server. The songs come from library.json when
+// the server's last scan and song count are the ones it was written under (never when full: Check
+// Again); else from a full check (librarySongs), which removes the file first, so a cache is never
+// older than the newest full check, and writes it again when the server wasn't scanning and its
+// scan status is the same after the check as before. Playlists are fetched every time: a smart
+// playlist changes without a scan. Every request takes a slot of sem, so the library never runs
+// more than the preview's 4 at once. note is told how far it has come. Albums keep their listing
+// order; so do playlists.
+func (d *daemon) resolveLibrary(ctx context.Context, cl *subsonic.Client, sem chan struct{}, note func(string), full bool) (libResult, error) {
+	slot := func() func() { sem <- struct{}{}; return func() { <-sem } }
+	// status is the server's last scan and song count; "" when it has none to compare, or is scanning.
+	status := func() (string, int64) {
+		release := slot()
+		defer release()
+		lastScan, count, scanning, err := cl.ScanStatus(ctx)
+		if err != nil || scanning {
+			return "", 0
+		}
+		return lastScan, count
 	}
-	res.songs = []subsonic.Song{}
-	for _, s := range albumSongs {
-		res.songs = append(res.songs, s...)
+	lastScan, count := status()
+	file := filepath.Join(d.card, ".subsonic", "library.json")
+	d.mu.Lock()
+	sum := sha256.Sum256([]byte(d.server + "\n" + d.user))
+	d.mu.Unlock()
+	account := hex.EncodeToString(sum[:])
+	var c libCache
+	reuse := false
+	if !full && lastScan != "" {
+		c, reuse = loadLibCache(file, account, lastScan, count)
+	}
+	if !reuse {
+		if err := library.Remove(d.card, file); err != nil {
+			d.log.Printf("sync: library cache: %v", err)
+		}
+		var err error
+		if c.Songs, c.Albums, err = d.librarySongs(ctx, cl, slot, note); err != nil {
+			return libResult{}, err
+		}
+	}
+	release := slot()
+	pls, err := cl.Playlists(ctx)
+	release()
+	if err != nil {
+		return libResult{}, err
+	}
+	res := libResult{songs: c.Songs, playlists: make([]libPlaylist, len(pls))}
+	var mu sync.Mutex
+	done := 0
+	err = inSlots(ctx, slot, len(pls), func(ctx context.Context, i int) error {
+		pl, songs, err := cl.Playlist(ctx, pls[i].ID)
+		if err != nil {
+			return err
+		}
+		res.playlists[i] = libPlaylist{pls[i].ID, cmp.Or(pl.Name, pls[i].Name), songs}
+		mu.Lock()
+		defer mu.Unlock()
+		done++
+		note(fmt.Sprintf("%d of %s", done, plural(len(pls), "playlist")))
+		return nil
+	})
+	if err != nil {
+		return libResult{}, err
+	}
+	if !reuse && lastScan != "" && len(c.Songs) <= maxCacheSongs {
+		if ls, n := status(); ls == lastScan && n == count {
+			b, _ := json.Marshal(libCache{libCacheFmt, account, lastScan, count, time.Now(), c.Albums, c.Songs})
+			if err := library.WriteOwned(d.card, file, b); err != nil {
+				d.log.Printf("sync: library cache: %v", err)
+			}
+		}
 	}
 	d.mu.Lock()
 	d.resolved[selection.Key(selection.KindLibrary, "all")] = res.songs
-	d.libCount = [2]int{len(albums), len(pls)}
+	d.libCount = [2]int{c.Albums, len(pls)}
 	d.mu.Unlock()
 	return res, nil
+}
+
+// librarySongs is a full check: every album listed (500 a page), then its songs. The songs are
+// asked for 500 at a time (Client.Songs) and grouped by album; an album whose group has exactly the
+// songs its listing counts uses the group, in getAlbum's order and with its album-artist rule, and
+// every other album is fetched with getAlbum, as before. So a server that gives nothing for the
+// empty query, ignores the offset or loses a page is checked album by album for what is short, and
+// a page that fails is not the check's failure: getAlbum decides. It returns the songs and the
+// number of albums.
+func (d *daemon) librarySongs(ctx context.Context, cl *subsonic.Client, slot func() func(), note func(string)) ([]subsonic.Song, int, error) {
+	var albums []subsonic.Album
+	seen := map[string]bool{}
+	total := 0
+	for off := 0; ; {
+		release := slot()
+		page, err := cl.Albums(ctx, off, 500)
+		release()
+		if err != nil {
+			return nil, 0, err
+		}
+		n := len(albums)
+		for _, a := range page {
+			if !seen[a.ID] {
+				seen[a.ID] = true
+				albums = append(albums, a)
+				total += a.SongCount
+			}
+		}
+		// A short page is the last; a page with nothing new is a server that ignores the offset (M10).
+		if len(page) < 500 || len(albums) == n {
+			break
+		}
+		if len(albums) > maxAlbums {
+			return nil, 0, fmt.Errorf("The library has more than %d albums", maxAlbums)
+		}
+		off += len(page)
+	}
+	count := func(n int) string {
+		if total == 0 {
+			return plural(n, "song")
+		}
+		return fmt.Sprintf("%d of %s", min(n, total), plural(total, "song"))
+	}
+	groups := map[string][]subsonic.Song{}
+	clear(seen)
+	for off, got := 0, 0; got < total; {
+		release := slot()
+		page, err := cl.Songs(ctx, off, songPage)
+		release()
+		if ctx.Err() != nil {
+			return nil, 0, ctx.Err()
+		}
+		if err != nil {
+			d.log.Printf("sync: songs in pages: %v", err)
+			break
+		}
+		n := got
+		for _, s := range page {
+			if !seen[s.ID] {
+				seen[s.ID] = true
+				groups[s.AlbumID] = append(groups[s.AlbumID], s)
+				got++
+			}
+		}
+		note(count(got))
+		// As for albums. Navidrome answers a search that failed with no songs, so a short page is
+		// not proof of the end: the albums' own counts are.
+		if len(page) < songPage || got == n {
+			break
+		}
+		off += len(page)
+	}
+	albumSongs := make([][]subsonic.Song, len(albums))
+	var need []int // the albums the pages didn't give whole
+	have := 0
+	for i, a := range albums {
+		g := groups[a.ID]
+		if a.SongCount == 0 || len(g) != a.SongCount {
+			need = append(need, i)
+			continue
+		}
+		slices.SortStableFunc(g, func(x, y subsonic.Song) int {
+			return cmp.Or(cmp.Compare(x.Disc, y.Disc), cmp.Compare(x.Track, y.Track))
+		})
+		albumArtist(a, g)
+		albumSongs[i] = g
+		have += len(g)
+	}
+	groups, seen = nil, nil
+	var mu sync.Mutex
+	err := inSlots(ctx, slot, len(need), func(ctx context.Context, k int) error {
+		_, s, err := getAlbum(ctx, cl, albums[need[k]].ID)
+		if err != nil {
+			return err
+		}
+		albumSongs[need[k]] = s
+		mu.Lock()
+		defer mu.Unlock()
+		have += len(s)
+		note(count(have))
+		return nil
+	})
+	if err != nil {
+		return nil, 0, err
+	}
+	songs := []subsonic.Song{}
+	for _, s := range albumSongs {
+		songs = append(songs, s...)
+	}
+	return songs, len(albums), nil
 }

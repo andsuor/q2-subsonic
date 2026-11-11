@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/andsuor/q2-subsonic/internal/q2"
 )
 
 // resolve cleans p and resolves symlinks in its directory (deepest existing ancestor), leaving
@@ -89,6 +91,14 @@ func checkOwned(root, path string, m *Manifest) error {
 		return errors.New("refusing path outside owned trees: " + path)
 	}
 	return nil
+}
+
+// WriteOwned writes a file of the app's own atomically, refusing a path that is not Owned.
+func WriteOwned(root, path string, data []byte) error {
+	if err := checkOwned(root, path, nil); err != nil {
+		return err
+	}
+	return q2.WriteFile(path, data)
 }
 
 // Remove is the only way the app deletes: it refuses anything not Owned, treats a missing file

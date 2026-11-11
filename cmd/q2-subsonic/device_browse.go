@@ -349,15 +349,20 @@ func (d *daemon) search(ctx context.Context, cl *subsonic.Client, term, cursor s
 // ponytail: here, not in subsonic.Client.Album, which another change owns; move it there later.
 func getAlbum(ctx context.Context, cl *subsonic.Client, id string) (subsonic.Album, []subsonic.Song, error) {
 	a, songs, err := cl.Album(ctx, id)
+	albumArtist(a, songs)
+	return a, songs, err
+}
+
+// albumArtist is getAlbum's rule, for an album's songs however they were fetched.
+func albumArtist(a subsonic.Album, songs []subsonic.Song) {
 	for _, s := range songs {
 		if a.Artist != "" && s.AlbumArtist != songs[0].AlbumArtist {
 			for i := range songs {
 				songs[i].AlbumArtist = a.Artist
 			}
-			break
+			return
 		}
 	}
-	return a, songs, err
 }
 
 // songsOf fetches a selected item's songs (an artist's: every album's), and keeps them for the

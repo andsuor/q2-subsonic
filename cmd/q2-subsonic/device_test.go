@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -48,6 +50,17 @@ type nav struct {
 	sameAlbums       bool          // getAlbumList2 ignores offset: every page is the first
 	holdAlbum        chan struct{} // getAlbum waits for it
 	albumGaveUp      atomic.Int32  // getAlbum requests the client cancelled while waiting
+	paged            bool          // search3 answers the empty query ("") with every song, newest first, in pages
+	pageSame         bool          // the empty query ignores songOffset: every page is the first
+	pageEmptyAt      int           // the page at this offset is ok and empty, as Navidrome answers a failed search
+	pageErr          int           // the empty query fails with this Subsonic code
+	songReqs         atomic.Int32  // empty-query search3 calls served
+	holdSongs        chan struct{} // the empty query's later pages wait for it
+	lastScan         atomic.Value  // getScanStatus's lastScan, a string; unset, the call is not found (not Navidrome)
+	count            atomic.Int64  // getScanStatus's count
+	scanning         atomic.Bool   // getScanStatus's scanning
+	scanMoves        bool          // lastScan is another at every call
+	scanReqs         atomic.Int32  // getScanStatus calls served
 }
 
 func (n *nav) song(al, j int) map[string]any {
@@ -179,7 +192,46 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ok("artists", map[string]any{"index": []any{map[string]any{"artist": ars}}})
 	case "getArtist":
 		ok("artist", map[string]any{"id": "ar1", "name": "Artist", "albumCount": 2, "album": []any{n.album(0), n.album(1)}})
+	case "getScanStatus":
+		ls, _ := n.lastScan.Load().(string)
+		if ls == "" {
+			http.NotFound(w, r)
+			return
+		}
+		if k := n.scanReqs.Add(1); n.scanMoves {
+			ls += strconv.Itoa(int(k))
+		}
+		ok("scanStatus", map[string]any{"scanning": n.scanning.Load(), "count": n.count.Load(), "lastScan": ls})
 	case "search3":
+		if q.Get("query") == `""` {
+			n.songReqs.Add(1)
+			off, _ := strconv.Atoi(q.Get("songOffset"))
+			size, _ := strconv.Atoi(q.Get("songCount"))
+			if n.holdSongs != nil && off > 0 {
+				select {
+				case <-n.holdSongs:
+				case <-r.Context().Done():
+					return
+				}
+			}
+			switch {
+			case n.pageErr != 0:
+				json.NewEncoder(w).Encode(map[string]any{"subsonic-response": map[string]any{"status": "failed",
+					"error": map[string]any{"code": n.pageErr, "message": "Server busy"}}})
+				return
+			case !n.paged || n.pageEmptyAt > 0 && off == n.pageEmptyAt:
+				ok("searchResult3", map[string]any{})
+				return
+			case n.pageSame:
+				off = 0
+			}
+			var so []map[string]any // not in album order, as Navidrome's are in the order they were added
+			for k := off; k < n.albums*n.songsPer && k < off+size; k++ {
+				so = append(so, n.song(n.albums-1-k/n.songsPer, n.songsPer-1-k%n.songsPer))
+			}
+			ok("searchResult3", map[string]any{"song": so})
+			return
+		}
 		if n.empty {
 			ok("searchResult3", map[string]any{})
 			return
@@ -1886,4 +1938,201 @@ func TestStaysUpAfterPausedSync(t *testing.T) {
 	if d.idle(time.Now()) {
 		t.Fatal("exits the moment the sync pauses")
 	}
+}
+
+// libSongs is what Entire Library resolves to on n, and the daemon that did it.
+func libSongs(t *testing.T, n *nav) ([]subsonic.Song, *tdaemon) {
+	t.Helper()
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", "library:all")
+	if r := d.preview(t); len(r.Rows) == 0 || !strings.HasPrefix(r.Rows[0].Title, "+") {
+		t.Fatalf("preview %q", titles(r))
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.resolved["library:all"], d
+}
+
+// Entire Library asks for the songs 500 at a time instead of album by album, and resolves to the
+// same songs in the same order.
+func TestEntireLibrarySongsInPages(t *testing.T) {
+	plain := &nav{albums: 300, songsPer: 4}
+	want, _ := libSongs(t, plain)
+	if got := plain.albumReqs.Load(); got != 300 || len(want) != 1200 {
+		t.Fatalf("a server without the empty query: %d album requests, %d songs", got, len(want))
+	}
+	n := &nav{albums: 300, songsPer: 4, paged: true}
+	got, _ := libSongs(t, n)
+	if a, s := n.albumReqs.Load(), n.songReqs.Load(); a != 0 || s != 3 {
+		t.Errorf("%d album and %d page requests, want 0 and 3", a, s)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("paged songs differ from the albums' (%d, %d)", len(got), len(want))
+	}
+}
+
+// A server whose pages can't be trusted is checked album by album for what the pages left short;
+// nothing is lost, and a refused query is not the preview's failure.
+func TestEntireLibraryPagesDegrade(t *testing.T) {
+	want, _ := libSongs(t, &nav{albums: 300, songsPer: 4})
+	for name, c := range map[string]struct {
+		n      *nav
+		albums int32
+	}{
+		"offset ignored":  {&nav{paged: true, pageSame: true}, 175},
+		"a page is empty": {&nav{paged: true, pageEmptyAt: 500}, 175},
+		"query refused":   {&nav{paged: true, pageErr: 10}, 300},
+	} {
+		c.n.albums, c.n.songsPer = 300, 4
+		got, _ := libSongs(t, c.n)
+		if a := c.n.albumReqs.Load(); a != c.albums {
+			t.Errorf("%s: %d album requests, want %d", name, a, c.albums)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s: songs differ (%d, %d)", name, len(got), len(want))
+		}
+	}
+	d := newTestDaemon(t, &nav{albums: 3, songsPer: 2, paged: true, errCode: 10}, "", true)
+	d.do("toggle", "library:all")
+	if r := d.preview(t); len(d.do("removed").Rows) != 1 {
+		t.Errorf("removals planned from a failed check")
+	} else if _, ok := find(r, "Start Sync"); ok {
+		t.Errorf("a failed check offers Start Sync: %q", titles(r))
+	}
+}
+
+// A compilation from the pages stays one folder, as from getAlbum (M41).
+func TestEntireLibraryPagedCompilation(t *testing.T) {
+	got, _ := libSongs(t, &nav{albums: 2, songsPer: 3, paged: true, various: true})
+	for _, s := range got {
+		if s.AlbumArtist != "Various Artists" {
+			t.Fatalf("%s: album artist %q", s.ID, s.AlbumArtist)
+		}
+	}
+}
+
+// again computes the preview anew, as opening Sync after previewTTL does.
+func (d *tdaemon) again(t *testing.T) q2spot.Reply {
+	t.Helper()
+	d.mu.Lock()
+	d.dropPreview()
+	d.mu.Unlock()
+	return d.preview(t)
+}
+
+func scanned(n *nav) *nav {
+	n.lastScan.Store("2026-11-10T03:00:00Z")
+	n.count.Store(int64(n.albums * n.songsPer))
+	return n
+}
+
+// When the server says its library hasn't changed since the last check, the songs come from
+// .subsonic/library.json and only the playlists are fetched.
+func TestEntireLibraryCacheReused(t *testing.T) {
+	n := scanned(&nav{albums: 3, songsPer: 2, paged: true})
+	want, d := libSongs(t, n)
+	file := filepath.Join(d.card, ".subsonic", "library.json")
+	b, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.mu.Lock()
+	server := d.server
+	d.resolved, d.libCount = map[string][]subsonic.Song{}, [2]int{}
+	d.mu.Unlock()
+	if u, _ := url.Parse(server); server == "" || strings.Contains(string(b), u.Host) || strings.Contains(string(b), `"u"`) {
+		t.Errorf("the cache names the account (%s): %.200s", server, b)
+	}
+	r := d.again(t)
+	if s, a := n.songReqs.Load(), n.albumReqs.Load(); s != 1 || a != 0 {
+		t.Errorf("the second check made %d page and %d album requests", s-1, a)
+	}
+	if _, ok := find(r, "+6 songs"); !ok || len(d.daemon.preview.plan.Playlists["Mix"]) != 2 {
+		t.Errorf("preview from the cache %q", titles(r))
+	}
+	d.mu.Lock()
+	got := d.resolved["library:all"]
+	d.mu.Unlock()
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("cached songs differ")
+	}
+	if row := d.do("menu").Rows[0]; row.Subtitle != "On · 3 albums · 1 playlist" {
+		t.Errorf("Sync Entire Library %q", row.Subtitle)
+	}
+
+	// Anything that doesn't match is a full check, which leaves no older cache behind.
+	edit := func(f func(c *libCache)) func() {
+		return func() {
+			var c libCache
+			b, _ := os.ReadFile(file)
+			if err := json.Unmarshal(b, &c); err != nil {
+				t.Fatal(err)
+			}
+			f(&c)
+			b, _ = json.Marshal(c)
+			os.WriteFile(file, b, 0o644)
+		}
+	}
+	for _, c := range []struct {
+		name   string
+		change func()
+		writes bool
+	}{
+		{"lastScan moved", func() { n.lastScan.Store("2026-11-11T03:00:00Z") }, true},
+		{"count changed", func() { n.count.Store(7) }, true},
+		{"another account", func() { d.mu.Lock(); d.user = "other"; d.mu.Unlock() }, true},
+		{"a day old", edit(func(c *libCache) { c.At = c.At.Add(-25 * time.Hour) }), true},
+		{"from the future", edit(func(c *libCache) { c.At = c.At.Add(time.Hour) }), true},
+		{"another format", edit(func(c *libCache) { c.Format++ }), true},
+		{"damaged", func() { os.WriteFile(file, []byte(`{"Format":1,"Songs":[{`), 0o644) }, true},
+		{"Check Again", func() { d.do("check") }, true},
+		{"scanning", func() { n.scanning.Store(true) }, false},
+	} {
+		before := n.songReqs.Load()
+		c.change()
+		d.again(t)
+		if n.songReqs.Load() == before {
+			t.Errorf("%s: the cache was reused", c.name)
+		}
+		if exists(file) != c.writes {
+			t.Errorf("%s: cache written %v, want %v", c.name, !c.writes, c.writes)
+		}
+		before = n.songReqs.Load()
+		if d.again(t); c.writes && n.songReqs.Load() != before {
+			t.Errorf("%s: the check after it didn't reuse its cache", c.name)
+		}
+	}
+}
+
+// No cache is kept when the server can't vouch for it: no lastScan (not Navidrome), a scan that
+// finished during the check, or a library too large to hold.
+func TestEntireLibraryCacheNotWritten(t *testing.T) {
+	moves := scanned(&nav{albums: 3, songsPer: 2, paged: true})
+	moves.scanMoves = true
+	for name, n := range map[string]*nav{
+		"no lastScan":              {albums: 3, songsPer: 2, paged: true},
+		"lastScan moved meanwhile": moves,
+		"over 20,000 songs":        scanned(&nav{albums: 41, songsPer: 500, paged: true}),
+	} {
+		_, d := libSongs(t, n)
+		if exists(filepath.Join(d.card, ".subsonic", "library.json")) {
+			t.Errorf("%s: a cache was written", name)
+		}
+	}
+}
+
+// While it checks, the Sync page counts.
+func TestSyncPageCounts(t *testing.T) {
+	n := &nav{albums: 300, songsPer: 4, paged: true, holdSongs: make(chan struct{})}
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", "library:all")
+	if r := d.do("sync"); r.Message != "refresh" || len(r.Rows) != 1 || r.Rows[0].Subtitle != "" {
+		t.Fatalf("first reply %+v", r)
+	}
+	eventually(t, "the count", func() bool {
+		r := d.do("sync")
+		return r.Message == "refresh" && r.Rows[0].Title == "Checking server…" && r.Rows[0].Subtitle == "500 of 1200 songs"
+	})
+	close(n.holdSongs)
+	d.preview(t)
 }

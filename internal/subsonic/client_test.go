@@ -660,3 +660,25 @@ func TestGetSniffsErrorBody(t *testing.T) {
 		t.Fatalf("media changed: %d bytes", len(got))
 	}
 }
+
+// Songs pages every song with OpenSubsonic's empty query: two quote characters, as a bare query=
+// gives nothing on older Navidrome.
+func TestSongsSendsEmptyQuery(t *testing.T) {
+	var q url.Values
+	_, c := serve(t, "search.json", &q)
+	so, err := c.Songs(context.Background(), 1000, 500)
+	if err != nil || len(so) != 1 || so[0].AlbumArtist != "Various" {
+		t.Fatal(so, err)
+	}
+	if q.Get("query") != `""` || q.Get("songCount") != "500" || q.Get("songOffset") != "1000" ||
+		q.Get("artistCount") != "0" || q.Get("albumCount") != "0" {
+		t.Fatal(q)
+	}
+}
+
+func TestScanStatus(t *testing.T) {
+	_, c := serve(t, "scanstatus.json", nil)
+	if ls, n, scanning, err := c.ScanStatus(context.Background()); err != nil || ls != "2026-11-10T03:00:00Z" || n != 42 || !scanning {
+		t.Fatal(ls, n, scanning, err)
+	}
+}

@@ -104,6 +104,8 @@ type preview struct {
 	plan   *plan.Plan
 	err    error
 	cancel context.CancelFunc // stops its fetches (dropPreview)
+	full   bool               // started by Check Again: the library cache is not used
+	note   string             // how far the check has come, such as "4500 of 10000 songs"; under daemon.mu
 }
 
 type libJob struct {
@@ -138,6 +140,7 @@ type daemon struct {
 	gen                int // bumped by every selection change
 	preview            *preview
 	showDone           bool // the finished sync's page, until Check Again, a new Start, or a choice made after it ended
+	fullCheck          bool // Check Again was pressed: the next preview checks the whole library
 	lib                *libJob
 	libTaken           int64                       // the library request whose answer was taken last (libPoll)
 	libAgain           bool                        // a request was wanted while one awaited its answer: sent once that comes

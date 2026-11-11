@@ -410,3 +410,20 @@ func TestPlayable(t *testing.T) {
 		}
 	}
 }
+
+func TestWriteOwned(t *testing.T) {
+	root := t.TempDir()
+	os.MkdirAll(filepath.Join(root, ".subsonic"), 0o755)
+	p := filepath.Join(root, ".subsonic", "library.json")
+	if err := WriteOwned(root, p, []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(p); string(b) != "x" {
+		t.Fatalf("wrote %q", b)
+	}
+	for _, bad := range []string{filepath.Join(root, "Music", "a.json"), filepath.Join(root, ".subsonic", "..", "a.json"), filepath.Join(root, "a.json")} {
+		if err := WriteOwned(root, bad, []byte("x")); err == nil {
+			t.Errorf("wrote %s", bad)
+		}
+	}
+}

@@ -412,6 +412,37 @@ func (c *Client) Search(ctx context.Context, q string, offset int) ([]Artist, []
 	return artists(r.R.Artist), albums(r.R.Album), songs(r.R.Song), nil
 }
 
+// Songs is one page of every song on the server: search3 with OpenSubsonic's empty query, written
+// as two quote characters (a bare query= gives nothing on Navidrome before 0.59). A server that
+// doesn't know it answers with no songs, or an error.
+func (c *Client) Songs(ctx context.Context, offset, size int) ([]Song, error) {
+	var r struct {
+		R struct {
+			Song []wireSong `json:"song"`
+		} `json:"searchResult3"`
+	}
+	v := url.Values{"query": {`""`}, "artistCount": {"0"}, "albumCount": {"0"},
+		"songCount": {strconv.Itoa(size)}, "songOffset": {strconv.Itoa(offset)}}
+	if err := c.call(ctx, "search3", v, &r); err != nil {
+		return nil, err
+	}
+	return songs(r.R.Song), nil
+}
+
+// ScanStatus is getScanStatus: whether the server is scanning, its song count, and when it last
+// finished a scan (Navidrome; "" on a server that doesn't say).
+func (c *Client) ScanStatus(ctx context.Context) (lastScan string, count int64, scanning bool, err error) {
+	var r struct {
+		S struct {
+			Scanning bool   `json:"scanning"`
+			Count    int64  `json:"count"`
+			LastScan string `json:"lastScan"`
+		} `json:"scanStatus"`
+	}
+	err = c.call(ctx, "getScanStatus", nil, &r)
+	return r.S.LastScan, r.S.Count, r.S.Scanning, err
+}
+
 func (c *Client) Song(ctx context.Context, id string) (Song, error) {
 	var r struct {
 		Song wireSong `json:"song"`
