@@ -390,3 +390,88 @@ func TestCoverWaitsForSync(t *testing.T) {
 		t.Fatal(d.covers())
 	}
 }
+
+// A wait that ran out with covers still to come is over: the list opened again has a refresh phase
+// of its own, so the covers fetched meanwhile are drawn on that visit.
+func TestCoverRevisitAfterWait(t *testing.T) {
+	n := &nav{albums: 5, songsPer: 1, art: true}
+	d := newTestDaemon(t, n, "pages art", true)
+	d.art.wait = 100 * time.Millisecond
+	if err := syncer.Net.Acquire(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	first := d.do("albums").Message
+	time.Sleep(150 * time.Millisecond)
+	poll, again := d.do("albums").Message, d.do("albums").Message
+	syncer.Net.Release()
+	if first != "refresh" || poll == "refresh" || again != "refresh" {
+		t.Fatalf("%q, %q, %q", first, poll, again)
+	}
+	d.bg.Wait()
+}
+
+// The pages the firmware appends by itself wait behind the covers of the rows on screen.
+func TestCoverPagesBehind(t *testing.T) {
+	hold := make(chan struct{})
+	var mu sync.Mutex
+	var order []string
+	n := &nav{albums: 1, songsPer: 1}
+	n.cover = func(id string, w http.ResponseWriter, r *http.Request) {
+		<-hold
+		mu.Lock()
+		order = append(order, id)
+		mu.Unlock()
+		w.Write(picture("jpeg", 64, 64))
+	}
+	d := newTestDaemon(t, n, "pages art", true)
+	rows := func(ids ...string) (rs []q2spot.Row, covers map[string]string) {
+		covers = map[string]string{}
+		for _, id := range ids {
+			rs, covers["album:"+id] = append(rs, q2spot.Row{Kind: "list", URI: "album", Context: "album:" + id}), id
+		}
+		return
+	}
+	r1, c1 := rows("a1", "a2", "a3")
+	r2, c2 := rows("b1", "b2", "a3")
+	if !d.art.want(r1, c1, true) || d.art.want(r2, c2, false) {
+		t.Fatal("refresh")
+	}
+	close(hold)
+	d.bg.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	if got := strings.Join(order, " "); got != "a1 a2 a3 b1 b2" {
+		t.Fatal(got)
+	}
+}
+
+// A proxy answering for a server that is away (502, 503, 504) or a throttle (429) is no miss: the
+// queue is dropped and the next visit asks again.
+func TestCoverServerAway(t *testing.T) {
+	for _, code := range []int{429, 502, 503, 504} {
+		var away sync.Map
+		away.Store("on", true)
+		n := &nav{albums: 4, songsPer: 1, art: true}
+		n.cover = func(id string, w http.ResponseWriter, r *http.Request) {
+			if _, on := away.Load("on"); on {
+				w.WriteHeader(code)
+				return
+			}
+			w.Write(picture("jpeg", 64, 64))
+		}
+		d := newTestDaemon(t, n, "pages art", true)
+		d.do("albums")
+		d.bg.Wait()
+		if got := n.reqs("getCoverArt"); got != 1 || len(d.covers()) != 0 {
+			t.Fatal(code, got, d.covers())
+		}
+		away.Delete("on")
+		if r := d.do("albums"); r.Message != "refresh" {
+			t.Fatal(code, r.Message)
+		}
+		d.bg.Wait()
+		if len(d.covers()) != 4 {
+			t.Fatal(code, d.covers())
+		}
+	}
+}

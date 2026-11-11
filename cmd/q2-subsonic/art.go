@@ -115,10 +115,12 @@ func (c *artCache) clear() { c.reset(c.d.caps.Art) }
 // remove is the app's end.
 func (c *artCache) remove() { c.reset(false) }
 
-// want queues the covers rows lack (covers: a row's context to the server's cover id) ahead of
-// those waiting, and reports whether a first reply should say "refresh" for them: some are still
-// to come, and this list's wait is not over. The wait starts when a list's covers are first wanted
-// and a poll of the same list doesn't start it again; another list does.
+// want queues the covers rows lack (covers: a row's context to the server's cover id): a first
+// drawing's ahead of those waiting, behind them those of a page the firmware appends, which shows
+// them from the next visit on. It reports whether a first reply should say "refresh" for them: some
+// are still to come, and this list's wait is not over. The wait starts when a list's covers are
+// first wanted and a poll of the same list doesn't start it again; another list does, and so does
+// the first reply after the wait ran out: the plain reply ended the polls, so that is a new visit.
 func (c *artCache) want(rows []q2spot.Row, covers map[string]string, first bool) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -148,8 +150,14 @@ func (c *artCache) want(rows []q2spot.Row, covers map[string]string, first bool)
 		}
 		return false
 	}
+	if !first { // the other way round: those waiting stay ahead, and only the ones not among them are added
+		for _, j := range c.queue {
+			delete(asked, j.key)
+		}
+		jobs, c.queue = c.queue, jobs
+	}
 	for _, j := range c.queue {
-		if !asked[j.key] && len(jobs) < artQueue {
+		if !first == asked[j.key] && len(jobs) < artQueue {
 			jobs = append(jobs, j)
 		}
 	}
@@ -164,7 +172,11 @@ func (c *artCache) want(rows []q2spot.Row, covers map[string]string, first bool)
 	if c.burstAt.IsZero() || c.burst != head {
 		c.burst, c.burstAt = head, time.Now()
 	}
-	return time.Since(c.burstAt) < c.wait
+	if time.Since(c.burstAt) < c.wait {
+		return true
+	}
+	c.burstAt = time.Time{}
+	return false
 }
 
 // drain fetches the queue, one cover at a time, until it is empty.
@@ -189,6 +201,9 @@ func (c *artCache) drain() {
 // errNoCover is a cover the Q2 can't show: not asked for again.
 var errNoCover = errors.New("no usable cover")
 
+// artAway is a proxy's answer for a server that is away, or a throttle's: no word on the cover.
+var artAway = map[int]bool{429: true, 502: true, 503: true, 504: true}
+
 // done takes a fetch's end: the cover stored, a miss noted, or, when the server can't be reached,
 // the queue dropped (the next visit asks again). Nothing after a clear: ids repeat across servers.
 func (c *artCache) done(gen int, key uint32, b []byte, err error) {
@@ -199,7 +214,7 @@ func (c *artCache) done(gen int, key uint32, b []byte, err error) {
 	case c.gen != gen:
 	case err == nil:
 		c.store(key, b)
-	case err == errNoCover || errors.As(err, &ae) && ae.HTTP != 0: // the server answered, whatever it said
+	case err == errNoCover || errors.As(err, &ae) && ae.HTTP != 0 && !artAway[ae.HTTP]: // the server answered
 		c.miss[key] = true
 	default:
 		c.d.log.Printf("covers: %d dropped: %s", len(c.queue)+1, applog.Redact(err.Error()))
