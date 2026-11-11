@@ -159,7 +159,7 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	albumOf := func(id string) int { i, _ := strconv.Atoi(strings.TrimPrefix(id, "al")); return i }
 	switch op {
-	case "ping":
+	case "ping", "scrobble":
 		ok("", nil)
 	case "getAlbumList2":
 		if off, _ := strconv.Atoi(q.Get("offset")); n.listErr != 0 && off >= 50 {
@@ -2269,4 +2269,45 @@ func TestSyncPageCounts(t *testing.T) {
 	})
 	close(n.holdSongs)
 	d.preview(t)
+}
+
+// Report Plays is on until turned off in Settings, which is kept and forgets the plays not sent.
+func TestSettingsReportPlays(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 1}, "playlist urls", true)
+	rows := titles(d.do("settings"))
+	if len(rows) < 4 || rows[3] != "Report Plays: On" || !d.stream.plays.on() {
+		t.Fatalf("rows %q", rows)
+	}
+	d.stream.plays.queue = []*play{{id: "s1"}}
+	if r := d.do("report"); r.Message != "Report Plays: Off" || d.stream.plays.on() || len(d.stream.plays.queue) != 0 {
+		t.Fatalf("%+v, queue %v", r, d.stream.plays.queue)
+	}
+	if b, _ := os.ReadFile(filepath.Join(d.dir, "settings.json")); !strings.Contains(string(b), `"noReport":true`) {
+		t.Fatalf("settings.json %s", b)
+	}
+	if _, ok := find(d.do("settings"), "Report Plays: Off"); !ok {
+		t.Fatalf("rows %q", titles(d.do("settings")))
+	}
+	if r := d.do("report"); r.Message != "Report Plays: On" || !d.stream.plays.on() {
+		t.Fatalf("%+v", r)
+	}
+}
+
+// A song the firmware says it plays reaches the server's scrobble, and the app stays for it.
+func TestDaemonReportsPlay(t *testing.T) {
+	n := &nav{albums: 1, songsPer: 1}
+	d := newTestDaemon(t, n, "playlist", true)
+	d.client() // signed in
+	d.stream.plays.unit = time.Millisecond
+	d.mu.Lock()
+	d.lastReq = time.Now().Add(-2 * idleAfter)
+	d.mu.Unlock()
+	d.stream.plays.now(subsonic.Song{ID: "s1", Duration: 400}, 0)
+	if d.idle(time.Now()) {
+		t.Fatal("idle with a play pending")
+	}
+	until(t, "idle", func() bool { return d.idle(time.Now()) })
+	if q := n.query("scrobble"); n.reqs("scrobble") != 2 || q.Get("id") != "s1" || q.Get("submission") != "true" || q.Get("time") == "" {
+		t.Fatalf("%d scrobbles, the last %v", n.reqs("scrobble"), q)
+	}
 }

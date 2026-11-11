@@ -820,3 +820,27 @@ func TestLyricsCut(t *testing.T) {
 		t.Fatalf("%d bytes, %v", len(got), err)
 	}
 }
+
+// A play is reported with scrobble: now playing (submission=false) or played, at a time in ms; a
+// zero time sends none, and the server takes its own.
+func TestScrobble(t *testing.T) {
+	var got url.Values
+	_, c := serve(t, "ping.json", &got)
+	at := time.UnixMilli(1762860000123)
+	if err := c.Scrobble(context.Background(), "s1", at, true); err != nil {
+		t.Fatal(err)
+	}
+	if got.Get("id") != "s1" || got.Get("submission") != "true" || got.Get("time") != "1762860000123" {
+		t.Fatalf("query %v", got)
+	}
+	if err := c.Scrobble(context.Background(), "s1", time.Time{}, false); err != nil {
+		t.Fatal(err)
+	}
+	if got.Get("submission") != "false" || got.Has("time") {
+		t.Fatalf("query %v", got)
+	}
+	var ae *APIError
+	if err := serveJSON(t, failed(70)).Scrobble(context.Background(), "s1", at, true); !errors.As(err, &ae) || ae.Code != 70 || errors.Is(err, ErrUnreachable) {
+		t.Fatalf("got %v", err)
+	}
+}

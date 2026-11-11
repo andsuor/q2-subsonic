@@ -56,6 +56,8 @@ type streamer struct {
 	// urlsFile, a queue of server URLs its own player streams (startDirect). Unset: never.
 	urlsFile string
 	direct   func() bool
+	// plays reports the songs .playing names to the server. A Direct queue names none.
+	plays *plays
 
 	errMu sync.Mutex
 	err   *streamErr
@@ -71,7 +73,8 @@ func newStreamer(root, play, playing string, caps fw.Caps, src streamSource, man
 	net *syncer.NetSlot, poll time.Duration) *streamer {
 	return &streamer{root: root, playFile: play, playingFile: playing, caps: caps, src: src, manifest: man, net: net, poll: poll,
 		backoff: []time.Duration{2 * time.Second, 8 * time.Second, 30 * time.Second},
-		gap:     2100 * time.Millisecond} // 2 s and a tick of the kernel's coarse clock
+		gap:     2100 * time.Millisecond, // 2 s and a tick of the kernel's coarse clock
+		plays:   &plays{unit: time.Second}}
 }
 
 // streamErr is a song that failed all its tries: what the root shows, and its Details.
@@ -134,7 +137,8 @@ func (s *streamer) stop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.stopLocked()
-	s.dropURLs() // they carry the sign-in; the firmware has read the file, or never will
+	s.plays.clear() // no play goes to another account
+	s.dropURLs()    // they carry the sign-in; the firmware has read the file, or never will
 	s.setErr(nil)
 }
 
@@ -144,6 +148,24 @@ func (s *streamer) stopLocked() {
 		<-s.done
 		s.cancel = nil
 	}
+	s.plays.cancel() // the song playing is left; one that counts after its run ended, too
+}
+
+// playingNow is .playing, and when the firmware wrote it. Each write is a new file renamed into
+// place (blob_io), made only when the song changes or a new list starts: so a new time is a
+// song's start, also at the path the file had.
+func (s *streamer) playingNow() (string, time.Time) {
+	f, err := os.Open(s.playingFile)
+	if err != nil {
+		return "", time.Time{}
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return "", time.Time{}
+	}
+	b, _ := io.ReadAll(io.LimitReader(f, 4096))
+	return strings.TrimSpace(string(b)), st.ModTime()
 }
 
 // dropURLs removes the URL queue's file, and one half written.
@@ -204,8 +226,8 @@ func (s *streamer) start(songs []subsonic.Song, from int) {
 		return
 	}
 	s.setErr(nil)
-	stale, _ := os.ReadFile(s.playingFile) // belongs to the previous list
-	s.clean()                              // old queue file, stale and half-fetched songs
+	stale, staleAt := s.playingNow() // belongs to the previous list
+	s.clean()                        // old queue file, stale and half-fetched songs
 	m := s.manifest()
 	if s.caps.URLs && s.urlsFile != "" && s.direct != nil && s.direct() && s.startDirect(songs, from, m) {
 		return
@@ -224,7 +246,7 @@ func (s *streamer) start(songs []subsonic.Song, from int) {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel, s.done = cancel, make(chan struct{})
 	r := &streamRun{s: s, ctx: ctx, songs: slices.Clone(songs), jobs: jobs, from: from, last: from, seq: seq,
-		stale: strings.TrimSpace(string(stale))}
+		stale: stale, staleAt: staleAt, heard: staleAt}
 	if s.caps.Playlist {
 		r.queue = filepath.Join(s.dir(), fmt.Sprintf("queue-%d.m3u", seq))
 		if err := r.writeQueue(); err != nil {
@@ -246,7 +268,9 @@ type streamRun struct {
 	last      int // the index .playing named last: a song in the list twice is found after it (M25)
 	seq       int64
 	announced bool
-	stale     string    // .playing at start: ignored until it changes
+	stale     string    // .playing at start: ignored until it is written again
+	staleAt   time.Time // when it was written
+	heard     time.Time // .playing's time when a song's start was last told to plays
 	queue     string    // the playlist's file; "" in folder mode
 	wrote     time.Time // when it was last written
 	skips     int       // songs skipped since the last one fetched
@@ -320,26 +344,26 @@ func (r *streamRun) announce(path string) {
 }
 
 // current is the index of the song .playing names, looked for from the last one found on, then back
-// from it (a song in the list twice is the occurrence nearest), else the last one; and .playing as read.
-func (r *streamRun) current() (int, string) {
-	b, _ := os.ReadFile(r.s.playingFile)
-	p := strings.TrimSpace(string(b))
-	if p == "" || p == r.stale {
-		return r.last, p
+// from it (a song in the list twice is the occurrence nearest), else the last one; and .playing as
+// read, with its time.
+func (r *streamRun) current() (int, string, time.Time) {
+	p, at := r.s.playingNow()
+	if p == "" || p == r.stale && at.Equal(r.staleAt) {
+		return r.last, p, at
 	}
 	for i := r.last; i < len(r.jobs); i++ {
 		if r.jobs[i].path == p {
 			r.last = i
-			return i, p
+			return i, p, at
 		}
 	}
 	for i := r.last - 1; i >= r.from; i-- {
 		if r.jobs[i].path == p {
 			r.last = i
-			return i, p
+			return i, p, at
 		}
 	}
-	return r.last, p
+	return r.last, p, at
 }
 
 func (r *streamRun) run() {
@@ -350,9 +374,17 @@ func (r *streamRun) run() {
 	}
 	seen, since := "", time.Now() // .playing as read last, and since when
 	for r.ctx.Err() == nil {
-		cur, now := r.current()
+		cur, now, at := r.current()
 		if now != seen {
 			seen, since = now, time.Now()
+		}
+		// A song of this list started: .playing was written, and names it. Not "now != seen": a
+		// list started again at the path .playing had is a start too. A fetch may have kept this
+		// loop from seeing it for a while, which the file's time tells.
+		if !at.Equal(r.heard) {
+			if r.heard = at; now == r.jobs[cur].path {
+				r.s.plays.now(r.songs[cur], time.Since(at))
+			}
 		}
 		for i := r.from; i < cur-streamWindow; i++ {
 			if r.jobs[i].fetch {

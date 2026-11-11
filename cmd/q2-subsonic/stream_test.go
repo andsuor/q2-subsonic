@@ -683,3 +683,111 @@ func TestStreamQueueRewritesApart(t *testing.T) {
 		t.Fatalf("queue %q", body)
 	}
 }
+
+// report wires the streamer's plays to a recorder: a song counts after a millisecond a second, and
+// the clock is not known unless a test sets one.
+func (e *env) report(secs int, list []subsonic.Song) (*reports, []subsonic.Song) {
+	r := &reports{}
+	p := e.s.plays
+	p.send, p.on, p.unit = r.send, func() bool { return true }, time.Millisecond
+	p.clock = func() time.Time { return time.Time{} }
+	for i := range list {
+		list[i].Duration = secs
+	}
+	return r, list
+}
+
+var playingAt = time.Now()
+
+// setPlaying writes .playing as the firmware does: a new file, renamed into place. Its time is
+// set a step on, as two writes in one tick of the kernel's clock would look like one.
+func (e *env) setPlaying(t *testing.T, path string) {
+	t.Helper()
+	playingAt = playingAt.Add(time.Second)
+	tmp := e.playing + ".tmp"
+	if err := os.WriteFile(tmp, []byte(path+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	os.Chtimes(tmp, playingAt, playingAt)
+	if err := os.Rename(tmp, e.playing); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Each song .playing names is reported once: as playing now, then as played.
+func TestStreamReportsPlays(t *testing.T) {
+	e := newEnv(t, fw.Caps{})
+	r, list := e.report(40, songs(6, "flac"))
+	e.s.start(list, 0)
+	until(t, "song 0", func() bool { return exists(e.stream(0, "flac")) })
+	time.Sleep(30 * time.Millisecond)
+	if got := r.all(); len(got) != 0 {
+		t.Fatalf("reported before the firmware played: %q", got)
+	}
+	e.setPlaying(t, e.stream(0, "flac"))
+	r.want(t, "now s0", "s0@")
+	e.setPlaying(t, e.stream(1, "flac"))
+	r.want(t, "now s0", "s0@", "now s1", "s1@")
+	time.Sleep(30 * time.Millisecond)
+	r.want(t, "now s0", "s0@", "now s1", "s1@")
+}
+
+// The .playing an older list left is no start, also when the new list begins at that path; the
+// firmware writing it again is one.
+func TestStreamReportsNoStalePlay(t *testing.T) {
+	e := newEnv(t, fw.Caps{})
+	r, list := e.report(40, songs(3, "flac"))
+	e.setPlaying(t, e.stream(0, "flac"))
+	e.s.start(list, 0)
+	until(t, "song 0", func() bool { return exists(e.stream(0, "flac")) })
+	time.Sleep(30 * time.Millisecond)
+	if got := r.all(); len(got) != 0 {
+		t.Fatalf("stale .playing reported: %q", got)
+	}
+	e.setPlaying(t, e.stream(0, "flac"))
+	r.want(t, "now s0", "s0@")
+}
+
+// The run ends when the last song starts; its play still comes.
+func TestStreamReportsLastSong(t *testing.T) {
+	e := newEnv(t, fw.Caps{})
+	r, list := e.report(300, songs(2, "flac")) // counts after 150 ms
+	e.s.start(list, 0)
+	until(t, "song 1", func() bool { return exists(e.stream(1, "flac")) })
+	e.setPlaying(t, e.stream(1, "flac"))
+	until(t, "run ended", func() bool { return !e.s.active() })
+	if got := r.all(); len(got) != 1 || !e.s.plays.pending() {
+		t.Fatalf("reports %q, pending %v", got, e.s.plays.pending())
+	}
+	r.want(t, "now s1", "s1@")
+}
+
+// Another list pressed takes the song playing with it and keeps the plays not yet sent; a stop
+// (sign-out, the app's end) forgets those too.
+func TestStreamStartCancelsPlayStopClears(t *testing.T) {
+	e := newEnv(t, fw.Caps{})
+	r, list := e.report(40, songs(3, "flac"))
+	r.reset(away)
+	e.s.plays.clock = time.Now
+	queued := func() (n int, armed bool) {
+		p := e.s.plays
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return len(p.queue), p.timer != nil
+	}
+	e.s.start(list, 0)
+	e.setPlaying(t, e.stream(0, "flac"))
+	until(t, "s0 queued", func() bool { n, _ := queued(); return n == 1 })
+	list[1].Duration = 4000
+	e.s.start(list, 1)
+	e.setPlaying(t, e.stream(1, "flac"))
+	until(t, "s1 waited for", func() bool { _, armed := queued(); return armed })
+	e.s.start(list, 2)
+	if n, armed := queued(); n != 1 || armed {
+		t.Fatalf("after start: %d queued, armed %v", n, armed)
+	}
+	e.s.stop()
+	if n, _ := queued(); n != 0 {
+		t.Fatalf("after stop: %d queued", n)
+	}
+}

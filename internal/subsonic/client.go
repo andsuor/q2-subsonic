@@ -536,6 +536,17 @@ func (c *Client) Song(ctx context.Context, id string) (Song, error) {
 	return r.Song.song(), nil
 }
 
+// Scrobble reports a song to the server: playing now (submission false), or played at the time at
+// (true), which play counts and a Last.fm account linked on the server follow. A zero at sends no
+// time, and the server takes its own.
+func (c *Client) Scrobble(ctx context.Context, id string, at time.Time, submission bool) error {
+	q := url.Values{"id": {id}, "submission": {strconv.FormatBool(submission)}}
+	if !at.IsZero() {
+		q.Set("time", strconv.FormatInt(at.UnixMilli(), 10))
+	}
+	return c.call(ctx, "scrobble", q, nil)
+}
+
 // lyricsMax is what the firmware reads of a song's lyrics file (LYRIC_TAG_MAX).
 const lyricsMax = 64 << 10
 

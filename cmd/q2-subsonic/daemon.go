@@ -41,11 +41,19 @@ const (
 var errSignedOut = errors.New("signed out")
 
 // settings is .subsonic/settings.json. StreamQuality "" follows DefaultQuality. StreamMode is ""
-// (download first) or "direct".
+// (download first) or "direct". NoReport turns Report Plays off.
 type settings struct {
 	DefaultQuality string `json:"defaultQuality,omitempty"`
 	StreamQuality  string `json:"streamQuality,omitempty"`
 	StreamMode     string `json:"streamMode,omitempty"`
+	NoReport       bool   `json:"noReport,omitempty"`
+}
+
+func (s settings) reportName() string {
+	if s.NoReport {
+		return "Report Plays: Off"
+	}
+	return "Report Plays: On"
 }
 
 func (s settings) modeName() string {
@@ -254,6 +262,14 @@ func newDaemon(dir, card, tmp string) *daemon {
 	d.stream.moving = d.runner.Moving
 	d.stream.urlsFile = filepath.Join(tmp, "q2-subsonic.urls") // the one path the firmware takes a URL queue at
 	d.stream.direct = func() bool { return d.settings().StreamMode == "direct" }
+	d.stream.plays.send = src{d}.Scrobble
+	d.stream.plays.on = func() bool { return !d.settings().NoReport }
+	d.stream.plays.clock = func() time.Time {
+		if !tlsroots.Known() { // then Now could wait for the server's time, and still not have it
+			return time.Time{}
+		}
+		return tlsroots.Now()
+	}
 	d.stream.clean() // a stream an earlier run left (M26)
 	d.art = newArtCache(d, filepath.Join(tmp, "q2-subsonic.art"))
 	d.state.Write(nil)
@@ -368,6 +384,13 @@ func (s src) Lyrics(ctx context.Context, id string) (string, error) {
 	return "", errSignedOut
 }
 
+func (s src) Scrobble(ctx context.Context, id string, at time.Time, submission bool) error {
+	if c := s.d.client(); c != nil {
+		return c.Scrobble(ctx, id, at, submission)
+	}
+	return errSignedOut
+}
+
 func (s src) Get(ctx context.Context, u string, from int64) (*http.Response, error) {
 	if c := s.d.client(); c != nil {
 		return c.Get(ctx, u, from)
@@ -464,13 +487,13 @@ func (d *daemon) tick() {
 }
 
 // idle is whether the app may exit: no request for idleAfter (the end of a sync counts as one), no
-// sync or stream, and no library request awaiting its answer, as the firmware works on that only
-// while the app runs (I15).
+// sync or stream, no song that may still count as played or report on its way, and no library
+// request awaiting its answer, as the firmware works on that only while the app runs (I15).
 func (d *daemon) idle(now time.Time) bool {
 	d.mu.Lock()
 	last, lib := d.lastReq, d.lib != nil && !d.lib.done
 	d.mu.Unlock()
-	return now.Sub(last) >= idleAfter && !lib && !d.runner.Busy() && !d.stream.active()
+	return now.Sub(last) >= idleAfter && !lib && !d.runner.Busy() && !d.stream.active() && !d.stream.plays.pending()
 }
 
 // close ends what the app runs before it exits; a sync paused here resumes at the next Sync.
