@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,7 +27,9 @@ const streamWindow = 2 // songs fetched ahead of, and kept behind, the one playi
 
 type streamSource interface {
 	PlayURL(id, quality string) string
+	CoverURL(id string) string
 	Get(ctx context.Context, u string, from int64) (*http.Response, error)
+	Lyrics(ctx context.Context, id string) (string, error)
 }
 
 // streamer plays a list by fetching songs a couple ahead of .playing into the hidden stream
@@ -49,6 +52,10 @@ type streamer struct {
 	// gap is the least time between two writes of a queue file: the firmware reads it again when
 	// its mtime's second changes, and FAT32 keeps mtimes in 2 s.
 	gap time.Duration
+	// Streaming: Direct. With the firmware's "urls" word and direct() true, Play hands the firmware
+	// urlsFile, a queue of server URLs its own player streams (startDirect). Unset: never.
+	urlsFile string
+	direct   func() bool
 
 	errMu sync.Mutex
 	err   *streamErr
@@ -127,6 +134,7 @@ func (s *streamer) stop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.stopLocked()
+	s.dropURLs() // they carry the sign-in; the firmware has read the file, or never will
 	s.setErr(nil)
 }
 
@@ -138,9 +146,18 @@ func (s *streamer) stopLocked() {
 	}
 }
 
+// dropURLs removes the URL queue's file, and one half written.
+func (s *streamer) dropURLs() {
+	if s.urlsFile != "" {
+		os.Remove(s.urlsFile)
+		os.Remove(s.urlsFile + ".tmp")
+	}
+}
+
 // clean empties the stream folder: a new list, or a daemon start, leaves no songs from an older
-// one on the card (M26).
+// one on the card (M26), and no URL queue in /tmp.
 func (s *streamer) clean() {
+	s.dropURLs()
 	ents, _ := os.ReadDir(s.dir())
 	for _, e := range ents {
 		library.Remove(s.root, filepath.Join(s.dir(), e.Name()))
@@ -164,6 +181,20 @@ func (s *streamer) synced(e *library.Entry) bool {
 	return e != nil && exists(e.Path) && (s.moving == nil || !s.moving(e.ID))
 }
 
+// format is the extension and quality a song not on the card plays at.
+func (s *streamer) format(sg subsonic.Song) (ext, q string) {
+	ext, q = strings.ToLower(sg.Suffix), "original"
+	if s.caps.Playlist && !library.Playable(ext) || !s.caps.Playlist && ext != "flac" && ext != "mp3" {
+		ext, q = "mp3", "mp3-320"
+	}
+	if s.quality != nil {
+		if sq := s.quality(); sq == "mp3-320" || sq == "mp3-128" {
+			ext, q = "mp3", sq
+		}
+	}
+	return ext, q
+}
+
 // start replaces whatever streams with songs, playing from index from.
 func (s *streamer) start(songs []subsonic.Song, from int) {
 	s.mu.Lock()
@@ -175,22 +206,17 @@ func (s *streamer) start(songs []subsonic.Song, from int) {
 	s.setErr(nil)
 	stale, _ := os.ReadFile(s.playingFile) // belongs to the previous list
 	s.clean()                              // old queue file, stale and half-fetched songs
-	jobs := make([]job, len(songs))
 	m := s.manifest()
+	if s.caps.URLs && s.urlsFile != "" && s.direct != nil && s.direct() && s.startDirect(songs, from, m) {
+		return
+	}
+	jobs := make([]job, len(songs))
 	for i, sg := range songs {
 		if e := m.Songs[sg.ID]; s.caps.Playlist && s.synced(e) {
 			jobs[i] = job{path: e.Path}
 			continue
 		}
-		ext, q := strings.ToLower(sg.Suffix), "original"
-		if s.caps.Playlist && !library.Playable(ext) || !s.caps.Playlist && ext != "flac" && ext != "mp3" {
-			ext, q = "mp3", "mp3-320"
-		}
-		if s.quality != nil {
-			if sq := s.quality(); sq == "mp3-320" || sq == "mp3-128" {
-				ext, q = "mp3", sq
-			}
-		}
+		ext, q := s.format(sg)
 		name := fmt.Sprintf("%04d - %s [%s].%s", i, library.SafeName(sg.Title), library.SafeName(sg.ID), ext)
 		jobs[i] = job{path: filepath.Join(s.dir(), name), fetch: true, quality: q}
 	}
@@ -427,4 +453,149 @@ func expect(sg subsonic.Song, quality string) int64 {
 		return max(sg.Size, int64(sg.Duration)*128000/8)
 	}
 	return sg.Size
+}
+
+// The firmware's limits for a URL queue (patch/tidal.c): a list past one of them plays download-first.
+const (
+	urlsMax     = 250 << 10 // the file is read 256 KiB far
+	urlsSongs   = 5000      // and this many songs of it are kept
+	urlsPath    = 1024      // a line's URL or card path is under this, each } counted as five
+	lyricsAhead = 50        // songs from the start one on that get their lyrics
+)
+
+var oneLine = strings.NewReplacer("\t", " ", "\r", " ", "\n", " ")
+
+// startDirect plays songs from index from as a Q2URLS/1 queue: the whole list in one file, a card
+// path for a synced song and the server's URL for any other, which the firmware's own player
+// streams. It reports false, with nothing started, for a list that plays download-first instead:
+// one all on the card (a playlist keeps the songs' own lyrics), or one the firmware would cut or
+// pass a line of, as every line it passes over moves the start and the lyrics after it.
+func (s *streamer) startDirect(songs []subsonic.Song, from int, m *library.Manifest) bool {
+	if len(songs) > urlsSongs {
+		s.logf("stream: %d songs are too many for a URL queue", len(songs))
+		return false
+	}
+	lines, size, web := make([]string, len(songs)), 0, false
+	for i, sg := range songs {
+		first, cover := "", ""
+		if e := m.Songs[sg.ID]; s.synced(e) && !strings.ContainsAny(e.Path, "\t\r\n") {
+			first = e.Path
+		} else {
+			_, q := s.format(sg)
+			if first = s.src.PlayURL(sg.ID, q); first == "" {
+				return true // signed out meanwhile: nothing plays
+			}
+			web = true
+			if c := s.src.CoverURL(sg.CoverArt); sg.CoverArt != "" && c != "" {
+				cover = c + "&size=320" // the player's cover is 320 px
+			}
+		}
+		lines[i] = strings.Join([]string{first, oneLine.Replace(sg.Title), oneLine.Replace(sg.Artist),
+			oneLine.Replace(sg.Album), cover, strconv.Itoa(sg.Duration)}, "\t")
+		if size += len(lines[i]) + 1; size > urlsMax || len(first)+4*strings.Count(first, "}") >= urlsPath {
+			s.logf("stream: the list is too long for a URL queue (song %d)", i+1)
+			return false
+		}
+	}
+	if !web {
+		return false
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	s.cancel, s.done = cancel, make(chan struct{})
+	r := &streamRun{s: s, ctx: ctx, songs: slices.Clone(songs), from: from, seq: time.Now().UnixNano()}
+	go func() { defer close(s.done); r.direct(lines) }()
+	return true
+}
+
+func (s *streamer) lyricsDir() string { return strings.TrimSuffix(s.urlsFile, ".urls") + ".lyrics" }
+
+// direct hands the queue over, once its start song is known to come: the firmware's player stops
+// at a stream that fails, with no message and no skip. So a start song the server can't send is
+// left out and the next one tried, the third in a row ending it, and without the server (or the
+// sign-in) nothing is handed over; a start song on the card is not asked about, and plays offline.
+// The songs' lyrics follow, the start song's first. The firmware reads the file once and tells
+// nothing back, so the run ends there and the app may idle out while the queue plays.
+func (r *streamRun) direct(lines []string) {
+	s := r.s
+	os.RemoveAll(s.lyricsDir()) // the last queue's: a file is known by its line alone
+	for !strings.HasPrefix(lines[r.from], "/") {
+		u, _, _ := strings.Cut(lines[r.from], "\t")
+		resp, err := s.src.Get(r.ctx, u, 0)
+		if err == nil {
+			resp.Body.Close()
+			break
+		}
+		if r.ctx.Err() != nil {
+			return
+		}
+		sg := r.songs[r.from]
+		s.logf("stream %q: %v", sg.Title, err)
+		e := &streamErr{title: sg.Title, id: sg.ID, at: time.Now(), err: err}
+		if syncer.StopReason(err) != nil || r.skips >= 2 {
+			s.setErr(e)
+			return
+		}
+		r.skips++
+		e.skipped = true
+		s.setErr(e)
+		lines, r.songs = slices.Delete(lines, r.from, r.from+1), slices.Delete(r.songs, r.from, r.from+1)
+		if r.from >= len(lines) {
+			return
+		}
+	}
+	more, slow := r.lyrics(r.from, 3*time.Second) // the start song's are there when it loads, if they come in time
+	if r.ctx.Err() != nil {
+		return
+	}
+	data := "#Q2URLS/1\tstart=" + strconv.Itoa(r.from) + "\n" + strings.Join(lines, "\n") + "\n"
+	if err := write0600(s.urlsFile, []byte(data)); err != nil {
+		s.logf("stream: queue: %v", err)
+		return
+	}
+	r.announce(s.urlsFile)
+	s.logf("stream: direct, %d songs", len(lines))
+	// ponytail: the songs before the start one, and those past lyricsAhead, get no lyrics; ask as
+	// the queue plays if the firmware ever tells which song does. A server without the call (the
+	// first error) is asked once.
+	more = more || slow
+	for i := r.from + 1; more && i < len(lines) && i < r.from+lyricsAhead && r.ctx.Err() == nil; i++ {
+		more, _ = r.lyrics(i, 10*time.Second)
+	}
+}
+
+// lyrics leaves line i's lyrics, when its song has any, where the firmware looks for them. ok is
+// false when the server couldn't be asked; slow, when that was for the time.
+func (r *streamRun) lyrics(i int, wait time.Duration) (ok, slow bool) {
+	ctx, cancel := context.WithTimeout(r.ctx, wait)
+	defer cancel()
+	text, err := r.s.src.Lyrics(ctx, r.songs[i].ID)
+	if err != nil {
+		return false, errors.Is(ctx.Err(), context.DeadlineExceeded)
+	}
+	if text != "" {
+		os.MkdirAll(r.s.lyricsDir(), 0o755)
+		q2.WriteFile(filepath.Join(r.s.lyricsDir(), strconv.Itoa(i)+".lrc"), []byte(text))
+	}
+	return true, false
+}
+
+// write0600 is q2.WriteFile for a file only the app may read: the URL queue carries the sign-in.
+func write0600(path string, data []byte) error {
+	tmp := path + ".tmp"
+	os.Remove(tmp) // one left behind may have another mode
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(data)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err == nil {
+		err = os.Rename(tmp, path)
+	}
+	if err != nil {
+		os.Remove(tmp)
+	}
+	return err
 }

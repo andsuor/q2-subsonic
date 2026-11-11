@@ -40,10 +40,19 @@ const (
 
 var errSignedOut = errors.New("signed out")
 
-// settings is .subsonic/settings.json. StreamQuality "" follows DefaultQuality.
+// settings is .subsonic/settings.json. StreamQuality "" follows DefaultQuality. StreamMode is ""
+// (download first) or "direct".
 type settings struct {
 	DefaultQuality string `json:"defaultQuality,omitempty"`
 	StreamQuality  string `json:"streamQuality,omitempty"`
+	StreamMode     string `json:"streamMode,omitempty"`
+}
+
+func (s settings) modeName() string {
+	if s.StreamMode == "direct" {
+		return "Streaming: Direct"
+	}
+	return "Streaming: Download First"
 }
 
 func (s settings) def() string {
@@ -243,6 +252,8 @@ func newDaemon(dir, card, tmp string) *daemon {
 	d.stream.log = lg
 	d.stream.quality = func() string { return d.settings().stream() }
 	d.stream.moving = d.runner.Moving
+	d.stream.urlsFile = filepath.Join(tmp, "q2-subsonic.urls") // the one path the firmware takes a URL queue at
+	d.stream.direct = func() bool { return d.settings().StreamMode == "direct" }
 	d.stream.clean() // a stream an earlier run left (M26)
 	d.art = newArtCache(d, filepath.Join(tmp, "q2-subsonic.art"))
 	d.state.Write(nil)
@@ -348,6 +359,13 @@ func (s src) CoverURL(id string) string {
 		return c.CoverURL(id)
 	}
 	return ""
+}
+
+func (s src) Lyrics(ctx context.Context, id string) (string, error) {
+	if c := s.d.client(); c != nil {
+		return c.Lyrics(ctx, id)
+	}
+	return "", errSignedOut
 }
 
 func (s src) Get(ctx context.Context, u string, from int64) (*http.Response, error) {
