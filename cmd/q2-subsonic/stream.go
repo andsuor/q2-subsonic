@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -63,7 +64,9 @@ type streamer struct {
 	acct     func() string           // the signed-in account's folder name, "" when signed out
 	free     func(path string) int64 // the card's free bytes
 	reserve  func() int64            // the bytes a sync running or paused still needs
-	cmu      sync.Mutex              // one walk at a time, and keep
+	clock    func() time.Time        // the app's clock for a kept file's time; it may wait (now)
+	cmu      sync.Mutex              // one walk at a time
+	kmu      sync.Mutex              // keep, and each delete
 	keep     map[string]bool         // the protected songs (protect)
 	used     atomic.Int64            // bytes kept, as last walked and fetched since; for Settings, and when to walk
 	counted  atomic.Bool             // a walk has set used
@@ -202,14 +205,21 @@ func (s *streamer) clean() {
 // names a song that is there, of the folder or of the newest queue file. The app exits when idle
 // with the queue still playing, and Go to starts it again from Now Playing. Such a folder goes at
 // the next Play, or at a start after the Q2's own restart, which empties /tmp. The queue's songs
-// from the one playing on are protected again, as its run had them.
+// from the one playing on are protected again, as its run had them; only the songs around it when
+// it started so long ago that the queue was left, or is paused, as a run's end has it.
+// ponytail: the songs' lengths aren't known here, so an hour stands for the one playing; read the
+// length from the file if a longer one that still plays loses the songs after its window to a clear.
 func (s *streamer) cleanLeft() {
 	s.protect(nil)
-	if p, _ := s.playingNow(); p != "" && exists(p) {
+	if p, at := s.playingNow(); p != "" && exists(p) {
 		q := s.lastQueue()
 		i := slices.Index(q, p)
 		if i >= 0 {
-			s.protect(q[max(i-streamWindow, 0):])
+			hi := len(q)
+			if time.Since(at) >= cmp.Or(s.idle, idleAfter)+time.Hour {
+				hi = min(i+streamWindow+1, hi)
+			}
+			s.protect(q[max(i-streamWindow, 0):hi])
 		}
 		if i >= 0 || filepath.Dir(p) == s.dir() {
 			s.dropURLs()
@@ -299,7 +309,7 @@ func (s *streamer) start(songs []subsonic.Song, from int) {
 	s.cancel, s.done = cancel, make(chan struct{})
 	r := &streamRun{s: s, ctx: ctx, songs: slices.Clone(songs), jobs: jobs, from: from, last: from, seq: seq,
 		stale: stale, staleAt: staleAt, heard: staleAt}
-	r.protect(from)
+	r.protect(from, len(jobs))
 	if s.caps.Playlist {
 		r.queue = filepath.Join(s.dir(), fmt.Sprintf("queue-%d.m3u", seq))
 		if err := r.writeQueue(); err != nil {
@@ -331,10 +341,10 @@ type streamRun struct {
 	keptN     int
 }
 
-// protect holds the list's kept songs from index lo on in the cache.
-func (r *streamRun) protect(lo int) {
+// protect holds the list's kept songs from index lo to hi, the last one playable, in the cache.
+func (r *streamRun) protect(lo, hi int) {
 	var paths []string
-	for _, j := range r.jobs[lo:] {
+	for _, j := range r.jobs[lo:min(hi, len(r.jobs))] {
 		if j.cached {
 			paths = append(paths, j.path)
 		}
@@ -470,7 +480,7 @@ func (r *streamRun) run() {
 			}
 		}
 		if lo := max(r.from, cur-streamWindow); lo != r.keptLo || len(r.jobs) != r.keptN { // the song changed, or one was skipped
-			r.protect(lo)
+			r.protect(lo, len(r.jobs))
 		}
 		want := -1 // the first song of the window still to fetch
 		for i := cur; i < len(r.jobs) && i <= cur+streamWindow; i++ {
@@ -500,7 +510,10 @@ func (r *streamRun) run() {
 		// around it stay, as the firmware has them queued; those behind went above, and the rest go
 		// at the next Play or start-up (M26).
 		long := idle + time.Duration(r.songs[cur].Duration)*time.Second
+		// A list left or paused no longer holds its songs to come in the cache (.playing can't tell
+		// the two apart): a clear, a sign-out or a sync may take them.
 		if want < 0 && (named && cur == len(r.jobs)-1 || time.Since(since) >= long) {
+			r.protect(max(r.from, cur-streamWindow), cur+streamWindow+1)
 			return
 		}
 		if !fetched {
@@ -520,7 +533,7 @@ func exists(p string) bool { _, err := os.Stat(p); return err == nil }
 func (r *streamRun) fetch(sg subsonic.Song, j job) error {
 	s := r.s
 	if s.cacheCap != nil {
-		s.trim(expect(sg, j.quality), s.reserve())
+		s.trim(r.ctx, expect(sg, j.quality), s.reserve())
 	}
 	if err := s.net.Acquire(r.ctx, true); err != nil {
 		return err

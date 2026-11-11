@@ -1498,7 +1498,7 @@ func TestNoHoldWhileStreamWaits(t *testing.T) {
 	d := newTestDaemon(t, &nav{albums: 1, songsPer: 6}, "playlist", true)
 	d.do("play", "album:al0 0")
 	eventually(t, "the window", func() bool { // kept in the stream cache, as the firmware has playlist
-		m, _ := filepath.Glob(filepath.Join(d.card, ".subsonic", "stream", "*", "original", "*", "Song 2 [[]al0.2].flac"))
+		m, _ := filepath.Glob(filepath.Join(d.card, ".subsonic", "stream", "*", "original", "*", "song 2 [[]al0.2].flac"))
 		return len(m) == 1
 	})
 	eventually(t, "hold off", func() bool {

@@ -184,16 +184,7 @@ func Compute(sel selection.Set, resolved map[string][]subsonic.Song, playlistNam
 			p.Remove = append(p.Remove, e)
 		}
 	}
-	folders := map[string]bool{} // album folders on the card, which have their cover
-	for _, e := range m.Songs {
-		folders[strings.ToLower(filepath.Dir(e.Path))] = true
-	}
-	for _, w := range append(append([]Want(nil), p.Add...), p.Replace...) {
-		if d := strings.ToLower(filepath.Dir(w.Path)); w.Song.CoverArt != "" && !folders[d] {
-			folders[d] = true
-			p.NeedBytes += coverBytes
-		}
-	}
+	p.NeedBytes += CoverNeed(m, append(append([]Want(nil), p.Add...), p.Replace...))
 
 	p.Playlists = map[string][]string{}
 	p.PlaylistsStale = m.PlaylistsStale
@@ -227,4 +218,20 @@ func Compute(sel selection.Set, resolved map[string][]subsonic.Song, playlistNam
 	p.FreeBytes = free
 	p.Fits = p.NeedBytes <= 0 || p.NeedBytes+margin <= free // freeing space always fits
 	return p
+}
+
+// CoverNeed is the bytes the covers of wants take: one for each album folder that has no song on
+// the card yet.
+func CoverNeed(m *library.Manifest, wants []Want) (n int64) {
+	folders := map[string]bool{} // album folders on the card, which have their cover
+	for _, e := range m.Songs {
+		folders[strings.ToLower(filepath.Dir(e.Path))] = true
+	}
+	for _, w := range wants {
+		if d := strings.ToLower(filepath.Dir(w.Path)); w.Song.CoverArt != "" && !folders[d] {
+			folders[d] = true
+			n += coverBytes
+		}
+	}
+	return n
 }

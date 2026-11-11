@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha1"
 	"encoding/hex"
 	"io"
@@ -53,14 +54,18 @@ func (s *streamer) cacheBase() string {
 	return filepath.Join(s.dir(), a)
 }
 
-// cachePath is where sg is kept at quality q under base; "" for a song that is not.
+// cachePath is where sg is kept at quality q under base; "" for a song that is not. The title is
+// in lower case: the card's FAT finds a file whatever the case of its name, so after a retag that
+// changes only the case the old file would be found under a name that is not the one it has, and
+// that name is what the protected set holds and what the firmware looks for in the folder's
+// listing (m3u_songs).
 func (s *streamer) cachePath(base string, sg subsonic.Song, ext, q string) string {
 	if base == "" || !cacheID.MatchString(sg.ID) || library.SafeName(sg.ID) != sg.ID {
 		return ""
 	}
 	h := sha1.Sum([]byte(sg.ID))
 	x := hex.EncodeToString(h[:])[:cacheShard]
-	return library.WithID(filepath.Join(base, q, x, library.SafeName(sg.Title)+"."+ext), sg.ID)
+	return library.WithID(filepath.Join(base, q, x, library.SafeName(strings.ToLower(sg.Title))+"."+ext), sg.ID)
 }
 
 // inCache reports whether path is a song kept for the signed-in account.
@@ -72,25 +77,27 @@ func (s *streamer) inCache(path string) bool {
 	return a != "" && strings.HasPrefix(path, filepath.Join(s.dir(), a)+string(filepath.Separator))
 }
 
-// now is the app's clock, zero when the time isn't known.
+// now is the app's clock for a kept file's time, zero when the time isn't known. Unlike plays.clock
+// it may wait for the server's time: it is asked in the stream's run only, never in a reply.
 func (s *streamer) now() time.Time {
-	if s.plays.clock == nil {
+	if s.clock == nil {
 		return time.Time{}
 	}
-	return s.plays.clock()
+	return s.clock()
 }
 
 // protect names the songs that are never evicted, cleared or swept: the list playing from a
 // couple behind the song playing on, as the firmware has queued every line up to the first one
-// missing. The set stays after its run, until the next list.
+// missing. The set stays after its run, until the next list; a run that learns its list was left
+// cuts it to the songs around the one playing (streamRun.run, cleanLeft).
 func (s *streamer) protect(paths []string) {
 	keep := make(map[string]bool, len(paths))
 	for _, p := range paths {
 		keep[p] = true
 	}
-	s.cmu.Lock()
+	s.kmu.Lock()
 	s.keep = keep
-	s.cmu.Unlock()
+	s.kmu.Unlock()
 }
 
 type cacheFile struct {
@@ -136,11 +143,14 @@ func (s *streamer) cacheFiles() []cacheFile {
 	return out
 }
 
-// held reports whether f is protected: a song of the set, or its download. s.cmu is held.
+// held reports whether f is protected: a song of the set, or its download. s.kmu is held.
 func (s *streamer) held(f cacheFile) bool { return s.keep[strings.TrimSuffix(f.path, ".part")] }
 
-// drop deletes f unless it is protected, tested now, under the lock, and reports whether it went.
+// drop deletes f unless it is protected, tested now, under the set's lock, and reports whether it
+// went. The lock is held a delete long, not a walk: a new list's protect never waits for a clear.
 func (s *streamer) drop(f cacheFile) bool {
+	s.kmu.Lock()
+	defer s.kmu.Unlock()
 	if s.held(f) || library.Remove(s.root, f.path) != nil {
 		return false
 	}
@@ -152,19 +162,21 @@ func (s *streamer) drop(f cacheFile) bool {
 // the card's free space would fall under the floor plus reserve (a sync's bytes still to come,
 // which never count against the limit), the songs played longest ago go, to a sixteenth of the
 // limit under either. The folders are walked only then. When nothing may go the song is fetched
-// all the same, as before there was a cache.
-func (s *streamer) trim(song, reserve int64) {
-	if s.cacheCap == nil {
+// all the same, as before there was a cache: so the floor holds against what the cache keeps, not
+// against the list playing. While another walk deletes (a clear, a sync's makeRoom) there is no
+// trim, and ctx ends one: a stop of the stream never waits for the cache.
+// ponytail: the walk itself (a stat a file) is not cut short; test ctx in cacheFiles if it is slow.
+func (s *streamer) trim(ctx context.Context, song, reserve int64) {
+	if s.cacheCap == nil || !s.cmu.TryLock() {
 		return
 	}
-	s.cmu.Lock()
 	defer s.cmu.Unlock()
 	limit, free, used := s.cacheCap(), s.free(s.root), s.used.Load()
 	if s.counted.Load() && (used == 0 || used+song <= limit && free >= cacheFloor+song+reserve) {
 		return
 	}
 	for _, f := range s.cacheFiles() {
-		if s.used.Load()+song <= limit*15/16 && free >= cacheFloor+song+reserve+limit/16 {
+		if s.used.Load()+song <= limit*15/16 && free >= cacheFloor+song+reserve+limit/16 || ctx.Err() != nil {
 			break
 		}
 		if s.drop(f) {
@@ -174,25 +186,27 @@ func (s *streamer) trim(song, reserve int64) {
 }
 
 // makeRoom is the syncer's MakeRoom: a sync comes first, so the cache gives what the sync's need
-// bytes lack on the card, limit and floor aside.
-func (s *streamer) makeRoom(need int64) {
+// bytes lack on the card, limit and floor aside. It reports whether the card has the room then:
+// the preview counted what the cache could give when it was made, and a list started since is
+// protected.
+func (s *streamer) makeRoom(need int64) bool {
 	if s.cacheCap == nil {
-		return
+		return true
 	}
 	s.cmu.Lock()
 	defer s.cmu.Unlock()
 	free := s.free(s.root)
-	if free >= need+planMargin || s.counted.Load() && s.used.Load() == 0 {
-		return
-	}
-	for _, f := range s.cacheFiles() {
-		if free >= need+planMargin {
-			break
+	if free < need+planMargin && !(s.counted.Load() && s.used.Load() == 0) {
+		for _, f := range s.cacheFiles() {
+			if free >= need+planMargin {
+				break
+			}
+			if s.drop(f) {
+				free += f.size
+			}
 		}
-		if s.drop(f) {
-			free += f.size
-		}
 	}
+	return free >= need
 }
 
 // reclaimable is the bytes a sync could take: what is kept and not protected.
@@ -202,7 +216,10 @@ func (s *streamer) reclaimable() (n int64) {
 	}
 	s.cmu.Lock()
 	defer s.cmu.Unlock()
-	for _, f := range s.cacheFiles() {
+	files := s.cacheFiles()
+	s.kmu.Lock()
+	defer s.kmu.Unlock()
+	for _, f := range files {
 		if !s.held(f) {
 			n += f.size
 		}

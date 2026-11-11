@@ -301,9 +301,15 @@ func newDaemon(dir, card, tmp string) *daemon {
 	d.stream.cacheCap = func() int64 { return d.settings().cacheBytes() }
 	d.stream.acct = d.acct
 	d.stream.free = func(p string) int64 { return d.free(p) }
+	d.stream.clock = func() time.Time {
+		if now, ok := libClock(); ok {
+			return now
+		}
+		return time.Time{}
+	}
 	d.stream.reserve = func() int64 { // while a sync runs or waits, the cache leaves it its room
 		if s := d.runner.Snapshot(); s.State == "running" || s.State == "paused" {
-			return max(s.BytesTotal-s.BytesDone, 0)
+			return s.Room
 		}
 		return 0
 	}
@@ -405,8 +411,8 @@ func (d *daemon) signOut() {
 	d.spawn(d.runner.Cancel)
 	d.spawn(func() { // under playMu, so a start already running finishes first and is then stopped
 		d.playMu.Lock()
-		defer d.playMu.Unlock()
 		d.stream.stop()
+		d.playMu.Unlock() // the clear is a walk of the card, which no Play waits for
 		d.stream.clearCache()
 	})
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,11 +46,16 @@ func TestCachePath(t *testing.T) {
 	p := e.kept(0, "flac", "original")
 	rel, _ := filepath.Rel(e.s.dir(), p)
 	parts := strings.Split(rel, "/")
-	if len(parts) != 4 || parts[0] != "acct" || parts[1] != "original" || len(parts[2]) != cacheShard || parts[3] != "T0 [s0].flac" {
+	if len(parts) != 4 || parts[0] != "acct" || parts[1] != "original" || len(parts[2]) != cacheShard || parts[3] != "t0 [s0].flac" {
 		t.Fatalf("path %q", rel)
 	}
 	if streamID(p) != "s0" {
 		t.Errorf("streamID(%q) = %q", p, streamID(p))
+	}
+	// FAT finds a file whatever its name's case: a title retagged in case alone is the same path,
+	// the one the protected set and the firmware's folder listing have (review).
+	if got := e.s.cachePath(e.s.cacheBase(), subsonic.Song{ID: "s0", Title: "t0"}, "flac", "original"); got != p {
+		t.Errorf("a title in another case at %q, not %q", got, p)
 	}
 	if q := e.kept(0, "mp3", "mp3-128"); q == p || filepath.Base(filepath.Dir(filepath.Dir(q))) != "mp3-128" {
 		t.Errorf("another quality at %q", q)
@@ -173,7 +179,7 @@ func TestCacheTrim(t *testing.T) {
 	}
 	// Over the limit: the songs played longest ago go, to a sixteenth under it.
 	e, f := setup(400, 1<<40)
-	e.s.trim(100, 0)
+	e.s.trim(context.Background(), 100, 0)
 	if got := there(f); got != "1100" || e.s.used.Load() != 200 {
 		t.Errorf("over the limit: %s, used %d", got, e.s.used.Load())
 	}
@@ -181,31 +187,31 @@ func TestCacheTrim(t *testing.T) {
 	e, f = setup(400, 1<<40)
 	put(t, f[3]+".part", 50, 1)
 	e.s.protect([]string{f[3], f[2]})
-	e.s.trim(100, 0)
+	e.s.trim(context.Background(), 100, 0)
 	if got := there(f); got != "0011" || !exists(f[3]+".part") {
 		t.Errorf("protected: %s", got)
 	}
 	// A sync's bytes still to come are no reason while the card has the room.
 	e, f = setup(1000, 100<<30)
-	e.s.trim(100, 50<<30)
+	e.s.trim(context.Background(), 100, 50<<30)
 	if got := there(f); got != "1111" {
 		t.Errorf("reserve with room: %s", got)
 	}
 	// The floor of free space, and a sync's bytes on top of it: the cache gives way.
 	e, f = setup(1000, cacheFloor+50)
-	e.s.trim(100, 0)
+	e.s.trim(context.Background(), 100, 0)
 	if got := there(f); got != "1100" { // 50 short, and a sixteenth of the limit (62) on top: two songs
 		t.Errorf("floor: %s", got)
 	}
 	e, f = setup(1000*mb, cacheFloor+10*mb)
-	e.s.trim(mb, 20*mb)
+	e.s.trim(context.Background(), mb, 20*mb)
 	if got := there(f); got != "0000" {
 		t.Errorf("sync first: %s", got)
 	}
 	// Off: what is kept goes at the next streamed song.
 	e, f = setup(0, 1<<40)
 	e.s.protect([]string{f[0]})
-	e.s.trim(100, 0)
+	e.s.trim(context.Background(), 100, 0)
 	if got := there(f); got != "1000" {
 		t.Errorf("off: %s", got)
 	}
@@ -237,13 +243,87 @@ func TestCacheMakeRoomAndReclaimable(t *testing.T) {
 	if got := e.s.reclaimable(); got != 200 {
 		t.Fatalf("reclaimable %d", got)
 	}
-	e.s.makeRoom(100) // fits
-	if !exists(f[0]) || !exists(f[1]) {
+	if !e.s.makeRoom(100) || !exists(f[0]) || !exists(f[1]) { // fits
 		t.Fatal("evicted with room to spare")
 	}
-	e.s.makeRoom(250) // 100 short: the oldest that may go
-	if !exists(f[0]) || exists(f[1]) || !exists(f[2]) {
+	if !e.s.makeRoom(250) || !exists(f[0]) || exists(f[1]) || !exists(f[2]) { // 100 short: the oldest that may go
 		t.Fatalf("after makeRoom: %v %v %v", exists(f[0]), exists(f[1]), exists(f[2]))
+	}
+	// A list started after the preview holds what the preview counted: the sync is told there is
+	// no room, and nothing protected goes (review).
+	e.s.protect([]string{f[0], f[2]})
+	if e.s.makeRoom(350+planMargin) || !exists(f[0]) || !exists(f[2]) {
+		t.Fatalf("room said to be there: %v %v", exists(f[0]), exists(f[2]))
+	}
+}
+
+// A walk that deletes for long (a clear, a sync's makeRoom) holds up neither a new list, nor its
+// songs' fetches, nor a stop (review).
+func TestCacheWalkHoldsNoStart(t *testing.T) {
+	e := newEnv(t, fw.Caps{Playlist: true})
+	e.cacheOn(1, 1<<40) // over its limit at every fetch
+	put(t, e.kept(5, "flac", "original"), 100, 1)
+	e.s.cmu.Lock() // a clear at work
+	defer e.s.cmu.Unlock()
+	done := make(chan bool)
+	go func() {
+		e.s.start(songs(2, "flac"), 0)
+		for !exists(e.kept(1, "flac", "original")) { // no trim before its fetch
+			time.Sleep(5 * time.Millisecond)
+		}
+		e.s.stop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the stream waits for the walk")
+	}
+}
+
+// A list that was left, or paused for long, holds only the songs around the one playing: the rest
+// of it goes with a clear, in the run that learned it and after a restart (review).
+func TestCacheLeftListIsNotHeld(t *testing.T) {
+	e := newEnv(t, fw.Caps{Playlist: true})
+	e.cacheOn(1<<30, 1<<40)
+	e.s.idle = 300 * time.Millisecond
+	list := songs(8, "flac")
+	fill := func() {
+		for i := range list {
+			put(t, e.kept(i, "flac", "original"), 10, 1)
+		}
+	}
+	there := func() (s string) {
+		for i := range list {
+			s += map[bool]string{true: "1", false: "0"}[exists(e.kept(i, "flac", "original"))]
+		}
+		return s
+	}
+	fill()
+	e.s.start(list, 3)
+	if !e.s.clearCache() || there() != "00011111" { // it plays: all of it from the start song on
+		t.Fatalf("while it plays: %s", there())
+	}
+	until(t, "the run's end", func() bool { return !e.s.active() })
+	if !e.s.clearCache() || there() != "00011100" {
+		t.Fatalf("left: %s", there())
+	}
+	// The app started again: .playing still names the song, as the firmware leaves it.
+	restart := func(ago time.Duration) *streamer {
+		fill()
+		e.setPlaying(t, e.kept(3, "flac", "original"))
+		at := time.Now().Add(-ago)
+		os.Chtimes(e.playing, at, at)
+		s := newStreamer(e.root, e.play, e.playing, fw.Caps{Playlist: true}, e.src, e.s.manifest, e.net, 5*time.Millisecond)
+		s.cacheCap, s.acct, s.free, s.reserve = e.s.cacheCap, e.s.acct, e.s.free, e.s.reserve
+		s.cleanLeft()
+		return s
+	}
+	if s := restart(time.Minute); !s.clearCache() || there() != "00011111" {
+		t.Fatalf("restart while it plays: %s", there())
+	}
+	if s := restart(3 * time.Hour); !s.clearCache() || there() != "00011100" {
+		t.Fatalf("restart long after: %s", there())
 	}
 }
 
@@ -253,7 +333,8 @@ func TestCachePlayedStampsTheFile(t *testing.T) {
 	e.cacheOn(1<<30, 1<<40)
 	var hours atomic.Int64
 	at := func() time.Time { return time.Date(2030, 1, 1, int(hours.Load()), 0, 0, 0, time.UTC) }
-	e.s.plays.clock = at
+	e.s.clock = at // its own clock, which may wait for the server's time: plays' never does (review)
+	e.s.plays.clock = func() time.Time { return time.Time{} }
 	e.s.start(songs(2, "flac"), 0)
 	p := e.kept(1, "flac", "original")
 	mtime := func() time.Time { st, _ := os.Stat(p); return st.ModTime() }

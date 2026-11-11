@@ -1415,11 +1415,12 @@ func TestMakeRoomBeforeDownloads(t *testing.T) {
 	a, b, c := want(root, "a", "original"), want(root, "bb", "original"), want(root, "ccc", "original")
 	var asked []int64
 	first := "a" // the song the run fetches first
-	r.MakeRoom = func(need int64) {
+	r.MakeRoom = func(need int64) bool {
 		if n, _ := f.seen(first); n != 0 {
 			t.Errorf("asked after %s was fetched", first)
 		}
 		asked = append(asked, need)
+		return true
 	}
 	r.Start(plan.Plan{Add: []plan.Want{a, b}})
 	if s := wait(t, r); s.State != "done" {
@@ -1434,7 +1435,65 @@ func TestMakeRoomBeforeDownloads(t *testing.T) {
 	low.Bytes = 10
 	r.Start(plan.Plan{Replace: []plan.Want{low}}) // frees space: nothing to make room for
 	wait(t, r)
-	if want := []int64{a.Bytes + b.Bytes, c.Bytes}; !reflect.DeepEqual(asked, want) {
+	// The new album folder's cover is counted as the preview counts it (review).
+	cover := plan.CoverNeed(&library.Manifest{}, []plan.Want{a})
+	if want := []int64{a.Bytes + b.Bytes + cover, c.Bytes}; cover == 0 || !reflect.DeepEqual(asked, want) {
 		t.Fatalf("asked %v, want %v", asked, want)
+	}
+}
+
+// No room made: the run pauses as a full card before it fetches anything, and asks again when
+// resumed (review).
+func TestMakeRoomRefused(t *testing.T) {
+	f, r, root := setup(t)
+	a := want(root, "a", "original")
+	room := false
+	r.MakeRoom = func(int64) bool { return room }
+	r.Start(plan.Plan{Add: []plan.Want{a}})
+	s := wait(t, r)
+	if n, _ := f.seen("a"); s.State != "paused" || !errors.Is(s.Err, ErrCardFull) || n != 0 || s.Room != a.Bytes {
+		t.Fatalf("%+v, %d fetches", s, n)
+	}
+	room = true
+	r.Resume()
+	if s := wait(t, r); s.State != "done" || s.Room != 0 {
+		t.Fatalf("%+v", s)
+	}
+}
+
+// Room is what the card must still take, not the bytes still to move: a replace counts what it
+// adds, and songs that shrink free nothing for the ones fetched before them (review).
+func TestSnapshotRoom(t *testing.T) {
+	f, r, root := setup(t)
+	a, b, c := want(root, "a", "original"), want(root, "bb", "original"), want(root, "ccc", "original")
+	r.Start(plan.Plan{Add: []plan.Want{a, b}})
+	wait(t, r)
+	lowA, lowB := want(root, "a", "mp3-128"), want(root, "bb", "mp3-128")
+	lowA.Bytes, lowB.Bytes = 10, 10
+	running := func(id string, p plan.Plan) Snapshot {
+		t.Helper()
+		f.mu.Lock()
+		f.hits[id], f.block[id] = 0, make(chan struct{})
+		f.mu.Unlock()
+		r.Start(p)
+		for i := 0; ; i++ {
+			if h, _ := f.seen(id); h > 0 {
+				break
+			}
+			if i > 1000 {
+				t.Fatal(id + " never requested")
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		s := r.Snapshot()
+		close(f.block[id])
+		wait(t, r)
+		return s
+	}
+	if s := running("ccc", plan.Plan{Add: []plan.Want{c}, Replace: []plan.Want{lowA}}); s.Room != c.Bytes {
+		t.Errorf("an add before a replace that shrinks: room %d, want %d", s.Room, c.Bytes)
+	}
+	if s := running("bb", plan.Plan{Replace: []plan.Want{lowB}}); s.Room != 0 || s.BytesTotal-s.BytesDone <= 0 {
+		t.Errorf("a replace that shrinks: room %d, %d bytes to move", s.Room, s.BytesTotal-s.BytesDone)
 	}
 }

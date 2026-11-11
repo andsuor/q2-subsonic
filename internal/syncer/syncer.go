@@ -49,6 +49,7 @@ type Snapshot struct {
 	State                 string // idle, running, paused, done or error
 	Done, Total, Failed   int
 	BytesDone, BytesTotal int64
+	Room                  int64 // the most the card must still take for the downloads to come, less the files they replace
 	Permille              int
 	ETA                   time.Duration
 	Current               string // "Artist – Title" of the song in flight
@@ -68,8 +69,10 @@ type Runner struct {
 	// block. The runner is Busy until it returns.
 	OnDone func(plan.Plan)
 	// MakeRoom, when set, is called before a run's downloads with the bytes they add to the card:
-	// the songs still to fetch, less the files they replace. A run started again asks again.
-	MakeRoom func(need int64)
+	// the songs still to fetch, less the files they replace, and the covers of new album folders,
+	// as plan.Compute counts them. A run started again asks again. False, there is no room for
+	// them, pauses the run as a full card before anything is fetched.
+	MakeRoom func(need int64) bool
 
 	root string
 	src  MediaSource
@@ -87,6 +90,7 @@ type Runner struct {
 	renamedN, removedN    int
 	errAt                 time.Time
 	bytesDone, bytesTotal int64
+	room                  int64 // Snapshot.Room
 	cur, curMax           int64 // the file in flight: bytes on the card, its planned size
 	current, part         string
 	failures              []Failure
@@ -129,7 +133,7 @@ func (r *Runner) launch() {
 	r.cancel, r.done = cancel, make(chan struct{})
 	r.state, r.err, r.failures, r.meter = "running", nil, nil, meter{}
 	r.doneN, r.failedN, r.total, r.renamedN, r.removedN = 0, 0, len(p.Add)+len(p.Replace), 0, 0
-	r.bytesDone, r.bytesTotal, r.cur, r.curMax = 0, 0, 0, 0
+	r.bytesDone, r.bytesTotal, r.cur, r.curMax, r.room = 0, 0, 0, 0, 0
 	for _, w := range append(append([]plan.Want(nil), p.Add...), p.Replace...) {
 		r.bytesTotal += w.Bytes
 	}
@@ -386,7 +390,7 @@ func (r *Runner) Snapshot() Snapshot {
 	defer r.mu.Unlock()
 	done := r.bytesDone + min(r.cur, r.curMax)
 	s := Snapshot{State: r.state, Done: r.doneN, Total: r.total, Failed: r.failedN, BytesDone: done,
-		BytesTotal: r.bytesTotal, Current: r.current, Err: r.err, ErrAt: r.errAt,
+		BytesTotal: r.bytesTotal, Room: r.room, Current: r.current, Err: r.err, ErrAt: r.errAt,
 		Renamed: r.renamedN, Removed: r.removedN, Failures: append([]Failure(nil), r.failures...)}
 	switch {
 	case s.State == "done":
@@ -543,22 +547,30 @@ func (j *job) downloads() error {
 		e := j.m.Songs[w.Song.ID]
 		return e != nil && e.Path == w.Path && e.Quality == w.Quality && e.Meta == library.MetaKey(w.Song, w.Quality)
 	}
-	if j.MakeRoom != nil {
-		var need int64
-		for _, w := range wants {
-			if have(w) {
-				continue
-			}
-			need += w.Bytes
+	// room[i] is the most the card must still take from want i on: a replace's old file goes once
+	// the new one is there, so songs that shrink free nothing for the ones fetched before them.
+	room, missing := make([]int64, len(wants)+1), []plan.Want(nil)
+	for i := len(wants) - 1; i >= 0; i-- {
+		w, add := wants[i], int64(0)
+		if !have(w) {
+			missing, add = append(missing, w), w.Bytes
 			if old := j.m.Songs[w.Song.ID]; old != nil {
-				need -= old.Size // goes once the new file is there
+				add -= old.Size
 			}
 		}
-		if need > 0 {
-			j.MakeRoom(need)
-		}
+		room[i] = max(room[i+1]+add, 0)
 	}
-	for _, w := range wants {
+	setRoom := func(n int64) {
+		j.mu.Lock()
+		j.room = n
+		j.mu.Unlock()
+	}
+	setRoom(room[0]) // a run that stops keeps what it had left: a paused sync's room is still its own
+	if need := room[0] + plan.CoverNeed(j.m, missing); j.MakeRoom != nil && need > 0 && !j.MakeRoom(need) {
+		return ErrCardFull
+	}
+	for i, w := range wants {
+		setRoom(room[i])
 		id := w.Song.ID
 		if have(w) {
 			j.finished(w)
@@ -622,6 +634,7 @@ func (j *job) downloads() error {
 		j.finished(w)
 		j.op("download", w.Path)
 	}
+	setRoom(0)
 	return nil
 }
 
