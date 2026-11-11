@@ -24,6 +24,12 @@ type Playlist struct {
 	SongCount int
 }
 
+type Genre struct {
+	Name       string `json:"value"`
+	AlbumCount int    `json:"albumCount"`
+	SongCount  int    `json:"songCount"`
+}
+
 // wire shapes (Subsonic / OpenSubsonic field names)
 type wireSong struct {
 	ID                 string `json:"id"`

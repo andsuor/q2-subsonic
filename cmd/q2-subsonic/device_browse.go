@@ -212,29 +212,12 @@ func (d *daemon) withSyncNow(r q2spot.Reply, cursor string) q2spot.Reply {
 }
 
 func (d *daemon) browse(ctx context.Context, cl *subsonic.Client, op, cursor string) q2spot.Reply {
+	if op == "albums" {
+		return d.albumList(ctx, cl, "alphabeticalByName", "", nil, cursor)
+	}
 	v := d.view()
 	var rows []q2spot.Row
 	switch op {
-	case "albums": // paged by Navidrome: one more than a page says whether More… follows
-		off, _ := strconv.Atoi(cursor)
-		al, err := cl.Albums(ctx, off, q2spot.MaxRows+1)
-		if err != nil {
-			return d.listErr(err, cursor)
-		}
-		var r q2spot.Reply
-		if len(al) > q2spot.MaxRows {
-			al, r.Cursor = al[:q2spot.MaxRows], strconv.Itoa(off+q2spot.MaxRows)
-		}
-		for _, a := range al {
-			r.Rows = append(r.Rows, v.item(selection.KindAlbum, a.ID, a.Name, a.Artist, a.SongCount))
-		}
-		if n := fit(r.Rows); n < len(r.Rows) {
-			r.Rows, r.Cursor = r.Rows[:n], strconv.Itoa(off+n)
-		}
-		if len(r.Rows) == 0 && off == 0 {
-			r.Rows = []q2spot.Row{info("No albums")}
-		}
-		return r
 	case "playlists":
 		pls, err := cached(d, cl, op, func() ([]subsonic.Playlist, error) { return cl.Playlists(ctx) })
 		if err != nil {
@@ -263,6 +246,7 @@ func (d *daemon) browse(ctx context.Context, cl *subsonic.Client, op, cursor str
 
 // itemData is an album's or playlist's songs, or an artist's albums.
 type itemData struct {
+	name   string // an artist's
 	songs  []subsonic.Song
 	albums []subsonic.Album
 }
@@ -280,7 +264,9 @@ func (d *daemon) item(ctx context.Context, cl *subsonic.Client, kind selection.K
 		case selection.KindPlaylist:
 			_, it.songs, err = cl.Playlist(ctx, id)
 		case selection.KindArtist:
-			_, it.albums, err = cl.Artist(ctx, id)
+			var a subsonic.Artist
+			a, it.albums, err = cl.Artist(ctx, id)
+			it.name = a.Name
 		default:
 			err = errBadKind
 		}
@@ -299,7 +285,8 @@ func (d *daemon) item(ctx context.Context, cl *subsonic.Client, kind selection.K
 	})
 }
 
-// itemPage is an artist's, album's or playlist's own page: Add/Remove, Quality, Play, then its contents.
+// itemPage is an artist's, album's or playlist's own page: Add/Remove, Quality, Play (an artist's:
+// Play, Shuffle, Radio, Top Songs), then its contents.
 func (d *daemon) itemPage(ctx context.Context, cl *subsonic.Client, arg, cursor string) q2spot.Reply {
 	kind, id := parseKey(arg)
 	key := selection.Key(kind, id)
@@ -330,6 +317,10 @@ func (d *daemon) itemPage(ctx context.Context, cl *subsonic.Client, arg, cursor 
 	for i, s := range songs {
 		rows = append(rows, v.song(s, key, i))
 	}
+	if len(albums) > 0 {
+		rows = append(rows, act("play", "Play", key+" 0"), act("shuffle", "Shuffle", key), act("radio", "Radio", key),
+			list("top", "Top Songs", "", key))
+	}
 	for _, a := range albums {
 		year := ""
 		if a.Year > 0 {
@@ -340,14 +331,36 @@ func (d *daemon) itemPage(ctx context.Context, cl *subsonic.Client, arg, cursor 
 	return page(rows, cursor)
 }
 
+// found is artists, albums and songs: a search's answer, or what is starred.
+type found struct {
+	ars   []subsonic.Artist
+	als   []subsonic.Album
+	songs []subsonic.Song
+}
+
+// foundRows lists f, artists then albums then songs, and keeps the songs as the list shown last
+// under listKey, so one pressed plays on through them.
+func (d *daemon) foundRows(f found, listKey string) []q2spot.Row {
+	d.mu.Lock()
+	d.listed = songList{listKey, f.songs}
+	d.mu.Unlock()
+	v := d.view()
+	var rows []q2spot.Row
+	for _, a := range f.ars {
+		rows = append(rows, v.item(selection.KindArtist, a.ID, a.Name, plural(a.AlbumCount, "album"), 0))
+	}
+	for _, a := range f.als {
+		rows = append(rows, v.album(a))
+	}
+	for i, s := range f.songs {
+		rows = append(rows, v.song(s, listKey, i))
+	}
+	return rows
+}
+
 // search lists what Navidrome found, artists then albums then songs.
 // ponytail: one search3 call, 50 of each kind; page past that when someone needs more.
 func (d *daemon) search(ctx context.Context, cl *subsonic.Client, term, cursor string) q2spot.Reply {
-	type found struct {
-		ars   []subsonic.Artist
-		als   []subsonic.Album
-		songs []subsonic.Song
-	}
 	f, err := cached(d, cl, "search:"+term, func() (f found, err error) {
 		f.ars, f.als, f.songs, err = cl.Search(ctx, term, 0)
 		return f, err
@@ -355,18 +368,7 @@ func (d *daemon) search(ctx context.Context, cl *subsonic.Client, term, cursor s
 	if err != nil {
 		return d.listErr(err, cursor)
 	}
-	ars, als, songs := f.ars, f.als, f.songs
-	v := d.view()
-	var rows []q2spot.Row
-	for _, a := range ars {
-		rows = append(rows, v.item(selection.KindArtist, a.ID, a.Name, plural(a.AlbumCount, "album"), 0))
-	}
-	for _, a := range als {
-		rows = append(rows, v.item(selection.KindAlbum, a.ID, a.Name, a.Artist, a.SongCount))
-	}
-	for _, s := range songs {
-		rows = append(rows, v.song(s, "song:"+s.ID, 0))
-	}
+	rows := d.foundRows(f, "q:")
 	if len(rows) == 0 {
 		rows = []q2spot.Row{info("No results")}
 	}
@@ -563,10 +565,12 @@ func (d *daemon) quality(arg string) q2spot.Reply {
 	return q2spot.Reply{}
 }
 
-// play streams a list from an index ("kind:id index", after a song row's own "song:<id>").
+// play streams a list from an index ("<list key> index", after a song row's own "song:<id>").
 func (d *daemon) play(ctx context.Context, cl *subsonic.Client, arg string) q2spot.Reply {
 	f := strings.Fields(arg)
+	pressed := ""
 	if len(f) == 3 {
+		_, pressed = parseKey(f[0])
 		f = f[1:]
 	}
 	if len(f) != 2 {
@@ -576,11 +580,30 @@ func (d *daemon) play(ctx context.Context, cl *subsonic.Client, arg string) q2sp
 	kind, id := parseKey(f[0])
 	var songs []subsonic.Song
 	var err error
-	if kind == selection.KindAlbum || kind == selection.KindPlaylist { // the page it was pressed on
+	switch kind {
+	case selection.KindAlbum, selection.KindPlaylist: // the page it was pressed on
 		var it itemData
 		it, err = d.item(ctx, cl, kind, id)
 		songs = it.songs
-	} else {
+	case selection.KindArtist:
+		return d.playArtist(ctx, cl, id, false)
+	case "starred", "top", "q":
+		// The list as last shown, when it still has the pressed song at that row: "q:" names no
+		// term, and the firmware asks a level again after every press and Back, so the list kept
+		// may be a newer answer than the one pressed in. Else the song alone.
+		d.mu.Lock()
+		l := d.listed
+		d.mu.Unlock()
+		if l.key == f[0] && i >= 0 && i < len(l.songs) && l.songs[i].ID == pressed {
+			songs = l.songs
+			break
+		}
+		if pressed == "" {
+			return q2spot.Fail(q2spot.Bad, "Bad request")
+		}
+		i = 0
+		songs, _, err = d.songsOf(ctx, cl, selection.KindSong, pressed)
+	default:
 		songs, _, err = d.songsOf(ctx, cl, kind, id)
 	}
 	if err != nil {
@@ -589,20 +612,33 @@ func (d *daemon) play(ctx context.Context, cl *subsonic.Client, arg string) q2sp
 	if i < 0 || i >= len(songs) {
 		return q2spot.Fail(q2spot.Unavailable, "Nothing to play")
 	}
-	// R27: starting stops the last stream, which may be mid-fetch; reply now, start behind it.
+	d.startStream(d.nextPlay(), songs, i)
+	return q2spot.Reply{Message: "Playing " + songs[i].Title}
+}
+
+// nextPlay numbers a play request: one still waiting when a later one, or Sign Out, comes is dropped.
+func (d *daemon) nextPlay() int {
 	d.mu.Lock()
+	defer d.mu.Unlock()
 	d.playSeq++
-	seq := d.playSeq
-	d.mu.Unlock()
+	return d.playSeq
+}
+
+// latestPlay is whether no play or Sign Out came after seq.
+func (d *daemon) latestPlay(seq int) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return seq == d.playSeq
+}
+
+// startStream plays songs from index i in the background (R27: starting stops the last stream,
+// which may be mid-fetch, so the reply never waits for it).
+func (d *daemon) startStream(seq int, songs []subsonic.Song, i int) {
 	d.spawn(func() {
 		d.playMu.Lock()
 		defer d.playMu.Unlock()
-		d.mu.Lock()
-		latest := seq == d.playSeq
-		d.mu.Unlock()
-		if latest {
+		if d.latestPlay(seq) {
 			d.stream.start(songs, i)
 		}
 	})
-	return q2spot.Reply{Message: "Playing " + songs[i].Title}
 }

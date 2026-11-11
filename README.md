@@ -31,7 +31,7 @@ Things to know:
 
 ## Use
 
-The list has **Sync Entire Library**, **Sync**, **On This Q2**, **Playlists**, **Albums**, **Artists**, **Search** and **Settings**. A list you opened is kept for a minute, so a change made on the server can take that long to show.
+The list has **Sync Entire Library**, **Sync**, **On This Q2**, **Playlists**, **Albums**, **Artists**, **Discover**, **Search** and **Settings**. A list you opened is kept for a minute, so a change made on the server can take that long to show.
 
 **Choosing what to sync:** hold **Play/Pause** on a playlist, album, artist or song to toggle it in Sync, or open it and press **Add to Sync** / **Remove from Sync**. The Q2 answers `Added to Sync · N songs`, `Removed from Sync` or, for a song already covered by something bigger, `Included via <name>`. **On This Q2** lists what you picked, with its status and size on the card; hold Play/Pause there to take one out.
 
@@ -39,7 +39,11 @@ The list has **Sync Entire Library**, **Sync**, **On This Q2**, **Playlists**, *
 
 **Syncing:** open **Sync**. It first checks the server (`Checking server…`, with a count such as `4500 of 10000 songs` when Sync Entire Library is on), then shows a preview, and nothing happens until you press **Start Sync**: songs to add (`+N`), to remove (`−N`), to replace (`Replace N`), playlists to update (`Update N playlists`), and `Needs X · Y free`. A song you deleted from the card is fetched again. If the card is too small it says so and offers no Start. Then it shows progress: percent, songs, time left, the current song, and **Pause**, **Resume** and **Cancel**. Leave the page and the sync carries on. If Wi-Fi drops or the Q2 restarts, it picks up where it was. Songs that fail are listed under **Failed Songs**, with **Retry Failed**.
 
-**Playing:** press a song to play it and the rest of the list after it. Songs already synced play from the card; the others stream. A song streams in its original format: FLAC and MP3 always, and other formats the Q2 plays too when the firmware has the `playlist` extension; without it they stream as MP3 320. **Settings → Streaming Quality** (Original, the default, MP3 320 or MP3 128) overrides this: anything but Original transcodes every streamed song to MP3. Streamed files are deleted as you go. With the firmware's `playlist` extension, a song the server can't send (gone from it, or a format it can't convert) is skipped and the list plays on, and the main page says which; if the server can't be reached, or three songs in a row fail, the stream stops at that song.
+**Discover** has **Shuffle All** (100 songs the server picks), **Recently Added**, **Recently Played**, **Most Played**, **Random Albums**, **Starred** and **Genres**. A genre lists its albums, with its own **Shuffle**. Recently Played and Most Played count what the server user has played, and plays on the Q2 are not counted yet, so with a server user kept just for the Q2 they are empty. Random Albums stays the same until you open Discover again. Starred shows what that user starred on the server; the Q2 can't star.
+
+**An artist's page** has **Play** (all its albums in order), **Shuffle**, **Radio** (songs like the artist's, picked by the server) and **Top Songs**, above its albums. Play and Shuffle fetch the albums first, so music can start a little after the toast. Radio and Top Songs depend on the server: Navidrome has both, through Last.fm when that is set up. On a server without them they say `Not available on this server`.
+
+**Playing:** press a song to play it and the rest of the list after it; search results, Starred and Top Songs work this way too. Songs already synced play from the card; the others stream. A song streams in its original format: FLAC and MP3 always, and other formats the Q2 plays too when the firmware has the `playlist` extension; without it they stream as MP3 320. **Settings → Streaming Quality** (Original, the default, MP3 320 or MP3 128) overrides this: anything but Original transcodes every streamed song to MP3. Streamed files are deleted as you go. With the firmware's `playlist` extension, a song the server can't send (gone from it, or a format it can't convert) is skipped and the list plays on, and the main page says which; if the server can't be reached, or three songs in a row fail, the stream stops at that song.
 
 ## Sync rules
 

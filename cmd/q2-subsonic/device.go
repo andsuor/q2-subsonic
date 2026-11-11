@@ -23,7 +23,9 @@ import (
 // opens and its Context the argument; an action row sends URI with Context and toasts the reply's
 // message; a held Play/Pause sends the row's Position ("toggle") with its Context ("kind:id").
 // Item pages take "kind:id" too, since one Context serves both press and hold. A song row's Context
-// is "song:<id> <list kind:id> <index>": toggle reads the first field, play the rest.
+// is "song:<id> <list key> <index>": toggle reads the first field, play the rest. The list key is
+// the page's "kind:id", or "starred:", "top:<artist id>" or "q:" (search) for a list kept in
+// d.listed.
 
 var qualities = []string{"original", "mp3-320", "mp3-128"}
 
@@ -196,6 +198,23 @@ func (d *daemon) reply(req q2spot.Request) q2spot.Reply {
 		return d.withSyncNow(d.itemPage(ctx, cl, req.Arg(0), req.Arg(1)), req.Arg(1))
 	case "search":
 		return d.withSyncNow(d.search(ctx, cl, req.Arg(0), req.Arg(1)), req.Arg(1))
+	case "discover":
+		return d.discover()
+	case "albumlist":
+		return d.withSyncNow(d.albumLists(ctx, cl, req.Arg(0), req.Arg(1)), req.Arg(1))
+	case "starred":
+		return d.withSyncNow(d.starred(ctx, cl, req.Arg(0)), req.Arg(0))
+	case "genres":
+		return d.genres(ctx, cl, req.Arg(0))
+	case "genre":
+		head := []q2spot.Row{act("shuffle", "Shuffle", "genre:"+req.Arg(0))}
+		return d.withSyncNow(d.albumList(ctx, cl, "byGenre", req.Arg(0), head, req.Arg(1)), req.Arg(1))
+	case "top":
+		return d.withSyncNow(d.top(ctx, cl, req.Arg(0), req.Arg(1)), req.Arg(1))
+	case "shuffle":
+		return d.shuffle(ctx, cl, req.Arg(0))
+	case "radio":
+		return d.radio(ctx, cl, req.Arg(0))
 	case "toggle":
 		return d.toggle(ctx, cl, req.Arg(0))
 	case "quality":
@@ -315,7 +334,7 @@ func (d *daemon) menu() q2spot.Reply {
 	rows := []q2spot.Row{d.libraryRow(sel), list("sync", "Sync", d.syncSubtitle(cl), ""),
 		list("onq2", "On This Q2", onq2, ""),
 		list("playlists", "Playlists", "", ""), list("albums", "Albums", "", ""), list("artists", "Artists", "", ""),
-		q2spot.Row{Kind: "search", Title: "Search"}, list("settings", "Settings", "", "")}
+		list("discover", "Discover", "", ""), q2spot.Row{Kind: "search", Title: "Search"}, list("settings", "Settings", "", "")}
 	// Last, so the rows above keep their places under the cursor (M33).
 	if e := d.stream.Err(); e != nil {
 		op, h, code := "stream", 0, 0

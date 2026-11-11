@@ -63,8 +63,17 @@ type nav struct {
 	scanning         atomic.Bool   // getScanStatus's scanning
 	scanMoves        bool          // lastScan is another at every call
 	scanReqs         atomic.Int32  // getScanStatus calls served
+	noLastfm         bool          // getTopSongs and getSimilarSongs2 are not implemented (HTTP 501)
+	simCode          int           // getSimilarSongs2 fails with this Subsonic code
 	reqMu            sync.Mutex
-	reqN             map[string]int // requests served, by endpoint
+	reqN             map[string]int        // requests served, by endpoint
+	lastQ            map[string]url.Values // the latest request's query, by endpoint
+}
+
+func (n *nav) query(op string) url.Values {
+	n.reqMu.Lock()
+	defer n.reqMu.Unlock()
+	return n.lastQ[op]
 }
 
 func (n *nav) reqs(op string) int {
@@ -127,9 +136,10 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	op := path.Base(r.URL.Path)
 	n.reqMu.Lock()
 	if n.reqN == nil {
-		n.reqN = map[string]int{}
+		n.reqN, n.lastQ = map[string]int{}, map[string]url.Values{}
 	}
 	n.reqN[op]++
+	n.lastQ[op] = q
 	n.reqMu.Unlock()
 	if n.errCode != 0 && op != "download" && op != "stream" {
 		json.NewEncoder(w).Encode(map[string]any{"subsonic-response": map[string]any{"status": "failed",
@@ -253,6 +263,34 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		ok("searchResult3", map[string]any{"album": []any{n.album(0)}, "song": n.songs(0)})
+	case "getStarred2":
+		if n.empty {
+			ok("starred2", map[string]any{})
+			return
+		}
+		ok("starred2", map[string]any{"artist": []any{map[string]any{"id": "ar1", "name": "Artist", "albumCount": 2}},
+			"album": []any{n.album(0)}, "song": n.songs(1)})
+	case "getGenres":
+		if n.empty {
+			ok("genres", map[string]any{})
+			return
+		}
+		ok("genres", map[string]any{"genre": []any{map[string]any{"value": "Rock", "albumCount": 2, "songCount": 20},
+			map[string]any{"value": "", "albumCount": 1}, map[string]any{"value": "ambient"},
+			map[string]any{"value": "Hip Hop: Old", "albumCount": 1}}})
+	case "getRandomSongs", "getTopSongs", "getSimilarSongs2":
+		key := map[string]string{"getRandomSongs": "randomSongs", "getTopSongs": "topSongs", "getSimilarSongs2": "similarSongs2"}[op]
+		switch {
+		case n.noLastfm && op != "getRandomSongs":
+			http.Error(w, "This endpoint is not implemented", http.StatusNotImplemented)
+		case n.simCode != 0 && op == "getSimilarSongs2":
+			json.NewEncoder(w).Encode(map[string]any{"subsonic-response": map[string]any{"status": "failed",
+				"error": map[string]any{"code": n.simCode, "message": "data not found"}}})
+		case n.empty:
+			ok(key, map[string]any{})
+		default:
+			ok(key, map[string]any{"song": n.songs(0)})
+		}
 	case "getSong":
 		al, j, _ := strings.Cut(strings.TrimPrefix(q.Get("id"), "al"), ".")
 		a, _ := strconv.Atoi(al)
@@ -395,11 +433,11 @@ func TestLeavingQRPageStopsSignIn(t *testing.T) {
 func TestRootSignedIn(t *testing.T) {
 	d := newTestDaemon(t, &nav{}, "", true)
 	r := d.do("menu")
-	want := []string{"Sync Entire Library", "Sync", "On This Q2", "Playlists", "Albums", "Artists", "Search", "Settings"}
+	want := []string{"Sync Entire Library", "Sync", "On This Q2", "Playlists", "Albums", "Artists", "Discover", "Search", "Settings"}
 	if got := titles(r); strings.Join(got, "|") != strings.Join(want, "|") {
 		t.Fatalf("titles %q, want %q", got, want)
 	}
-	kinds := []string{"action", "list", "list", "list", "list", "list", "search", "list"}
+	kinds := []string{"action", "list", "list", "list", "list", "list", "list", "search", "list"}
 	for i, row := range r.Rows {
 		if row.Kind != kinds[i] {
 			t.Errorf("%s kind %q, want %q", row.Title, row.Kind, kinds[i])
@@ -575,7 +613,9 @@ func TestReplyWithin8s(t *testing.T) {
 	d := newTestDaemon(t, &nav{stall: true}, "library", true)
 	ops := [][]string{{"menu"}, {"playlists"}, {"albums"}, {"artists"}, {"artist", "artist:ar1"}, {"search", "x"},
 		{"playlist", "playlist:pl1"}, {"album", "album:al0"}, {"toggle", "album:al0"}, {"toggle", "song:al0.1 album:al0 1"},
-		{"play", "album:al0 0"}, {"onq2"}, {"settings"}, {"account"}, {"sync"}, {"library"}, {"details", "getAlbum|0|0|0|"}}
+		{"play", "album:al0 0"}, {"onq2"}, {"settings"}, {"account"}, {"sync"}, {"library"}, {"details", "getAlbum|0|0|0|"},
+		{"discover"}, {"albumlist", "newest"}, {"albumlist", "random"}, {"starred"}, {"genres"}, {"genre", "Rock"}, {"shuffle", ""},
+		{"shuffle", "artist:ar1"}, {"play", "artist:ar1 0"}, {"radio", "artist:ar1"}, {"top", "artist:ar1"}}
 	var wg sync.WaitGroup
 	for _, op := range ops {
 		wg.Add(1)
@@ -885,6 +925,12 @@ func TestEmptyStates(t *testing.T) {
 		{"albums", "", "No albums", ""},
 		{"artists", "", "No artists", ""},
 		{"search", "x", "No results", ""},
+		{"albumlist", "newest", "No albums", ""},
+		{"albumlist", "random", "No albums", ""},
+		{"starred", "", "Nothing starred", "Star music on the server to see it here"},
+		{"genres", "", "No genres", ""},
+		{"genre", "Rock", "No albums", ""},
+		{"top", "artist:ar1", "No top songs", ""},
 		{"onq2", "", "Nothing chosen yet", "Hold Play/Pause on a playlist, album or artist"},
 	} {
 		r := d.do(c.op, c.arg)

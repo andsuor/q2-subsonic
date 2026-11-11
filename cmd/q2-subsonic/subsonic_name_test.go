@@ -51,6 +51,7 @@ func TestNoNavidromeInUI(t *testing.T) {
 		d.do("toggle", "album:al0")
 		for _, op := range [][]string{{"menu"}, {"playlists"}, {"albums"}, {"artists"}, {"artist", "artist:ar1"}, {"search", "x"},
 			{"playlist", "playlist:pl1"}, {"album", "album:al0"}, {"settings"}, {"account"}, {"onq2"}, {"library"},
+			{"discover"}, {"albumlist", "recent"}, {"starred"}, {"genres"}, {"genre", "Rock"}, {"top", "artist:ar1"},
 			{"details", "getAlbum|0|0|0|"}} {
 			check(strings.Join(op, " "), d.do(op[0], op[1:]...))
 		}

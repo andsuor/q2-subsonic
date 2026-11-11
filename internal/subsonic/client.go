@@ -335,16 +335,88 @@ func (c *Client) Playlist(ctx context.Context, id string) (Playlist, []Song, err
 }
 
 func (c *Client) Albums(ctx context.Context, offset, size int) ([]Album, error) {
+	return c.AlbumList(ctx, "alphabeticalByName", "", offset, size)
+}
+
+// AlbumList is one page of getAlbumList2: typ is the server's list type (newest, recent, frequent,
+// random, byGenre…), genre the genre byGenre lists.
+func (c *Client) AlbumList(ctx context.Context, typ, genre string, offset, size int) ([]Album, error) {
 	var r struct {
 		L struct {
 			Album []wireAlbum `json:"album"`
 		} `json:"albumList2"`
 	}
-	q := url.Values{"type": {"alphabeticalByName"}, "offset": {strconv.Itoa(offset)}, "size": {strconv.Itoa(size)}}
+	q := url.Values{"type": {typ}, "offset": {strconv.Itoa(offset)}, "size": {strconv.Itoa(size)}}
+	if genre != "" {
+		q.Set("genre", genre)
+	}
 	if err := c.call(ctx, "getAlbumList2", q, &r); err != nil {
 		return nil, err
 	}
 	return albums(r.L.Album), nil
+}
+
+// Starred is what the user starred on the server: artists, albums and songs.
+func (c *Client) Starred(ctx context.Context) ([]Artist, []Album, []Song, error) {
+	var r struct {
+		S struct {
+			Artist []wireArtist `json:"artist"`
+			Album  []wireAlbum  `json:"album"`
+			Song   []wireSong   `json:"song"`
+		} `json:"starred2"`
+	}
+	if err := c.call(ctx, "getStarred2", nil, &r); err != nil {
+		return nil, nil, nil, err
+	}
+	return artists(r.S.Artist), albums(r.S.Album), songs(r.S.Song), nil
+}
+
+func (c *Client) Genres(ctx context.Context) ([]Genre, error) {
+	var r struct {
+		G struct {
+			Genre []Genre `json:"genre"`
+		} `json:"genres"`
+	}
+	err := c.call(ctx, "getGenres", nil, &r)
+	return r.G.Genre, err
+}
+
+// songList is a call whose answer is a list of songs under key.
+func (c *Client) songList(ctx context.Context, op, key string, q url.Values) ([]Song, error) {
+	var r map[string]json.RawMessage // the envelope's other fields are not objects
+	if err := c.call(ctx, op, q, &r); err != nil {
+		return nil, err
+	}
+	var l struct {
+		Song []wireSong `json:"song"`
+	}
+	if len(r[key]) > 0 {
+		if err := json.Unmarshal(r[key], &l); err != nil {
+			return nil, &APIError{Op: op, Msg: err.Error(), kind: ErrNotSubsonic}
+		}
+	}
+	return songs(l.Song), nil
+}
+
+// RandomSongs is up to size songs picked by the server, of one genre when genre is set.
+func (c *Client) RandomSongs(ctx context.Context, size int, genre string) ([]Song, error) {
+	q := url.Values{"size": {strconv.Itoa(size)}}
+	if genre != "" {
+		q.Set("genre", genre)
+	}
+	return c.songList(ctx, "getRandomSongs", "randomSongs", q)
+}
+
+// TopSongs is an artist's most played songs, by the artist's name. Not every server has it (see
+// Unsupported).
+func (c *Client) TopSongs(ctx context.Context, artist string, count int) ([]Song, error) {
+	return c.songList(ctx, "getTopSongs", "topSongs", url.Values{"artist": {artist}, "count": {strconv.Itoa(count)}})
+}
+
+// SimilarSongs is songs like an artist's, by the artist's id. Not every server has it (see
+// Unsupported); Navidrome answers "not found" (ErrNotFound) when it knows none.
+func (c *Client) SimilarSongs(ctx context.Context, id string, count int) ([]Song, error) {
+	return c.songList(ctx, "getSimilarSongs2", "similarSongs2", url.Values{"id": {id}, "count": {strconv.Itoa(count)}})
 }
 
 func (c *Client) Album(ctx context.Context, id string) (Album, []Song, error) {

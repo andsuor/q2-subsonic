@@ -155,6 +155,13 @@ func cached[T any](d *daemon, cl *subsonic.Client, key string, fetch func() (T, 
 	return v, nil
 }
 
+// songList is the songs of Starred, Top Songs or a search as last shown, so a song pressed there
+// plays on through them. Its key is the rows' list key: "starred:", "top:<artist id>" or "q:".
+type songList struct {
+	key   string
+	songs []subsonic.Song
+}
+
 // daemon is the running app: the Q2SPOT/1 handler (device) and what it drives.
 type daemon struct {
 	dir, card, tmp string // the app folder (.subsonic), the card's root, /tmp
@@ -198,6 +205,8 @@ type daemon struct {
 	wasBusy            bool      // the runner, at the last tick
 	cache              []cacheEntry
 	browseTTL          time.Duration
+	random             []subsonic.Album // Random Albums as last drawn, until Discover is opened again
+	listed             songList         // the song list shown last
 
 	bg sync.WaitGroup // the work replies leave running (ping, preview, play, sign-out's stops); tests wait for it
 }
@@ -302,7 +311,7 @@ func (d *daemon) signOut() {
 	creds.Remove(d.dir)
 	d.mu.Lock()
 	d.cl, d.pinged = nil, false
-	d.cache = nil
+	d.cache, d.random, d.listed = nil, nil, songList{}
 	d.dropPreview()
 	d.playSeq++ // a play still waiting for playMu is dropped
 	d.mu.Unlock()

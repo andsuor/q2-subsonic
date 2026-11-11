@@ -40,6 +40,13 @@ func (e *APIError) Error() string {
 }
 func (e *APIError) Unwrap() error { return e.kind }
 
+// Unsupported reports whether err is the server not having the endpoint at all: a bare HTTP 404,
+// 410 or 501 (Navidrome's answer for what it doesn't implement), with no Subsonic error in it.
+func Unsupported(err error) bool {
+	var ae *APIError
+	return errors.As(err, &ae) && ae.Code == 0 && (ae.HTTP == 404 || ae.HTTP == 410 || ae.HTTP == 501)
+}
+
 // codeKind is the Err value a Subsonic error code unwraps to: 40 and 44 are wrong credentials,
 // 41-43 a sign-in method the server won't take for this user (an LDAP user, say), 70 data not found.
 func codeKind(code int) error {

@@ -682,3 +682,73 @@ func TestScanStatus(t *testing.T) {
 		t.Fatal(ls, n, scanning, err)
 	}
 }
+
+// The Discover lists: what each asks for and how its answer is read.
+func TestDiscoverLists(t *testing.T) {
+	ctx := context.Background()
+	var op string
+	var q url.Values
+	body := ""
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		op, q = path.Base(r.URL.Path), r.URL.Query()
+		w.Write([]byte(`{"subsonic-response":{"status":"ok","version":"1.16.1",` + body + `}}`))
+	}))
+	defer srv.Close()
+	c, _ := New(Creds{Server: srv.URL, User: "u", Password: "pw"}, srv.Client())
+	song := `[{"id":"s1","title":"One"},{"id":"s2","title":"Two"}]`
+
+	body = `"albumList2":{"album":[{"id":"al1","name":"Alb"}]}`
+	if al, err := c.AlbumList(ctx, "byGenre", "Hip Hop", 5, 10); err != nil || len(al) != 1 || al[0].Name != "Alb" ||
+		op != "getAlbumList2" || q.Get("type") != "byGenre" || q.Get("genre") != "Hip Hop" || q.Get("offset") != "5" || q.Get("size") != "10" {
+		t.Fatal(al, err, op, q)
+	}
+	if _, err := c.AlbumList(ctx, "newest", "", 0, 10); err != nil || q.Has("genre") {
+		t.Fatal(err, q)
+	}
+	body = `"starred2":{"artist":[{"id":"ar1","name":"Art"}],"album":[{"id":"al1","name":"Alb"}],"song":` + song + `}`
+	if ar, al, so, err := c.Starred(ctx); err != nil || op != "getStarred2" || len(ar) != 1 || len(al) != 1 || len(so) != 2 || so[1].Title != "Two" {
+		t.Fatal(ar, al, so, err, op)
+	}
+	body = `"genres":{"genre":[{"value":"Rock","albumCount":3,"songCount":30}]}`
+	if g, err := c.Genres(ctx); err != nil || op != "getGenres" || len(g) != 1 || g[0] != (Genre{"Rock", 3, 30}) {
+		t.Fatal(g, err, op)
+	}
+	body = `"randomSongs":{"song":` + song + `}`
+	if so, err := c.RandomSongs(ctx, 100, "Rock"); err != nil || op != "getRandomSongs" || len(so) != 2 || q.Get("size") != "100" || q.Get("genre") != "Rock" {
+		t.Fatal(so, err, op, q)
+	}
+	if _, err := c.RandomSongs(ctx, 100, ""); err != nil || q.Has("genre") {
+		t.Fatal(err, q)
+	}
+	body = `"topSongs":{"song":` + song + `}`
+	if so, err := c.TopSongs(ctx, "Art", 50); err != nil || op != "getTopSongs" || len(so) != 2 || q.Get("artist") != "Art" || q.Get("count") != "50" {
+		t.Fatal(so, err, op, q)
+	}
+	body = `"similarSongs2":{"song":` + song + `}`
+	if so, err := c.SimilarSongs(ctx, "ar1", 50); err != nil || op != "getSimilarSongs2" || len(so) != 2 || q.Get("id") != "ar1" || q.Get("count") != "50" {
+		t.Fatal(so, err, op, q)
+	}
+}
+
+// Unsupported is an endpoint the server doesn't have (a bare HTTP 404, 410 or 501), never a
+// Subsonic error or a server that is down.
+func TestUnsupported(t *testing.T) {
+	for status, want := range map[int]bool{501: true, 410: true, 404: true, 502: false, 500: false} {
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(status)
+			w.Write([]byte("This endpoint is not implemented"))
+		}))
+		c, _ := New(Creds{Server: srv.URL, User: "u", Password: "pw"}, srv.Client())
+		if _, err := c.TopSongs(context.Background(), "Art", 50); err == nil || Unsupported(err) != want {
+			t.Errorf("HTTP %d: Unsupported(%v) = %v", status, err, !want)
+		}
+		srv.Close()
+	}
+	c := serveJSON(t, failed(70))
+	if _, err := c.SimilarSongs(context.Background(), "ar1", 50); !errors.Is(err, ErrNotFound) || Unsupported(err) {
+		t.Fatalf("code 70: %v", err)
+	}
+	if Unsupported(nil) || Unsupported(errors.New("x")) {
+		t.Fatal("not an API error")
+	}
+}
