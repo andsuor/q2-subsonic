@@ -223,6 +223,7 @@ type daemon struct {
 	preview            *preview
 	showDone           bool // the finished sync's page, until Check Again, a new Start, or a choice made after it ended
 	fullCheck          bool // Check Again was pressed: the next preview checks the whole library
+	cardWalked         bool // the card was walked for deleted songs since the app started
 	lib                *libJob
 	libTaken           int64                       // the library request whose answer was taken last (libPoll)
 	libAgain           bool                        // a request was wanted while one awaited its answer: sent once that comes

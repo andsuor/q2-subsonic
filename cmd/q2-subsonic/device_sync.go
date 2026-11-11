@@ -243,9 +243,21 @@ func (d *daemon) computePreview(ctx context.Context, cl *subsonic.Client, p *pre
 		d.mu.Lock()
 		p.note = working
 		d.mu.Unlock()
-		// Songs deleted from the card are planned again, not taken as there (I9).
-		if derr := d.runner.DropMissing(d.manifest()); derr != nil && !errors.Is(derr, syncer.ErrBusy) {
-			d.log.Printf("sync: %v", derr)
+		// Songs deleted from the card are planned again, not taken as there (I9). The walk is most
+		// of a check on the Q2's card, so it runs once per start (USB storage, the one way files
+		// go in bulk, restarts the app) and at Check Again.
+		// ponytail: a song deleted on the Q2 while the app runs waits for one of those two.
+		d.mu.Lock()
+		walk := p.full || !d.cardWalked
+		d.mu.Unlock()
+		if walk {
+			derr := d.runner.DropMissing(d.manifest())
+			if derr != nil && !errors.Is(derr, syncer.ErrBusy) {
+				d.log.Printf("sync: %v", derr)
+			}
+			d.mu.Lock()
+			d.cardWalked = derr == nil
+			d.mu.Unlock()
 		}
 		drop = lap()
 		// A gone item is planned as not chosen (a gone playlist's file goes), then held: its songs stay.

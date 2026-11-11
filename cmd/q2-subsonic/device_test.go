@@ -1812,6 +1812,28 @@ func TestDeletedFileFetchedAgain(t *testing.T) {
 	}
 }
 
+// The card is walked for deleted songs once per start and at Check Again only: on the Q2 that
+// walk is most of a check's time (14 of 18 s for 1,778 songs).
+func TestCardWalkedOncePerStart(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 2, songsPer: 2}, "", true)
+	d.do("toggle", "album:al0")
+	d.syncOK(t)
+	d.do("check")
+	d.preview(t) // walked
+	for _, e := range d.manifest().Songs {
+		os.Remove(e.Path)
+		break
+	}
+	d.do("toggle", "album:al1") // a new preview, no Check Again
+	if r := d.preview(t); len(d.manifest().Songs) != 2 {
+		t.Fatalf("walked again without Check Again: %q", titles(r))
+	}
+	d.do("check")
+	if d.preview(t); len(d.manifest().Songs) != 1 {
+		t.Fatal("Check Again did not walk the card")
+	}
+}
+
 // A playlist change that moves no song still syncs: a new one whose songs are on the card, and one
 // taken out whose songs stay (I10).
 func TestPlaylistOnlyChangeSyncs(t *testing.T) {
