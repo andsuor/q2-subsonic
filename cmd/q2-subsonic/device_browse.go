@@ -30,7 +30,7 @@ type view struct {
 	res     map[string][]subsonic.Song
 	artists map[string][]subsonic.Album // artist id -> its albums, as last fetched
 	keyed   map[string][]string         // item key -> the songs on the card recorded for it
-	albumOn map[string]map[string]bool  // album id -> its fetched songs that are on the card
+	albumOn map[string]map[string]bool  // album id -> its songs on the card, as fetched or as the manifest records
 	// pending: item key -> a sync is due though no song of it is missing: the item was taken out
 	// and its songs are still on the card, or they are there at another quality (M35).
 	pending map[string]bool
@@ -67,6 +67,12 @@ func (d *daemon) view() view {
 		}
 	}
 	for id, e := range m.Songs {
+		if e.Album != "" { // as recorded: an album's status needs no fetch, so it is there after a restart
+			if v.albumOn[e.Album] == nil {
+				v.albumOn[e.Album] = map[string]bool{}
+			}
+			v.albumOn[e.Album][id] = true
+		}
 		want := "" // the best quality among the chosen items holding it, as the plan picks
 		for _, k := range e.Items {
 			v.keyed[k] = append(v.keyed[k], id)

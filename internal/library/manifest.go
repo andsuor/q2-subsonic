@@ -11,13 +11,16 @@ import (
 
 // Entry is one synced song. Meta is MetaKey at sync time; Items are the selection keys holding it.
 // Size is the bytes on the card; SrcSize, for an original, the server's size of the file it came
-// from (0 when unknown: synced before it was kept), so a re-rip is noticed.
+// from (0 when unknown: synced before it was kept), so a re-rip is noticed. Album is the server's
+// id of its album ("" when unknown: synced before it was kept, until a check records it), so an
+// album's status is known before anything is fetched.
 type Entry struct {
 	ID, Path, Quality string
 	Size              int64
 	SrcSize           int64 `json:",omitempty"`
 	Items             []string
 	Meta              string
+	Album             string `json:",omitempty"`
 }
 
 // Manifest is what the app has put on the card. Playlists maps a playlist name to the absolute

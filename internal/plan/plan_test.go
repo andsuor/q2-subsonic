@@ -23,7 +23,7 @@ func item(kind selection.Kind, id, q string) selection.Item {
 
 func entry(s subsonic.Song, q string, size int64, items ...string) *library.Entry {
 	return &library.Entry{ID: s.ID, Path: library.SongPath(root, s, q, false), Quality: q, Size: size,
-		Items: items, Meta: library.MetaKey(s, q)}
+		Items: items, Meta: library.MetaKey(s, q), Album: s.AlbumID}
 }
 
 func manifest(es ...*library.Entry) *library.Manifest {
@@ -371,5 +371,24 @@ func TestPlanHoldKeepsGoneItemSongs(t *testing.T) {
 	p.Hold(map[string]bool{"album:a1": true})
 	if len(p.Remove) != 1 || p.Remove[0].ID != "s2" || p.Held != 1 {
 		t.Fatalf("after Hold: remove %v, held %d", p.Remove, p.Held)
+	}
+}
+
+// A song synced before its album was recorded is kept once, for the record; one whose album is
+// recorded, or that the server names no album for, is not.
+func TestPlanKeepBackfillsAlbum(t *testing.T) {
+	a, b := song("s1", "One"), song("s2", "Two")
+	b.AlbumID = ""
+	sel := selection.Set{Items: []selection.Item{item("album", "a1", "original")}}
+	res := map[string][]subsonic.Song{"album:a1": {a, b}}
+	old := manifest(entry(a, "original", 1000, "album:a1"), entry(b, "original", 1000, "album:a1"))
+	old.Songs["s1"].Album = ""
+	p := Compute(sel, res, nil, old, root, big)
+	if len(p.Keep) != 1 || p.Keep[0].Song.ID != "s1" || len(p.Add)+len(p.Replace)+len(p.Rename)+len(p.Remove) != 0 {
+		t.Fatalf("%+v", p)
+	}
+	old.Songs["s1"].Album = "a1"
+	if p := Compute(sel, res, nil, old, root, big); len(p.Keep) != 0 {
+		t.Errorf("keep once recorded: %+v", p.Keep)
 	}
 }

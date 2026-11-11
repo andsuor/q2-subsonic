@@ -1497,3 +1497,43 @@ func TestSnapshotRoom(t *testing.T) {
 		t.Errorf("a replace that shrinks: room %d, %d bytes to move", s.Room, s.BytesTotal-s.BytesDone)
 	}
 }
+
+// A fetched song's album id is recorded, and Refresh records it for a song synced before it was
+// kept, once: a second Refresh leaves the manifest alone.
+func TestAlbumRecorded(t *testing.T) {
+	_, r, root := setup(t)
+	a, b := want(root, "a", "original"), want(root, "bb", "original")
+	a.Song.AlbumID, b.Song.AlbumID = "al1", "al2"
+	put(t, b.Path, "bb")
+	mp := root + "/.subsonic/manifest.json"
+	(&library.Manifest{Songs: map[string]*library.Entry{"bb": {ID: "bb", Path: b.Path, Quality: "original", Size: 2,
+		Items: b.Items, Meta: library.MetaKey(b.Song, "original")}}}).Save(root, mp)
+	if m := manifest(t, root); m.Songs["bb"].Album != "" {
+		t.Fatalf("%+v", m.Songs["bb"])
+	}
+	r.Start(plan.Plan{Add: []plan.Want{a}})
+	if s := wait(t, r); s.State != "done" {
+		t.Fatalf("%+v", s)
+	}
+	if e := manifest(t, root).Songs["a"]; e.Album != "al1" {
+		t.Errorf("fetched: %+v", e)
+	}
+	if err := r.Refresh([]plan.Want{b}); err != nil {
+		t.Fatal(err)
+	}
+	if e := manifest(t, root).Songs["bb"]; e.Album != "al2" {
+		t.Errorf("refreshed: %+v", e)
+	}
+	then := time.Now().Add(-time.Hour).Truncate(time.Second)
+	os.Chtimes(mp, then, then)
+	none := b
+	none.Song.AlbumID = "" // a list that names no album leaves the one recorded
+	for _, w := range []plan.Want{b, none} {
+		if err := r.Refresh([]plan.Want{w}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if st, _ := os.Stat(mp); !st.ModTime().Equal(then) || manifest(t, root).Songs["bb"].Album != "al2" {
+		t.Error("a Refresh with nothing new rewrote the manifest")
+	}
+}

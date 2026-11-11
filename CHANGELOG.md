@@ -34,6 +34,7 @@ A few features need a newer Q2 Pod. Each one says so, and what the app does on o
 - An internal error while answering one page no longer ends the app, and with it a running sync or stream. The page says "Something went wrong" with Retry; the error goes to `.subsonic/log.txt`.
 - **Default Quality** and **Streaming Quality** say "Couldn't save the setting" when the card can't be written, instead of showing a quality that wasn't saved.
 - Sync's **Last synced** is when the last sync finished. Before, a check of the server could move it, though nothing was synced. On a card synced with an older version it is right from the next sync on.
+- Albums and artists show **On Q2**, or how many of their songs are on the Q2, as soon as the app starts. Before, Albums and Recently Added showed nothing for them until Sync had checked the server. Songs synced with an older version show it again after the next check.
 
 ## [0.5] - 2026-11-07
 

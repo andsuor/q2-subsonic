@@ -6,6 +6,7 @@
 package syncer
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -266,8 +267,9 @@ func (r *Runner) edit(f func(*library.Manifest) (bool, error)) error {
 	return err
 }
 
-// applyKeep records each kept song's items and MetaKey, once it is where the plan puts it (a
-// rename that failed is left for the next sync).
+// applyKeep records each kept song's items, MetaKey and album id, once it is where the plan puts
+// it (a rename that failed is left for the next sync). A song that names no album keeps the one
+// recorded. It reports whether anything changed: a manifest that is as it was is not written.
 func applyKeep(m *library.Manifest, keep []plan.Want) bool {
 	changed := false
 	for _, w := range keep {
@@ -275,8 +277,9 @@ func applyKeep(m *library.Manifest, keep []plan.Want) bool {
 		if e == nil || e.Path != w.Path || e.Quality != w.Quality {
 			continue
 		}
-		if meta := library.MetaKey(w.Song, w.Quality); e.Meta != meta || !slices.Equal(e.Items, w.Items) {
-			e.Meta, e.Items, changed = meta, w.Items, true
+		album := cmp.Or(w.Song.AlbumID, e.Album)
+		if meta := library.MetaKey(w.Song, w.Quality); e.Meta != meta || !slices.Equal(e.Items, w.Items) || e.Album != album {
+			e.Meta, e.Items, e.Album, changed = meta, w.Items, album, true
 		}
 	}
 	return changed
@@ -610,7 +613,7 @@ func (j *job) downloads() error {
 		streak = 0
 		old := j.m.Songs[id]
 		e := &library.Entry{ID: id, Path: w.Path, Quality: w.Quality, Size: n, Items: w.Items,
-			Meta: library.MetaKey(w.Song, w.Quality)}
+			Meta: library.MetaKey(w.Song, w.Quality), Album: w.Song.AlbumID}
 		if w.Quality == "original" {
 			e.SrcSize = w.Song.Size
 		}

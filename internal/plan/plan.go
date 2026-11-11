@@ -30,7 +30,7 @@ type Move struct{ From, To, ID string }
 
 type Plan struct {
 	Add, Replace         []Want
-	Keep                 []Want // no transfer, but the record changes: the items holding it, or its MetaKey
+	Keep                 []Want // no transfer, but the record changes: the items holding it, its MetaKey or its album id
 	Rename               []Move
 	Remove               []*library.Entry
 	Playlists            map[string][]string
@@ -151,7 +151,8 @@ func Compute(sel selection.Set, resolved map[string][]subsonic.Song, playlistNam
 		if e != nil && unchanged(e, w) {
 			w.Path = e.Path
 			final[id] = e.Path
-			if !slices.Equal(e.Items, w.Items) {
+			// Its album too, once, for a song synced before that was recorded.
+			if !slices.Equal(e.Items, w.Items) || w.Song.AlbumID != "" && e.Album != w.Song.AlbumID {
 				p.Keep = append(p.Keep, *w)
 			}
 			continue

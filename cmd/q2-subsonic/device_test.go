@@ -2411,3 +2411,75 @@ func TestLastSynced(t *testing.T) {
 		t.Errorf("no record: %v, want the manifest's %v", at, then)
 	}
 }
+
+// After a restart, with nothing fetched yet, album rows read their status from the album ids the
+// manifest records.
+func TestAlbumStatusAfterRestart(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 3, songsPer: 3}, "", true)
+	sel := selection.Set{Version: 1}
+	sel.Toggle(selection.Item{Kind: selection.KindLibrary, ID: "all", Quality: "original"})
+	sel.Save(filepath.Join(d.dir, "selection.json"))
+	m := &library.Manifest{Songs: map[string]*library.Entry{}}
+	for _, id := range []string{"al0.0", "al0.1", "al0.2", "al1.0"} {
+		m.Songs[id] = &library.Entry{ID: id, Path: filepath.Join(d.card, "Subsonic", id+".flac"), Size: 1000, Quality: "original",
+			Items: []string{"library:all"}, Album: id[:3]}
+	}
+	if err := m.Save(d.card, filepath.Join(d.card, ".subsonic", "manifest.json")); err != nil {
+		t.Fatal(err)
+	}
+	r := d.do("albums")
+	for title, sub := range map[string]string{"Album 000": "Artist · On Q2", "Album 001": "Artist · 1 of 3 songs on Q2", "Album 002": "Artist"} {
+		if row, _ := find(r, title); row.Subtitle != sub {
+			t.Errorf("%s subtitle %q, want %q", title, row.Subtitle, sub)
+		}
+	}
+	d.do("artist", "artist:ar1") // its albums, al0 and al1
+	if row, _ := find(d.do("artists"), "Artist"); row.Subtitle != "2 albums · 4 of 6 songs on Q2" {
+		t.Errorf("artist %q", row.Subtitle)
+	}
+}
+
+// A manifest written before album ids were recorded loads, gets them at the next check, and is
+// then left alone by the checks after it.
+func TestAlbumBackfilledByCheck(t *testing.T) {
+	n := &nav{albums: 2, songsPer: 2}
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", "playlist:pl1")
+	d.syncOK(t)
+	mp := filepath.Join(d.card, ".subsonic", "manifest.json")
+	m, _ := library.LoadManifest(mp)
+	for _, e := range m.Songs {
+		if e.Album != "al0" {
+			t.Fatalf("synced: %+v", e)
+		}
+		e.Album = ""
+	}
+	m.Save(d.card, mp)
+	if b, _ := os.ReadFile(mp); strings.Contains(string(b), `"Album"`) {
+		t.Fatalf("an old manifest names no album: %s", b)
+	}
+	d2 := newTestDaemonOn(t, d.card, n, "", true)
+	if row, _ := find(d2.do("albums"), "Album 000"); row.Subtitle != "Artist" {
+		t.Errorf("before the check: %q", row.Subtitle)
+	}
+	d2.do("check")
+	if r := d2.preview(t); len(r.Rows) != 1 || r.Rows[0].Title != "Everything is up to date" {
+		t.Fatalf("preview %q", titles(r))
+	}
+	for _, e := range d2.manifest().Songs {
+		if e.Album != "al0" {
+			t.Errorf("after the check: %+v", e)
+		}
+	}
+	then := time.Now().Add(-time.Hour).Truncate(time.Second)
+	os.Chtimes(mp, then, then)
+	d2.do("check")
+	d2.preview(t)
+	if st, _ := os.Stat(mp); !st.ModTime().Equal(then) {
+		t.Error("a second check rewrote the manifest")
+	}
+	d3 := newTestDaemonOn(t, d.card, n, "", true)
+	if row, _ := find(d3.do("albums"), "Album 000"); row.Subtitle != "Artist · On Q2" {
+		t.Errorf("after a restart: %q", row.Subtitle)
+	}
+}
