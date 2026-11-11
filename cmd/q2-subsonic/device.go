@@ -275,7 +275,7 @@ func (d *daemon) reply(req q2spot.Request) q2spot.Reply {
 	case "albumsort":
 		return q2spot.Reply{Rows: []q2spot.Row{list("albums", "Recently Added", "", "newest"),
 			list("albums", "By Artist", "", "artist"), list("albums", "By Year", "", "year")}}
-	case "artist", "album", "playlist":
+	case "artist", "album", "playlist", "album" + artOp, "playlist" + artOp: // the last two: a cover row's
 		return d.withLead(d.itemPage(ctx, cl, req.Arg(0), req.Arg(1)), req.Arg(1), false)
 	case "goto": // the firmware's, for Go to Album and Go to Artist on a song streamed here (q2app's goto=1)
 		return d.withLead(d.gotoPage(ctx, cl, req.Arg(0), req.Arg(1), req.Arg(2)), req.Arg(2), false)

@@ -254,8 +254,8 @@ func (d *daemon) browse(ctx context.Context, cl *subsonic.Client, op, key, curso
 			return d.listErr(err, cursor)
 		}
 		for _, p := range pls {
-			rows = append(rows, v.item(selection.KindPlaylist, p.ID, p.Name, plural(p.SongCount, "song"), p.SongCount))
-			covers[rows[len(rows)-1].Context] = p.CoverArt
+			row := v.item(selection.KindPlaylist, p.ID, p.Name, plural(p.SongCount, "song"), p.SongCount)
+			rows = append(rows, coverRow(row, covers, p.CoverArt))
 		}
 		if len(rows) == 0 {
 			rows = []q2spot.Row{{Kind: "info", Title: "No playlists", Subtitle: "Playlists must be public on the server to show here"}}
@@ -386,19 +386,17 @@ func (d *daemon) itemPage(ctx context.Context, cl *subsonic.Client, arg, cursor 
 		rows = append(rows, act("play", "Play", key+" 0"), act("shuffle", "Shuffle", key), act("radio", "Radio", key),
 			list("top", "Top Songs", "", key))
 	}
-	covers := map[string]string{}
 	for _, a := range albums {
 		year := ""
 		if a.Year > 0 {
 			year = strconv.Itoa(a.Year)
 		}
-		rows = append(rows, v.item(selection.KindAlbum, a.ID, a.Name, year, a.SongCount))
-		covers[rows[len(rows)-1].Context] = a.CoverArt
+		rows = append(rows, v.item(selection.KindAlbum, a.ID, a.Name, year, a.SongCount)) // no covers: art.go
 	}
 	if kind == selection.KindArtist && len(albums) == 0 { // Go to Artist on a guest or a compilation's track
 		rows = append(rows, info("No albums"))
 	}
-	return d.withArt(d.page(rows, cursor), covers, cursor)
+	return d.page(rows, cursor)
 }
 
 // gotoPage answers the firmware's goto: Go to Album or Go to Artist (kind) held on a song streamed

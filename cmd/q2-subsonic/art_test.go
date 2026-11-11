@@ -88,7 +88,7 @@ func TestCoversBesideAlbums(t *testing.T) {
 	if got := d.covers(); len(got) != 50 || n.reqs("getCoverArt") != 50 || n.query("getCoverArt").Get("size") != "64" {
 		t.Fatalf("%d files, %d requests, %v", len(got), n.reqs("getCoverArt"), n.query("getCoverArt"))
 	}
-	f, err := os.Open(filepath.Join(d.artDir(), coverName("album", "album:al0")))
+	f, err := os.Open(filepath.Join(d.artDir(), coverName("albumart", "album:al0")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,16 +141,16 @@ func TestNoCoversWithoutArt(t *testing.T) {
 	}
 }
 
-// Playlists, an artist's albums, Discover's lists and a tab have covers; Search has none.
+// Playlists, Discover's lists, a genre's albums and a tab have covers; Search has none.
 func TestCoversOtherLists(t *testing.T) {
 	n := &nav{albums: 3, songsPer: 1, art: true, playlists: 2}
 	plain := newTestDaemon(t, n, "pages sections", true)
 	for _, c := range []struct {
 		args []string
 		file string
-	}{{[]string{"playlists"}, coverName("playlist", "playlist:pl2")}, {[]string{"artist", "artist:ar1"}, coverName("album", "album:al1")},
-		{[]string{"albumlist", "newest"}, coverName("album", "album:al2")}, {[]string{"albumlist", "random"}, coverName("album", "album:al2")},
-		{[]string{"genre", "Rock"}, coverName("album", "album:al2")}, {[]string{"menu", "albums"}, coverName("album", "album:al2")}} {
+	}{{[]string{"playlists"}, coverName("playlistart", "playlist:pl2")},
+		{[]string{"albumlist", "newest"}, coverName("albumart", "album:al2")}, {[]string{"albumlist", "random"}, coverName("albumart", "album:al2")},
+		{[]string{"genre", "Rock"}, coverName("albumart", "album:al2")}, {[]string{"menu", "albums"}, coverName("albumart", "album:al2")}} {
 		d := newTestDaemon(t, n, "pages art sections", true)
 		if r := d.do(c.args[0], c.args[1:]...); r.Message != "refresh" {
 			t.Fatalf("%v: %q", c.args, r.Message)
@@ -217,7 +217,7 @@ func TestCoverFormats(t *testing.T) {
 	d := newTestDaemon(t, n, "pages art", true)
 	d.do("albums")
 	d.bg.Wait()
-	want := []string{coverName("album", "album:al0"), coverName("album", "album:al7"), coverName("album", "album:al8")}
+	want := []string{coverName("albumart", "album:al0"), coverName("albumart", "album:al7"), coverName("albumart", "album:al8")}
 	got := d.covers()
 	if len(got) != 3 {
 		t.Fatalf("%v", got)
@@ -334,9 +334,9 @@ func TestCoverSignOut(t *testing.T) {
 func TestCoverNameFromKey(t *testing.T) {
 	n := &nav{albums: 1, songsPer: 1}
 	d := newTestDaemon(t, n, "pages art", true)
-	d.art.want([]q2spot.Row{{Kind: "list", URI: "album", Context: "album:al1"}}, map[string]string{"album:al1": "../../x"}, true)
+	d.art.want([]q2spot.Row{{Kind: "list", URI: "albumart", Context: "album:al1"}}, map[string]string{"album:al1": "../../x"}, true)
 	d.bg.Wait()
-	if got := d.covers(); n.query("getCoverArt").Get("id") != "../../x" || len(got) != 1 || got[0] != "a10cd198.jpg" {
+	if got := d.covers(); n.query("getCoverArt").Get("id") != "../../x" || len(got) != 1 || got[0] != coverName("albumart", "album:al1") {
 		t.Fatal(n.query("getCoverArt"), got)
 	}
 	for _, p := range []string{"x", "../x", "../../x", "x.jpg"} {
@@ -427,7 +427,7 @@ func TestCoverPagesBehind(t *testing.T) {
 	rows := func(ids ...string) (rs []q2spot.Row, covers map[string]string) {
 		covers = map[string]string{}
 		for _, id := range ids {
-			rs, covers["album:"+id] = append(rs, q2spot.Row{Kind: "list", URI: "album", Context: "album:" + id}), id
+			rs, covers["album:"+id] = append(rs, q2spot.Row{Kind: "list", URI: "albumart", Context: "album:" + id}), id
 		}
 		return
 	}
@@ -473,5 +473,55 @@ func TestCoverServerAway(t *testing.T) {
 		if len(d.covers()) != 4 {
 			t.Fatal(code, d.covers())
 		}
+	}
+}
+
+// Covers are for lists that are all albums or all playlists. An artist's page asks for none and
+// writes no file. And once Albums and Playlists have theirs, no row of any other page has the key
+// a file is named by: the firmware would draw that whole page in its cover layout.
+func TestCoversOnlyForAlbumAndPlaylistLists(t *testing.T) {
+	n := &nav{albums: 3, songsPer: 1, art: true, playlists: 2}
+	d := newTestDaemon(t, n, "pages art", true)
+	if r := d.do("artist", "artist:ar1"); r.Message == "refresh" || len(r.Rows) < 6 {
+		t.Fatalf("an artist's page: %q, %q", r.Message, titles(r))
+	}
+	d.bg.Wait()
+	if n.reqs("getCoverArt") != 0 || len(d.covers()) != 0 {
+		t.Fatalf("an artist's page: %d requests, files %v", n.reqs("getCoverArt"), d.covers())
+	}
+	if r := d.do("albums"); r.Message != "refresh" {
+		t.Fatalf("albums: %q", r.Message)
+	}
+	d.do("playlists")
+	d.bg.Wait()
+	have := map[string]bool{}
+	for _, f := range d.covers() {
+		have[f] = true
+	}
+	if len(have) != 5 {
+		t.Fatalf("files %v", d.covers())
+	}
+	d.do("toggle", "album:al1") // On This Q2 lists it
+	d.do("toggle", "playlist:pl1")
+	for _, args := range [][]string{{"artist", "artist:ar1"}, {"album", "album:al1"}, {"playlist", "playlist:pl1"},
+		{"search", "x"}, {"starred"}, {"onq2"}, {"menu"}, {"settings"}, {"artists"}, {"discover"}, {"top", "artist:ar1"}} {
+		r := d.do(args[0], args[1:]...)
+		if len(r.Rows) == 0 {
+			t.Fatalf("%v: no rows", args)
+		}
+		for _, row := range r.Rows {
+			if have[coverName(row.URI, row.Context)] {
+				t.Errorf("%v: the row %q would show a cover", args, row.Title)
+			}
+		}
+	}
+	d.bg.Wait()
+	if n.reqs("getCoverArt") != 5 {
+		t.Fatalf("%d requests", n.reqs("getCoverArt"))
+	}
+	// a row with a cover opens its album's page, and is held to sync as any other
+	row, _ := find(d.do("albums"), "Album 000")
+	if got, want := d.do(row.URI, row.Context), d.do("album", "album:al0"); row.Position != "toggle" || !reflect.DeepEqual(got, want) || len(want.Rows) < 2 {
+		t.Fatalf("%+v opens %+v, want %+v", row, got, want)
 	}
 }

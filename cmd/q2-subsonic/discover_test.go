@@ -69,7 +69,7 @@ func TestAlbumListPaged(t *testing.T) {
 		if q := n.query("getAlbumList2"); len(r.Rows) != 50 || r.Cursor != "50" || q.Get("type") != typ || q.Get("offset") != "0" {
 			t.Fatalf("%s: %d rows, cursor %q, query %v", typ, len(r.Rows), r.Cursor, q)
 		}
-		if r.Rows[0].URI != "album" || r.Rows[0].Context != "album:al0" || r.Rows[0].Position != "toggle" {
+		if r.Rows[0].URI != "albumart" || r.Rows[0].Context != "album:al0" || r.Rows[0].Position != "toggle" {
 			t.Fatalf("%s: row %+v", typ, r.Rows[0])
 		}
 		r = d.do("albumlist", typ, "100")
@@ -137,7 +137,7 @@ func TestGenres(t *testing.T) {
 		}
 		seen := map[string]bool{}
 		for _, row := range rows[1:] {
-			if row.URI != "album" || seen[row.Context] {
+			if row.URI != "albumart" || seen[row.Context] {
 				t.Fatalf("row %+v (shown twice: %v)", row, seen[row.Context])
 			}
 			seen[row.Context] = true

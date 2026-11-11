@@ -63,7 +63,7 @@ func (d *tdaemon) tab(t *testing.T, name string) (first q2spot.Reply, rows []q2s
 func albumsIn(rows []q2spot.Row) (n int, once bool) {
 	seen := map[string]bool{}
 	for _, r := range rows {
-		if r.URI == "album" {
+		if r.URI == "albumart" {
 			seen[r.Context] = true
 			n++
 		}

@@ -43,6 +43,31 @@ const (
 // jfif is the JFIF header Go's encoder leaves out, for a decoder that looks for it.
 var jfif = []byte("\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00")
 
+// Which lists show covers: this is the one place that says. The firmware draws a whole list in its
+// cover layout (78 px rows, the cover's room at the left of every one) as soon as one of its rows
+// has a file, so only a list that is all albums or all playlists gets any: Albums in each order,
+// Playlists, Discover's album lists and a genre's albums, where the only other rows are the lead
+// ones (Search, Sort, a genre's Shuffle, Sync Now, the page rows, More…). Never an artist's page,
+// an album's or playlist's own, On This Q2, Search, Starred, Home or Settings.
+//
+// Such a list builds its rows with coverRow, and want takes no other row. A cover row opens its
+// page by an op of its own (artOp), because the file is named by the row's key alone: with the
+// item's own op, the same album on an artist's page, in a search or on On This Q2 would have the
+// same key, find the file Albums left, and turn that page to the cover layout.
+const artOp = "art" // "albumart" and "playlistart" are "album" and "playlist" (reply)
+
+// coverRow is row, an album's or a playlist's, as one of a list with covers; id is the server's
+// cover id, noted in covers for withArt.
+func coverRow(row q2spot.Row, covers map[string]string, id string) q2spot.Row {
+	row.URI += artOp
+	covers[row.Context] = id
+	return row
+}
+
+func isCoverRow(r q2spot.Row) bool {
+	return r.Kind == "list" && (r.URI == "album"+artOp || r.URI == "playlist"+artOp)
+}
+
 // artKey is the firmware's name for a row's cover (art_url): FNV-1a 32 over uri, a tab, context.
 func artKey(row q2spot.Row) uint32 {
 	h := fnv.New32a()
@@ -115,7 +140,8 @@ func (c *artCache) clear() { c.reset(c.d.caps.Art) }
 // remove is the app's end.
 func (c *artCache) remove() { c.reset(false) }
 
-// want queues the covers rows lack (covers: a row's context to the server's cover id): a first
+// want queues the covers rows lack (coverRow's rows only; covers: a row's context to the server's
+// cover id): a first
 // drawing's ahead of those waiting, behind them those of a page the firmware appends, which shows
 // them from the next visit on. It reports whether a first reply should say "refresh" for them: some
 // are still to come, and this list's wait is not over. The wait starts when a list's covers are
@@ -129,7 +155,7 @@ func (c *artCache) want(rows []q2spot.Row, covers map[string]string, first bool)
 	seen, pending, asked := false, false, map[uint32]bool{}
 	for _, r := range rows {
 		id := covers[r.Context]
-		if r.Kind != "list" || id == "" {
+		if !isCoverRow(r) || id == "" {
 			continue
 		}
 		k := artKey(r)
@@ -295,7 +321,7 @@ func (c *artCache) store(key uint32, b []byte) {
 	}
 }
 
-// withArt asks for the covers of r's rows (covers: a row's context to the server's cover id), and
+// withArt asks for the covers of r's cover rows (covers: coverRow's), and
 // has a first drawing (a list's first reply, or a window's) say "refresh" while they load. Without
 // the "art" word, or a server naming no covers, r is as it was.
 func (d *daemon) withArt(r q2spot.Reply, covers map[string]string, cursor string) q2spot.Reply {
