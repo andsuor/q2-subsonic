@@ -8,7 +8,7 @@ A few features need Q2 Pod 1.5.9 or later. Each one says so, and what the app do
 
 ### Changed
 
-- With **Sync Entire Library** on, the "Checking server…" step of Sync is faster. The app asks for the songs 500 at a time instead of album by album. When the server says its library hasn't changed since the last check, less than a day ago, only the playlists are checked again (Navidrome says so; the songs it found are kept in `.subsonic/library.json`). A server that can't do either is checked album by album, as before. **Check Again** always checks everything.
+- With **Sync Entire Library** on, the "Checking server…" step of Sync is faster. The app asks for the songs 500 at a time instead of album by album. When the server says its library hasn't changed since the last check, less than a day ago, only the playlists are checked again (Navidrome says so; the songs it found are kept in `.subsonic/library.json`, for a library of up to 20,000 songs). A server that can't do either is checked album by album, as before. **Check Again** always checks everything.
 - While it checks, the Sync page counts, such as `4500 of 10000 songs`, then `3 of 12 playlists`.
 - The check no longer gives up after 10 minutes on a large library. It stops when the server stops answering.
 

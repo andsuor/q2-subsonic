@@ -2,7 +2,9 @@ package main
 
 import (
 	"cmp"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -2101,6 +2103,49 @@ func TestEntireLibraryCacheReused(t *testing.T) {
 		if d.again(t); c.writes && n.songReqs.Load() != before {
 			t.Errorf("%s: the check after it didn't reuse its cache", c.name)
 		}
+	}
+}
+
+// The cache's day is measured by a clock that is known (the Q2's is often unset, and starts again at
+// each boot): without one no cache is reused or written, and one written before the clock was known
+// is not reused.
+func TestEntireLibraryCacheNeedsClock(t *testing.T) {
+	n := scanned(&nav{albums: 3, songsPer: 2, paged: true})
+	_, d := libSongs(t, n)
+	file := filepath.Join(d.card, ".subsonic", "library.json")
+	boot := time.Date(2000, 1, 1, 0, 5, 0, 0, time.UTC)
+	libNow = func() (time.Time, bool) { return boot, false }
+	t.Cleanup(func() { libNow = libClock })
+	before := n.songReqs.Load()
+	if d.again(t); n.songReqs.Load() == before {
+		t.Errorf("clock unset: the cache was reused")
+	}
+	if exists(file) {
+		t.Errorf("clock unset: a cache was written")
+	}
+	// What an older version wrote at an unset clock, read at the same time of another boot.
+	libNow = func() (time.Time, bool) { return boot, true }
+	d.again(t)
+	libNow = func() (time.Time, bool) { return boot.Add(time.Minute), false }
+	before = n.songReqs.Load()
+	if d.again(t); n.songReqs.Load() == before {
+		t.Errorf("another boot: the cache was reused")
+	}
+}
+
+// A check that is dropped while it asks for the scan status keeps the cache: only a full check that
+// runs removes it.
+func TestEntireLibraryCacheKeptWhenDropped(t *testing.T) {
+	n := scanned(&nav{albums: 3, songsPer: 2, paged: true})
+	_, d := libSongs(t, n)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := d.resolveLibrary(ctx, d.client(), make(chan struct{}, 4), func(string) {}, false)
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("a dropped check: %v", err)
+	}
+	if !exists(filepath.Join(d.card, ".subsonic", "library.json")) {
+		t.Errorf("a dropped check removed the cache")
 	}
 }
 

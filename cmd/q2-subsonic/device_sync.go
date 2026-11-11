@@ -28,6 +28,7 @@ import (
 	"github.com/andsuor/q2-subsonic/internal/selection"
 	"github.com/andsuor/q2-subsonic/internal/subsonic"
 	"github.com/andsuor/q2-subsonic/internal/syncer"
+	"github.com/andsuor/q2-subsonic/internal/tlsroots"
 )
 
 const planMargin = 16 << 20 // plan.Compute's headroom on top of what a sync needs
@@ -690,16 +691,27 @@ type libCache struct {
 	Songs    []subsonic.Song
 }
 
+// libNow is the time and whether it is known; injectable for tests.
+var libNow = libClock
+
+// libClock is tlsroots' clock: the Q2's own is often unset and starts again at each boot, so the
+// cache's day can't be measured by it.
+func libClock() (time.Time, bool) {
+	now := tlsroots.Now()
+	return now, tlsroots.Known()
+}
+
 // loadLibCache reads the cache at file when it is this account's, for this lastScan and count, and
-// under a day old (by a clock that hasn't gone back since).
+// under a day old by a known clock (libNow): with none, there is no cache.
 func loadLibCache(file, account, lastScan string, count int64) (libCache, bool) {
 	var c libCache
 	b, err := os.ReadFile(file)
 	if err != nil || json.Unmarshal(b, &c) != nil {
 		return c, false
 	}
-	age := time.Since(c.At)
-	return c, c.Format == libCacheFmt && c.Account == account && c.LastScan == lastScan && c.Count == count &&
+	now, known := libNow()
+	age := now.Sub(c.At)
+	return c, known && c.Format == libCacheFmt && c.Account == account && c.LastScan == lastScan && c.Count == count &&
 		age >= 0 && age < libCacheFor
 }
 
@@ -738,7 +750,8 @@ func inSlots(ctx context.Context, slot func() func(), n int, f func(ctx context.
 // the server's last scan and song count are the ones it was written under (never when full: Check
 // Again); else from a full check (librarySongs), which removes the file first, so a cache is never
 // older than the newest full check, and writes it again when the server wasn't scanning and its
-// scan status is the same after the check as before. Playlists are fetched every time: a smart
+// scan status is the same after the check as before, the library has at most maxCacheSongs songs
+// and the time is known. Playlists are fetched every time: a smart
 // playlist changes without a scan. Every request takes a slot of sem, so the library never runs
 // more than the preview's 4 at once. note is told how far it has come. Albums keep their listing
 // order; so do playlists.
@@ -755,6 +768,9 @@ func (d *daemon) resolveLibrary(ctx context.Context, cl *subsonic.Client, sem ch
 		return lastScan, count
 	}
 	lastScan, count := status()
+	if err := ctx.Err(); err != nil {
+		return libResult{}, err // a dropped check is no full check: the cache stays
+	}
 	file := filepath.Join(d.card, ".subsonic", "library.json")
 	d.mu.Lock()
 	sum := sha256.Sum256([]byte(d.server + "\n" + d.user))
@@ -799,8 +815,9 @@ func (d *daemon) resolveLibrary(ctx context.Context, cl *subsonic.Client, sem ch
 		return libResult{}, err
 	}
 	if !reuse && lastScan != "" && len(c.Songs) <= maxCacheSongs {
-		if ls, n := status(); ls == lastScan && n == count {
-			b, _ := json.Marshal(libCache{libCacheFmt, account, lastScan, count, time.Now(), c.Albums, c.Songs})
+		now, known := libNow()
+		if ls, n := status(); known && ls == lastScan && n == count {
+			b, _ := json.Marshal(libCache{libCacheFmt, account, lastScan, count, now, c.Albums, c.Songs})
 			if err := library.WriteOwned(d.card, file, b); err != nil {
 				d.log.Printf("sync: library cache: %v", err)
 			}
