@@ -224,9 +224,11 @@ func (d *daemon) browse(ctx context.Context, cl *subsonic.Client, op, key, curso
 		}
 		var head []q2spot.Row
 		// With windows only: without them a reply is a full 50 albums, and every firmware that has
-		// "sort" has "window". A chevron row: the title bar's icon needs a Search row before it.
+		// "sort" has "window". A list row, not a sort row: with no Search row before it a sort row
+		// is drawn the same, and the firmware takes a leading one to be in every window, so Next
+		// page would select the next window's second album.
 		if key == "" && d.caps.Sort && d.caps.Window {
-			head = []q2spot.Row{{Kind: "sort", URI: "albumsort", Title: "Sort"}}
+			head = []q2spot.Row{list("albumsort", "Sort", "", "")}
 		}
 		return d.albumList(ctx, cl, typ, "", head, cursor)
 	}

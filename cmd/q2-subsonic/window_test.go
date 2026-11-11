@@ -42,6 +42,16 @@ func pageRow(t *testing.T, rows []q2spot.Row, dir string) q2spot.Row {
 	return rows[i]
 }
 
+// sortRows is how many of rows open Albums' orders.
+func sortRows(rows []q2spot.Row) (n int) {
+	for _, r := range rows {
+		if r.URI == "albumsort" {
+			n++
+		}
+	}
+	return n
+}
+
 func count(rows []q2spot.Row, kind string) (n int) {
 	for _, r := range rows {
 		if r.Kind == kind {
@@ -118,7 +128,7 @@ func TestNoWindowNoPageRows(t *testing.T) {
 	for _, op := range []string{"albums", "artists"} {
 		r := d.do(op)
 		for n := 0; ; n++ {
-			if len(r.Rows) != 50 && r.Cursor != "" || count(r.Rows, "page")+count(r.Rows, "sort") != 0 {
+			if len(r.Rows) != 50 && r.Cursor != "" || count(r.Rows, "page")+sortRows(r.Rows) != 0 {
 				t.Fatalf("%s reply %d: %d rows %q", op, n, len(r.Rows), titles(r))
 			}
 			if r.Cursor == "" {
@@ -169,19 +179,19 @@ func TestArtistsIndex(t *testing.T) {
 // Albums has a Sort row on Q2 Pod with "sort" (and "window"); its orders are the server's.
 func TestAlbumsSort(t *testing.T) {
 	n := &nav{albums: 100, songsPer: 1}
-	if r := newTestDaemon(t, n, "pages window", true).do("albums"); count(r.Rows, "sort") != 0 {
+	if r := newTestDaemon(t, n, "pages window", true).do("albums"); sortRows(r.Rows) != 0 {
 		t.Fatalf("a Sort row without the sort word: %q", titles(r))
 	}
 	d := newTestDaemon(t, n, "pages window sort", true)
 	d.do("toggle", "album:al0")
 	r := d.do("albums")
-	want := q2spot.Row{Kind: "sort", URI: "albumsort", Title: "Sort"}
+	want := list("albumsort", "Sort", "", "") // a sort row at a list's start would be counted by page_to
 	if len(r.Rows) != 49 || r.Rows[0].Title != "Sync Now" || r.Rows[1] != want || r.Rows[48].Title != "Album 046" || r.Cursor != "48" {
 		t.Fatalf("first reply: %d rows %q, cursor %q", len(r.Rows), titles(r), r.Cursor)
 	}
 	rows, _ := d.window(t, "albums", "")
-	if len(rows) != 102 || count(rows, "sort") != 1 || rows[101].Title != "Album 099" {
-		t.Fatalf("albums: %d rows, %d Sort rows", len(rows), count(rows, "sort"))
+	if len(rows) != 102 || sortRows(rows) != 1 || rows[101].Title != "Album 099" {
+		t.Fatalf("albums: %d rows, %d Sort rows", len(rows), sortRows(rows))
 	}
 	r = d.do("albumsort")
 	for i, w := range []q2spot.Row{list("albums", "Recently Added", "", "newest"), list("albums", "By Artist", "", "artist"),
@@ -193,7 +203,7 @@ func TestAlbumsSort(t *testing.T) {
 	for key, typ := range map[string]string{"newest": "newest", "artist": "alphabeticalByArtist", "year": "byYear"} {
 		rows, _ := d.window(t, "albums", "", key)
 		q := n.query("getAlbumList2")
-		if len(rows) != 101 || count(rows, "sort") != 0 || q.Get("type") != typ || q.Get("offset") != strconv.Itoa(96) {
+		if len(rows) != 101 || sortRows(rows) != 0 || q.Get("type") != typ || q.Get("offset") != strconv.Itoa(96) {
 			t.Fatalf("%s: %d rows, asked type %q offset %q", key, len(rows), q.Get("type"), q.Get("offset"))
 		}
 		if from, sub := q.Get("fromYear"), rows[2].Subtitle; (key == "year") != (from == "9999" && q.Get("toYear") == "0") ||
@@ -203,5 +213,31 @@ func TestAlbumsSort(t *testing.T) {
 	}
 	if r := d.do("albums", "nonsense"); r.Status != q2spot.Bad {
 		t.Fatalf("an unknown order: %+v", r)
+	}
+}
+
+// Next page selects the next window's first album, with or without a Sync Now row before Sort. The
+// firmware (page_to) works the row out from the window it leaves: past Previous page, and past a
+// leading search row and a sort row after it, which it takes to be in every window.
+func TestWindowAlbumsNextSelects(t *testing.T) {
+	for _, syncNow := range []bool{false, true} {
+		d := newTestDaemon(t, &nav{albums: 1000, songsPer: 1}, "pages window sort", true)
+		if syncNow {
+			d.do("toggle", "album:al0")
+		}
+		rows, _ := d.window(t, "albums", "")
+		first := 0
+		if rows[0].Kind == "search" {
+			first++
+		}
+		if rows[first].Kind == "sort" {
+			first++
+		}
+		first++
+		want := rows[len(rows)-2].Title // the window's last album: "Album 478"
+		next, _ := d.window(t, "albums", pageRow(t, rows, "next").Context)
+		if n, _ := strconv.Atoi(want[len("Album "):]); next[first].Title != "Album "+strconv.Itoa(n+1) {
+			t.Fatalf("Sync Now %v: after %q, Next page selects row %d, %q", syncNow, want, first, next[first].Title)
+		}
 	}
 }
