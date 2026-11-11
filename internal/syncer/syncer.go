@@ -67,6 +67,9 @@ type Runner struct {
 	// OnDone is called, with no lock held, after each run that ends in state "done". It must not
 	// block. The runner is Busy until it returns.
 	OnDone func(plan.Plan)
+	// MakeRoom, when set, is called before a run's downloads with the bytes they add to the card:
+	// the songs still to fetch, less the files they replace. A run started again asks again.
+	MakeRoom func(need int64)
 
 	root string
 	src  MediaSource
@@ -535,9 +538,29 @@ func (j *job) renames() error {
 func (j *job) downloads() error {
 	covers := map[string]bool{} // album folders whose cover was tried this run
 	streak := 0                 // songs failed in a row for the same reason as the whole sync would (I3)
-	for _, w := range append(append([]plan.Want(nil), j.p.Add...), j.p.Replace...) {
+	wants := append(append([]plan.Want(nil), j.p.Add...), j.p.Replace...)
+	have := func(w plan.Want) bool { // fetched by a run before this one
+		e := j.m.Songs[w.Song.ID]
+		return e != nil && e.Path == w.Path && e.Quality == w.Quality && e.Meta == library.MetaKey(w.Song, w.Quality)
+	}
+	if j.MakeRoom != nil {
+		var need int64
+		for _, w := range wants {
+			if have(w) {
+				continue
+			}
+			need += w.Bytes
+			if old := j.m.Songs[w.Song.ID]; old != nil {
+				need -= old.Size // goes once the new file is there
+			}
+		}
+		if need > 0 {
+			j.MakeRoom(need)
+		}
+	}
+	for _, w := range wants {
 		id := w.Song.ID
-		if e := j.m.Songs[id]; e != nil && e.Path == w.Path && e.Quality == w.Quality && e.Meta == library.MetaKey(w.Song, w.Quality) {
+		if have(w) {
 			j.finished(w)
 			continue
 		}

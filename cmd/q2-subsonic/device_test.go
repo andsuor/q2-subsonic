@@ -1162,7 +1162,7 @@ func TestPreviewReplaceShowsSize(t *testing.T) {
 		"Replace 2 songs · −5 MB": {Replace: make([]plan.Want, 2), ReplaceBytes: -5e6, Fits: true},
 		"Replace 1 song · +3 MB":  {Replace: make([]plan.Want, 1), ReplaceBytes: 3e6, Fits: true},
 	} {
-		if r := previewRows(p); !strings.Contains(strings.Join(titles(r), "|"), want) {
+		if r := previewRows(p, 0); !strings.Contains(strings.Join(titles(r), "|"), want) {
 			t.Errorf("want %q: %q", want, titles(r))
 		}
 	}
@@ -1497,8 +1497,9 @@ func TestRootStreamSkipped(t *testing.T) {
 func TestNoHoldWhileStreamWaits(t *testing.T) {
 	d := newTestDaemon(t, &nav{albums: 1, songsPer: 6}, "playlist", true)
 	d.do("play", "album:al0 0")
-	eventually(t, "the window", func() bool {
-		return exists(filepath.Join(d.card, ".subsonic", "stream", "0002 - Song 2 [al0.2].flac"))
+	eventually(t, "the window", func() bool { // kept in the stream cache, as the firmware has playlist
+		m, _ := filepath.Glob(filepath.Join(d.card, ".subsonic", "stream", "*", "original", "*", "Song 2 [[]al0.2].flac"))
+		return len(m) == 1
 	})
 	eventually(t, "hold off", func() bool {
 		d.tick()
@@ -2310,7 +2311,7 @@ func TestSyncPageCounts(t *testing.T) {
 func TestSettingsReportPlays(t *testing.T) {
 	d := newTestDaemon(t, &nav{albums: 1, songsPer: 1}, "playlist urls", true)
 	rows := titles(d.do("settings"))
-	if len(rows) < 4 || rows[3] != "Report Plays: On" || !d.stream.plays.on() {
+	if len(rows) < 6 || rows[5] != "Report Plays: On" || !d.stream.plays.on() {
 		t.Fatalf("rows %q", rows)
 	}
 	d.stream.plays.queue = []*play{{id: "s1"}}

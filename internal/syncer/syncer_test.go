@@ -1407,3 +1407,34 @@ func TestStopTimeAndCounts(t *testing.T) {
 		t.Fatalf("%+v", s)
 	}
 }
+
+// MakeRoom is asked before the first download, for the bytes still to come: songs a run before
+// this one finished are not counted again, and a replace counts only what it adds.
+func TestMakeRoomBeforeDownloads(t *testing.T) {
+	f, r, root := setup(t)
+	a, b, c := want(root, "a", "original"), want(root, "bb", "original"), want(root, "ccc", "original")
+	var asked []int64
+	first := "a" // the song the run fetches first
+	r.MakeRoom = func(need int64) {
+		if n, _ := f.seen(first); n != 0 {
+			t.Errorf("asked after %s was fetched", first)
+		}
+		asked = append(asked, need)
+	}
+	r.Start(plan.Plan{Add: []plan.Want{a, b}})
+	if s := wait(t, r); s.State != "done" {
+		t.Fatalf("%+v", s)
+	}
+	first = "ccc"
+	r.Start(plan.Plan{Add: []plan.Want{a, b, c}})
+	if s := wait(t, r); s.State != "done" {
+		t.Fatalf("%+v", s)
+	}
+	low := want(root, "a", "mp3-128")
+	low.Bytes = 10
+	r.Start(plan.Plan{Replace: []plan.Want{low}}) // frees space: nothing to make room for
+	wait(t, r)
+	if want := []int64{a.Bytes + b.Bytes, c.Bytes}; !reflect.DeepEqual(asked, want) {
+		t.Fatalf("asked %v, want %v", asked, want)
+	}
+}

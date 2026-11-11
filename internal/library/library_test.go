@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/andsuor/q2-subsonic/internal/subsonic"
@@ -425,5 +426,29 @@ func TestWriteOwned(t *testing.T) {
 		if err := WriteOwned(root, bad, []byte("x")); err == nil {
 			t.Errorf("wrote %s", bad)
 		}
+	}
+}
+
+// Touch stamps a file of the app's own with a later time: never an earlier one, never a zero
+// time (the clock isn't known), and nothing outside the owned trees.
+func TestTouch(t *testing.T) {
+	root := t.TempDir()
+	p := root + "/.subsonic/stream/a/original/0/T [s].flac"
+	mk(t, p)
+	at := time.Now().Add(24 * time.Hour).Truncate(time.Second)
+	mtime := func(p string) time.Time { st, _ := os.Stat(p); return st.ModTime() }
+	if err := Touch(root, p, at); err != nil || !mtime(p).Equal(at) {
+		t.Fatalf("%v, %v", err, mtime(p))
+	}
+	Touch(root, p, at.Add(-time.Hour))
+	Touch(root, p, time.Time{})
+	if !mtime(p).Equal(at) {
+		t.Fatalf("moved back to %v", mtime(p))
+	}
+	out := root + "/Music/x.flac"
+	mk(t, out)
+	was := mtime(out)
+	if err := Touch(root, out, was.Add(time.Hour)); err == nil || !mtime(out).Equal(was) {
+		t.Fatal("touched a file that is not the app's")
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/andsuor/q2-subsonic/internal/q2"
 )
@@ -122,4 +123,17 @@ func remove(root, path string, m *Manifest) error {
 		}
 	}
 	return nil
+}
+
+// Touch sets the time of a file of the app's own to t, when t is later than the one it has: a
+// zero t (the clock isn't known) or an earlier one changes nothing.
+func Touch(root, path string, t time.Time) error {
+	if err := checkOwned(root, path, nil); err != nil {
+		return err
+	}
+	st, err := os.Stat(path)
+	if err != nil || t.IsZero() || !t.After(st.ModTime()) {
+		return err
+	}
+	return os.Chtimes(path, t, t)
 }

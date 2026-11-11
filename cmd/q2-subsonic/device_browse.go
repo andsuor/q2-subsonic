@@ -402,11 +402,11 @@ func (d *daemon) itemPage(ctx context.Context, cl *subsonic.Client, arg, cursor 
 }
 
 // gotoPage answers the firmware's goto: Go to Album or Go to Artist (kind) held on a song streamed
-// here, by its file's path. It is that album's or artist's own page. The song is asked for once
+// here, by its file's path: in the stream folder, or kept in the signed-in account's cache. It is that album's or artist's own page. The song is asked for once
 // and kept, for the page's later rows and a second Go to.
 func (d *daemon) gotoPage(ctx context.Context, cl *subsonic.Client, kind, path, cursor string) q2spot.Reply {
 	id := streamID(path)
-	if kind != "album" && kind != "artist" || id == "" || filepath.Dir(path) != d.stream.dir() {
+	if kind != "album" && kind != "artist" || id == "" || filepath.Dir(path) != d.stream.dir() && !d.stream.inCache(path) {
 		return q2spot.Fail(q2spot.Bad, "Not a Subsonic song")
 	}
 	d.mu.Lock()

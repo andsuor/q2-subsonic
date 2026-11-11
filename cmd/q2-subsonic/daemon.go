@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"os"
@@ -41,12 +42,37 @@ const (
 var errSignedOut = errors.New("signed out")
 
 // settings is .subsonic/settings.json. StreamQuality "" follows DefaultQuality. StreamMode is ""
-// (download first) or "direct". NoReport turns Report Plays off.
+// (download first) or "direct". NoReport turns Report Plays off. StreamCacheMB is the stream
+// cache's limit: 0 is 2 GB, -1 Off.
 type settings struct {
 	DefaultQuality string `json:"defaultQuality,omitempty"`
 	StreamQuality  string `json:"streamQuality,omitempty"`
 	StreamMode     string `json:"streamMode,omitempty"`
 	NoReport       bool   `json:"noReport,omitempty"`
+	StreamCacheMB  int    `json:"streamCacheMB,omitempty"`
+}
+
+// cacheSizes are Stream Cache's steps in MB, the firmware's Spotify Cache sizes, and Off.
+var cacheSizes = []int{512, 1024, 2048, 4096, 8192, -1}
+
+func (s settings) cacheMB() int {
+	if s.StreamCacheMB == 0 {
+		return 2048
+	}
+	return s.StreamCacheMB
+}
+
+func (s settings) cacheBytes() int64 { return int64(max(s.cacheMB(), 0)) << 20 }
+
+func (s settings) cacheName() string {
+	switch mb := s.cacheMB(); {
+	case mb < 0:
+		return "Stream Cache: Off"
+	case mb%1024 == 0:
+		return fmt.Sprintf("Stream Cache: %d GB", mb/1024)
+	default:
+		return fmt.Sprintf("Stream Cache: %d MB", mb)
+	}
 }
 
 func (s settings) reportName() string {
@@ -118,14 +144,15 @@ func (s *stateKeys) flush() error {
 }
 
 type preview struct {
-	gen    int
-	at     time.Time
-	done   bool
-	plan   *plan.Plan
-	err    error
-	cancel context.CancelFunc // stops its fetches (dropPreview)
-	full   bool               // started by Check Again: the library cache is not used
-	note   string             // how far the check has come, such as "4500 of 10000 songs"; under daemon.mu
+	gen     int
+	at      time.Time
+	done    bool
+	plan    *plan.Plan
+	err     error
+	cancel  context.CancelFunc // stops its fetches (dropPreview)
+	full    bool               // started by Check Again: the library cache is not used
+	note    string             // how far the check has come, such as "4500 of 10000 songs"; under daemon.mu
+	reclaim int64              // bytes of the plan's free space that are the stream cache's to give
 }
 
 type libJob struct {
@@ -225,6 +252,7 @@ type daemon struct {
 	browseTTL          time.Duration
 	random             []subsonic.Album // Random Albums as last drawn, until Discover is opened again
 	listed             songList         // the song list shown last
+	clearAt            time.Time        // Clear Cache's first press: a second one soon after clears
 
 	bg sync.WaitGroup // the work replies leave running (ping, preview, play, sign-out's stops); tests wait for it
 }
@@ -270,7 +298,24 @@ func newDaemon(dir, card, tmp string) *daemon {
 		}
 		return tlsroots.Now()
 	}
+	d.stream.cacheCap = func() int64 { return d.settings().cacheBytes() }
+	d.stream.acct = d.acct
+	d.stream.free = func(p string) int64 { return d.free(p) }
+	d.stream.reserve = func() int64 { // while a sync runs or waits, the cache leaves it its room
+		if s := d.runner.Snapshot(); s.State == "running" || s.State == "paused" {
+			return max(s.BytesTotal-s.BytesDone, 0)
+		}
+		return 0
+	}
+	d.runner.MakeRoom = d.stream.makeRoom
 	d.stream.cleanLeft() // a stream an earlier run left (M26)
+	// Counts what the cache keeps, and deletes what another account left: its songs can't play
+	// for this one. In the background: a walk of the card.
+	keep := ""
+	if c, ok := creds.Load(dir); ok {
+		keep = acctDir(c.Server, c.User)
+	}
+	d.spawn(func() { d.stream.sweep(keep) })
 	d.art = newArtCache(d, filepath.Join(tmp, "q2-subsonic.art"))
 	d.state.Write(nil)
 	d.migrateErr, d.migrateAt = library.Migrate(card, lg.Printf), time.Now()
@@ -327,6 +372,16 @@ func (d *daemon) client() *subsonic.Client {
 	return cl
 }
 
+// acct names the signed-in account's folder in the stream cache; "" when signed out.
+func (d *daemon) acct() string {
+	if d.client() == nil {
+		return ""
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return acctDir(d.server, d.user)
+}
+
 func (d *daemon) hostName() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -336,6 +391,8 @@ func (d *daemon) hostName() string {
 // signOut forgets the sign-in at once; the sync and stream stop in the background (R27: a reply
 // never waits for a download to notice its cancel). The sync is cancelled, not paused: a later
 // sign-in, maybe to another server, never resumes this account's plan (M12). Finished songs stay.
+// The stream cache is emptied, as the firmware does with Spotify's, but for the list the Q2 may
+// still play.
 func (d *daemon) signOut() {
 	creds.Remove(d.dir)
 	d.mu.Lock()
@@ -350,6 +407,7 @@ func (d *daemon) signOut() {
 		d.playMu.Lock()
 		defer d.playMu.Unlock()
 		d.stream.stop()
+		d.stream.clearCache()
 	})
 }
 

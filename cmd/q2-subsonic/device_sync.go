@@ -87,7 +87,7 @@ func (d *daemon) syncPage(cl *subsonic.Client) q2spot.Reply {
 		d.spawn(func() { defer cancel(); d.computePreview(ctx, cl, p) })
 		return checking("")
 	}
-	done, pl, err, note := p.done, p.plan, p.err, p.note
+	done, pl, err, note, reclaim := p.done, p.plan, p.err, p.note, p.reclaim
 	if done && err != nil {
 		d.preview = nil // shown once; the next Sync tries again
 	}
@@ -98,7 +98,7 @@ func (d *daemon) syncPage(cl *subsonic.Client) q2spot.Reply {
 	case err != nil:
 		return d.errRows(err, "")
 	}
-	return previewRows(pl)
+	return previewRows(pl, reclaim)
 }
 
 // dropPreview forgets the preview, stopping its fetches if it is still at work (M11). d.mu is held.
@@ -224,6 +224,7 @@ func (d *daemon) computePreview(ctx context.Context, cl *subsonic.Client, p *pre
 		err = werr
 	}
 	var pl plan.Plan
+	var reclaim int64
 	if err == nil {
 		// Songs deleted from the card are planned again, not taken as there (I9).
 		if derr := d.runner.DropMissing(); derr != nil && !errors.Is(derr, syncer.ErrBusy) {
@@ -234,7 +235,13 @@ func (d *daemon) computePreview(ctx context.Context, cl *subsonic.Client, p *pre
 		chosen.Items = slices.DeleteFunc(slices.Clone(sel.Items), func(it selection.Item) bool {
 			return gone[selection.Key(it.Kind, it.ID)]
 		})
-		pl = plan.Compute(chosen, resolved, names, d.manifest(), d.card, d.free(d.card))
+		free := d.free(d.card)
+		pl = plan.Compute(chosen, resolved, names, d.manifest(), d.card, free)
+		if !pl.Fits { // a sync comes before the stream cache: what the cache can give counts as free
+			if reclaim = d.stream.reclaimable(); reclaim > 0 {
+				pl = plan.Compute(chosen, resolved, names, d.manifest(), d.card, free+reclaim)
+			}
+		}
 		pl.Hold(gone)
 		// The items holding songs already on the card, recorded now: an up-to-date preview starts
 		// no sync, and status reads them after a restart (I12). A running sync records its own.
@@ -243,7 +250,7 @@ func (d *daemon) computePreview(ctx context.Context, cl *subsonic.Client, p *pre
 		}
 	}
 	d.mu.Lock()
-	p.done, p.plan, p.err, p.at = true, &pl, err, time.Now()
+	p.done, p.plan, p.err, p.at, p.reclaim = true, &pl, err, time.Now(), reclaim
 	if err == nil {
 		d.gone = gone
 	}
@@ -255,7 +262,9 @@ func changes(p plan.Plan) bool {
 	return len(p.Add)+len(p.Replace)+len(p.Rename)+len(p.Remove)+p.PlaylistsChanged > 0 || p.PlaylistsStale
 }
 
-func previewRows(p *plan.Plan) q2spot.Reply {
+// previewRows is the preview's page. reclaim is the part of the plan's free bytes that the stream
+// cache holds and a sync takes when it needs it.
+func previewRows(p *plan.Plan, reclaim int64) q2spot.Reply {
 	var rows []q2spot.Row
 	if p.Held > 0 { // its songs stay; On This Q2 marks it, to take out
 		rows = append(rows, q2spot.Row{Kind: "info", Title: plural(p.Held, "item") + " no longer on the server",
@@ -294,8 +303,12 @@ func previewRows(p *plan.Plan) q2spot.Reply {
 	case p.PlaylistsStale:
 		rows = append(rows, info("Update playlists"))
 	}
-	rows = append(rows, info("Needs "+size(max(p.NeedBytes, 0))+" · "+size(p.FreeBytes)+" free"))
+	free := p.FreeBytes - reclaim
+	rows = append(rows, info("Needs "+size(max(p.NeedBytes, 0))+" · "+size(free)+" free"))
 	if p.Fits {
+		if take := p.NeedBytes + planMargin - free; p.NeedBytes > 0 && take > 0 {
+			rows = append(rows, info("Takes "+size(take)+" from the Stream Cache"))
+		}
 		rows = append(rows, act("start", "Start Sync", ""))
 	} else {
 		rows = append(rows, info("Not enough space · Free "+size(p.NeedBytes+planMargin-p.FreeBytes)))

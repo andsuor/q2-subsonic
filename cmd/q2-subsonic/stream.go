@@ -58,6 +58,15 @@ type streamer struct {
 	direct   func() bool
 	// plays reports the songs .playing names to the server. A Direct queue names none.
 	plays *plays
+	// The stream cache (cache.go). cacheCap nil: none, and streamed files go as the list plays on.
+	cacheCap func() int64            // its limit in bytes; 0 is Off
+	acct     func() string           // the signed-in account's folder name, "" when signed out
+	free     func(path string) int64 // the card's free bytes
+	reserve  func() int64            // the bytes a sync running or paused still needs
+	cmu      sync.Mutex              // one walk at a time, and keep
+	keep     map[string]bool         // the protected songs (protect)
+	used     atomic.Int64            // bytes kept, as last walked and fetched since; for Settings, and when to walk
+	counted  atomic.Bool             // a walk has set used
 
 	errMu sync.Mutex
 	err   *streamErr
@@ -176,24 +185,36 @@ func (s *streamer) dropURLs() {
 	}
 }
 
-// clean empties the stream folder: a new list, or a daemon start, leaves no songs from an older
-// one on the card (M26), and no URL queue in /tmp.
+// clean empties the stream folder of its files: a new list, or a daemon start, leaves no uncached
+// songs or queue from an older one on the card (M26), and no URL queue in /tmp. The cache's
+// folders stay.
 func (s *streamer) clean() {
 	s.dropURLs()
 	ents, _ := os.ReadDir(s.dir())
 	for _, e := range ents {
-		library.Remove(s.root, filepath.Join(s.dir(), e.Name()))
+		if !e.IsDir() {
+			library.Remove(s.root, filepath.Join(s.dir(), e.Name()))
+		}
 	}
 }
 
 // cleanLeft is clean at a daemon start, but for a stream the firmware may still play: .playing
-// names a song of the folder that is there. The app exits when idle with the queue still playing,
-// and Go to starts it again from Now Playing. Such a folder goes at the next Play, or at a start
-// after the Q2's own restart, which empties /tmp.
+// names a song that is there, of the folder or of the newest queue file. The app exits when idle
+// with the queue still playing, and Go to starts it again from Now Playing. Such a folder goes at
+// the next Play, or at a start after the Q2's own restart, which empties /tmp. The queue's songs
+// from the one playing on are protected again, as its run had them.
 func (s *streamer) cleanLeft() {
-	if p, _ := s.playingNow(); filepath.Dir(p) == s.dir() && exists(p) {
-		s.dropURLs()
-		return
+	s.protect(nil)
+	if p, _ := s.playingNow(); p != "" && exists(p) {
+		q := s.lastQueue()
+		i := slices.Index(q, p)
+		if i >= 0 {
+			s.protect(q[max(i-streamWindow, 0):])
+		}
+		if i >= 0 || filepath.Dir(p) == s.dir() {
+			s.dropURLs()
+			return
+		}
 	}
 	s.clean()
 }
@@ -202,6 +223,7 @@ func (s *streamer) cleanLeft() {
 type job struct {
 	path    string
 	fetch   bool
+	cached  bool // kept in the stream cache: never deleted behind the song playing
 	quality string
 	fails   int       // failed tries
 	next    time.Time // no try before
@@ -230,7 +252,7 @@ func (s *streamer) format(sg subsonic.Song) (ext, q string) {
 }
 
 // streamID is the song id in a streamed file's name, "NNNN - <title> [<id>].<ext>" as start writes
-// it; "" for any other name.
+// it, or the cache's "<title> [<id>].<ext>"; "" for any other name.
 // ponytail: an id SafeName changed (FAT-reserved characters, over 120 bytes) or one holding " ["
 // does not come back; keep path→id in the streamer if a server's ids need it.
 func streamID(path string) string {
@@ -258,12 +280,17 @@ func (s *streamer) start(songs []subsonic.Song, from int) {
 		return
 	}
 	jobs := make([]job, len(songs))
+	base := s.cacheBase()
 	for i, sg := range songs {
 		if e := m.Songs[sg.ID]; s.caps.Playlist && s.synced(e) {
 			jobs[i] = job{path: e.Path}
 			continue
 		}
 		ext, q := s.format(sg)
+		if p := s.cachePath(base, sg, ext, q); p != "" {
+			jobs[i] = job{path: p, fetch: true, quality: q, cached: true}
+			continue
+		}
 		name := fmt.Sprintf("%04d - %s [%s].%s", i, library.SafeName(sg.Title), library.SafeName(sg.ID), ext)
 		jobs[i] = job{path: filepath.Join(s.dir(), name), fetch: true, quality: q}
 	}
@@ -272,6 +299,7 @@ func (s *streamer) start(songs []subsonic.Song, from int) {
 	s.cancel, s.done = cancel, make(chan struct{})
 	r := &streamRun{s: s, ctx: ctx, songs: slices.Clone(songs), jobs: jobs, from: from, last: from, seq: seq,
 		stale: stale, staleAt: staleAt, heard: staleAt}
+	r.protect(from)
 	if s.caps.Playlist {
 		r.queue = filepath.Join(s.dir(), fmt.Sprintf("queue-%d.m3u", seq))
 		if err := r.writeQueue(); err != nil {
@@ -299,6 +327,20 @@ type streamRun struct {
 	queue     string    // the playlist's file; "" in folder mode
 	wrote     time.Time // when it was last written
 	skips     int       // songs skipped since the last one fetched
+	keptLo    int       // the first job protected, and how many jobs there were then
+	keptN     int
+}
+
+// protect holds the list's kept songs from index lo on in the cache.
+func (r *streamRun) protect(lo int) {
+	var paths []string
+	for _, j := range r.jobs[lo:] {
+		if j.cached {
+			paths = append(paths, j.path)
+		}
+	}
+	r.keptLo, r.keptN = lo, len(r.jobs)
+	r.s.protect(paths)
 }
 
 // writeQueue writes the queue file whole, a line a song from the first played on, aside and
@@ -414,15 +456,21 @@ func (r *streamRun) run() {
 		if !at.Equal(r.heard) {
 			if r.heard = at; now == r.jobs[cur].path {
 				r.s.plays.now(r.songs[cur], late)
+				if r.jobs[cur].cached { // played now: the last to be evicted
+					library.Touch(r.s.root, now, r.s.now())
+				}
 			}
 		}
 		// Whether .playing names cur for this list: cur is also where it starts, before the
 		// firmware has played anything of it.
 		named := now == r.jobs[cur].path && !(now == r.stale && at.Equal(r.staleAt))
 		for i := r.from; i < cur-streamWindow; i++ {
-			if r.jobs[i].fetch {
+			if r.jobs[i].fetch && !r.jobs[i].cached {
 				library.Remove(r.s.root, r.jobs[i].path)
 			}
+		}
+		if lo := max(r.from, cur-streamWindow); lo != r.keptLo || len(r.jobs) != r.keptN { // the song changed, or one was skipped
+			r.protect(lo)
 		}
 		want := -1 // the first song of the window still to fetch
 		for i := cur; i < len(r.jobs) && i <= cur+streamWindow; i++ {
@@ -471,6 +519,9 @@ func exists(p string) bool { _, err := os.Stat(p); return err == nil }
 // servers allow when downloads are turned off (M27, R37).
 func (r *streamRun) fetch(sg subsonic.Song, j job) error {
 	s := r.s
+	if s.cacheCap != nil {
+		s.trim(expect(sg, j.quality), s.reserve())
+	}
 	if err := s.net.Acquire(r.ctx, true); err != nil {
 		return err
 	}
@@ -481,7 +532,7 @@ func (r *streamRun) fetch(sg subsonic.Song, j job) error {
 	}
 	defer resp.Body.Close()
 	part := j.path + ".part"
-	if err := os.MkdirAll(s.dir(), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(part), 0o755); err != nil {
 		return err
 	}
 	f, err := os.Create(part)
@@ -504,6 +555,9 @@ func (r *streamRun) fetch(sg subsonic.Song, j job) error {
 	}
 	if err != nil {
 		library.Remove(s.root, part)
+	} else if j.cached {
+		s.used.Add(n)
+		library.Touch(s.root, j.path, s.now()) // the card's clock may be unset; the app's is the server's
 	}
 	return err
 }

@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -243,7 +244,7 @@ func (d *daemon) reply(req q2spot.Request) q2spot.Reply {
 		return d.menu(req.Arg(0))
 	case "details":
 		return details(req.Arg(0))
-	case "settings", "defq", "streamq", "streamm", "direct", "report":
+	case "settings", "defq", "streamq", "streamm", "direct", "report", "cachesz", "cacheclr":
 		return d.settingsOp(req.Op)
 	case "onq2":
 		return d.onQ2(req.Arg(0))
@@ -563,11 +564,43 @@ func (d *daemon) onQ2(cursor string) q2spot.Reply {
 
 var settingsMu sync.Mutex
 
+const clearWithin = 10 * time.Second // Clear Cache's second press
+
 func (d *daemon) settingsOp(op string) q2spot.Reply {
 	settingsMu.Lock()
 	defer settingsMu.Unlock()
 	s := d.settings()
+	d.mu.Lock()
+	armed := time.Since(d.clearAt) < clearWithin
+	if op != "settings" { // any press but Clear Cache's first disarms it; the page's reload doesn't
+		d.clearAt = time.Time{}
+	}
+	d.mu.Unlock()
 	switch op {
+	case "cachesz": // deletes nothing: a smaller size, or Off, applies at the next streamed song
+		s.StreamCacheMB = cacheSizes[(slices.Index(cacheSizes, s.cacheMB())+1)%len(cacheSizes)]
+		if err := d.saveSettings(s); err != nil {
+			return d.settingErr(err)
+		}
+		return q2spot.Reply{Message: s.cacheName()}
+	case "cacheclr": // the firmware has no dialog to ask in, so a second press is the yes
+		if !armed {
+			d.mu.Lock()
+			d.clearAt = time.Now()
+			d.mu.Unlock()
+			return q2spot.Reply{Message: "Press again to clear the cache"}
+		}
+		done := make(chan bool, 1)
+		d.spawn(func() { done <- d.stream.clearCache() })
+		select {
+		case kept := <-done:
+			if kept {
+				return q2spot.Reply{Message: "Cache cleared · the list playing is kept"}
+			}
+			return q2spot.Reply{Message: "Cache cleared"}
+		case <-time.After(d.answerIn / 2): // a full cache on a slow card
+			return q2spot.Reply{Message: "Clearing the cache…"}
+		}
 	case "defq":
 		s.DefaultQuality = nextQuality(s.def())
 		if err := d.saveSettings(s); err != nil {
@@ -617,6 +650,19 @@ func (d *daemon) settingsOp(op string) q2spot.Reply {
 		act("streamq", "Streaming Quality: "+qualityName(s.stream()), "")}
 	if d.caps.URLs { // the firmware's own player can stream the server's URLs
 		rows = append(rows, list("direct", s.modeName(), "", ""))
+	}
+	if d.caps.Playlist { // without the firmware's playlist word nothing is kept
+		used := "" // not counted yet
+		switch n := d.stream.used.Load(); {
+		case armed:
+			used = "Press again to clear it"
+		case n > 0:
+			used = size(n) + " used"
+		case d.stream.counted.Load():
+			used = "Empty"
+		}
+		rows = append(rows, act("cachesz", s.cacheName(), ""),
+			q2spot.Row{Kind: "action", URI: "cacheclr", Title: "Clear Cache", Subtitle: used})
 	}
 	rows = append(rows, act("report", s.reportName(), ""))
 	return q2spot.Reply{Rows: append(rows, list("account", "Account", user, ""),
