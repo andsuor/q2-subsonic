@@ -229,6 +229,33 @@ func TestDirectLyrics(t *testing.T) {
 	}
 }
 
+// The lyrics folder is the playing queue's until another is handed over: a start that ends with
+// none, at the probe or at the queue file, leaves it as it was, the new start song's lyrics out.
+func TestDirectKeepsLyricsWithoutHandOff(t *testing.T) {
+	for name, set := range map[string]func(e *env){
+		"probe": func(e *env) {
+			e.src.err = errFor(&subsonic.APIError{Op: "stream", Msg: "connection refused"}, "s0")
+		},
+		"queue file": func(e *env) { os.MkdirAll(e.s.urlsFile+".tmp/x", 0o755) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newDirect(t)
+			dir := filepath.Join(filepath.Dir(e.play), "q2-subsonic.lyrics")
+			os.MkdirAll(dir, 0o755)
+			os.WriteFile(dir+"/0.lrc", []byte("old"), 0o644)
+			e.src.lyrics = func(id string) (string, error) { return "L" + id, nil }
+			set(e)
+			e.s.start(songs(2, "flac"), 0)
+			if e.ended(t) {
+				t.Fatal("handed over")
+			}
+			if e.lrc(0) != "old" {
+				t.Fatalf("lyrics %q", e.lrc(0))
+			}
+		})
+	}
+}
+
 // The Streaming row is there only with the firmware's "urls" word; it toggles and is kept.
 func TestSettingsStreamMode(t *testing.T) {
 	d := newTestDaemon(t, &nav{albums: 1, songsPer: 1}, "playlist", true)
@@ -240,11 +267,26 @@ func TestSettingsStreamMode(t *testing.T) {
 	if len(rows) < 3 || rows[1] != "Streaming Quality: Original" || rows[2] != "Streaming: Download First" {
 		t.Fatalf("rows %q", rows)
 	}
+	// Direct sends the sign-in with no certificate check: the row opens a page that says so, and
+	// only its own row turns Direct on.
+	if row, _ := find(d.do("settings"), "Streaming: Download First"); row.Kind != "list" || row.URI != "direct" {
+		t.Fatalf("row %+v", row)
+	}
+	page := d.do("direct")
+	if got := strings.Join(titles(page), "|"); !strings.Contains(got, "certificate") || !strings.Contains(got, "sign-in") {
+		t.Fatalf("page %q", got)
+	}
+	if row, ok := find(page, "Turn On Direct"); !ok || row.Kind != "action" || row.URI != "streamm" || d.stream.direct() {
+		t.Fatalf("row %+v", row)
+	}
 	if r := d.do("streamm"); r.Message != "Streaming: Direct" || !d.stream.direct() {
 		t.Fatalf("%+v", r)
 	}
 	if _, ok := find(d.do("settings"), "Streaming: Direct"); !ok {
 		t.Fatalf("rows %q", titles(d.do("settings")))
+	}
+	if _, ok := find(d.do("direct"), "Turn Off Direct"); !ok {
+		t.Fatalf("page %q", titles(d.do("direct")))
 	}
 	if r := d.do("streamm"); r.Message != "Streaming: Download First" || d.stream.direct() {
 		t.Fatalf("%+v", r)

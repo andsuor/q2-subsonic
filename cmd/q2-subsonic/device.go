@@ -243,7 +243,7 @@ func (d *daemon) reply(req q2spot.Request) q2spot.Reply {
 		return d.menu(req.Arg(0))
 	case "details":
 		return details(req.Arg(0))
-	case "settings", "defq", "streamq", "streamm":
+	case "settings", "defq", "streamq", "streamm", "direct":
 		return d.settingsOp(req.Op)
 	case "onq2":
 		return d.onQ2(req.Arg(0))
@@ -588,6 +588,16 @@ func (d *daemon) settingsOp(op string) q2spot.Reply {
 			return d.settingErr(err)
 		}
 		return q2spot.Reply{Message: s.modeName()}
+	case "direct":
+		// The firmware's player sends the sign-in with no certificate check, which the app can't
+		// change: Direct is turned on only from the page that says so.
+		turn := "Turn On Direct"
+		if s.StreamMode == "direct" {
+			turn = "Turn Off Direct"
+		}
+		return q2spot.Reply{Rows: []q2spot.Row{info("The Q2's own player streams the songs"),
+			info("It doesn't check the server's certificate"),
+			info("On Wi-Fi you don't trust, your sign-in can be read"), act("streamm", turn, "")}}
 	}
 	d.mu.Lock()
 	user := d.user
@@ -595,7 +605,7 @@ func (d *daemon) settingsOp(op string) q2spot.Reply {
 	rows := []q2spot.Row{act("defq", "Default Quality: "+qualityName(s.def()), ""),
 		act("streamq", "Streaming Quality: "+qualityName(s.stream()), "")}
 	if d.caps.URLs { // the firmware's own player can stream the server's URLs
-		rows = append(rows, act("streamm", s.modeName(), ""))
+		rows = append(rows, list("direct", s.modeName(), "", ""))
 	}
 	return q2spot.Reply{Rows: append(rows, list("account", "Account", user, ""),
 		info("Version "+strings.TrimPrefix(version, "q2-v")))}

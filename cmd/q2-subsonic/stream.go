@@ -517,7 +517,6 @@ func (s *streamer) lyricsDir() string { return strings.TrimSuffix(s.urlsFile, ".
 // nothing back, so the run ends there and the app may idle out while the queue plays.
 func (r *streamRun) direct(lines []string) {
 	s := r.s
-	os.RemoveAll(s.lyricsDir()) // the last queue's: a file is known by its line alone
 	for !strings.HasPrefix(lines[r.from], "/") {
 		u, _, _ := strings.Cut(lines[r.from], "\t")
 		resp, err := s.src.Get(r.ctx, u, 0)
@@ -543,7 +542,7 @@ func (r *streamRun) direct(lines []string) {
 			return
 		}
 	}
-	more, slow := r.lyrics(r.from, 3*time.Second) // the start song's are there when it loads, if they come in time
+	text, more, slow := r.lyrics(r.from, 3*time.Second) // the start song's are there when it loads, if they come in time
 	if r.ctx.Err() != nil {
 		return
 	}
@@ -552,6 +551,10 @@ func (r *streamRun) direct(lines []string) {
 		s.logf("stream: queue: %v", err)
 		return
 	}
+	// Up to here the lyrics folder was the playing queue's, whose songs still load from it: a file
+	// is known by its line alone, so the last queue's go only now that this one is handed over.
+	os.RemoveAll(s.lyricsDir())
+	r.putLyrics(r.from, text)
 	r.announce(s.urlsFile)
 	s.logf("stream: direct, %d songs", len(lines))
 	// ponytail: the songs before the start one, and those past lyricsAhead, get no lyrics; ask as
@@ -559,24 +562,29 @@ func (r *streamRun) direct(lines []string) {
 	// first error) is asked once.
 	more = more || slow
 	for i := r.from + 1; more && i < len(lines) && i < r.from+lyricsAhead && r.ctx.Err() == nil; i++ {
-		more, _ = r.lyrics(i, 10*time.Second)
+		text, more, _ = r.lyrics(i, 10*time.Second)
+		r.putLyrics(i, text)
 	}
 }
 
-// lyrics leaves line i's lyrics, when its song has any, where the firmware looks for them. ok is
-// false when the server couldn't be asked; slow, when that was for the time.
-func (r *streamRun) lyrics(i int, wait time.Duration) (ok, slow bool) {
+// lyrics asks for line i's lyrics, "" when its song has none. ok is false when the server couldn't
+// be asked; slow, when that was for the time.
+func (r *streamRun) lyrics(i int, wait time.Duration) (text string, ok, slow bool) {
 	ctx, cancel := context.WithTimeout(r.ctx, wait)
 	defer cancel()
 	text, err := r.s.src.Lyrics(ctx, r.songs[i].ID)
 	if err != nil {
-		return false, errors.Is(ctx.Err(), context.DeadlineExceeded)
+		return "", false, errors.Is(ctx.Err(), context.DeadlineExceeded)
 	}
+	return text, true, false
+}
+
+// putLyrics leaves line i's lyrics, when there are any, where the firmware looks for them.
+func (r *streamRun) putLyrics(i int, text string) {
 	if text != "" {
 		os.MkdirAll(r.s.lyricsDir(), 0o755)
 		q2.WriteFile(filepath.Join(r.s.lyricsDir(), strconv.Itoa(i)+".lrc"), []byte(text))
 	}
-	return true, false
 }
 
 // write0600 is q2.WriteFile for a file only the app may read: the URL queue carries the sign-in.
