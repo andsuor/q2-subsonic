@@ -41,7 +41,7 @@ func TestCapsEveryWord(t *testing.T) {
 	f := filepath.Join(t.TempDir(), "caps")
 	os.WriteFile(f, []byte("playlist progress pages library goto sleep game audio sections art window urls sort later\n"), 0o644)
 	want := Caps{Playlist: true, Progress: true, Library: true, Pages: true, Goto: true, Sleep: true,
-		Sections: true, Art: true, Window: true, URLs: true, Sort: true}
+		Sections: true, Art: true, Window: true, Sort: true}
 	if got := ReadCaps(f); got != want {
 		t.Errorf("got %+v, want %+v", got, want)
 	}

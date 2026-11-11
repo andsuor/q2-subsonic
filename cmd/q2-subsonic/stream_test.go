@@ -22,34 +22,16 @@ import (
 )
 
 type fakeSrc struct {
-	mu     sync.Mutex
-	urls   []string
-	onGet  func()
-	fail   func(u string) bool
-	err    func(u string) error              // optional: the error Get answers u with (nil: none)
-	body   func(u string) (io.Reader, int64) // optional: the answer's body and its Content-Length (-1: none sent)
-	play   func(id, q string) string         // optional: PlayURL's answer
-	lyrics func(id string) (string, error)   // optional: Lyrics' answer
-	lyr    []string                          // the ids Lyrics was asked for
+	mu    sync.Mutex
+	urls  []string
+	onGet func()
+	fail  func(u string) bool
+	err   func(u string) error              // optional: the error Get answers u with (nil: none)
+	body  func(u string) (io.Reader, int64) // optional: the answer's body and its Content-Length (-1: none sent)
 }
 
 func (f *fakeSrc) MediaURL(id, q string) string { return "u:" + id + ":" + q }
-func (f *fakeSrc) CoverURL(id string) string    { return "c:" + id }
-func (f *fakeSrc) PlayURL(id, q string) string {
-	if f.play != nil {
-		return f.play(id, q)
-	}
-	return "p:" + id + ":" + q
-}
-func (f *fakeSrc) Lyrics(_ context.Context, id string) (string, error) {
-	f.mu.Lock()
-	f.lyr = append(f.lyr, id)
-	f.mu.Unlock()
-	if f.lyrics != nil {
-		return f.lyrics(id)
-	}
-	return "", nil
-}
+func (f *fakeSrc) PlayURL(id, q string) string  { return "p:" + id + ":" + q }
 func (f *fakeSrc) Get(_ context.Context, u string, _ int64) (*http.Response, error) {
 	f.mu.Lock()
 	f.urls = append(f.urls, u)

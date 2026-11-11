@@ -769,59 +769,6 @@ func TestArtistsIndex(t *testing.T) {
 	}
 }
 
-func lyricsOf(t *testing.T, status int, body string) (string, error) {
-	t.Helper()
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if path.Base(r.URL.Path) != "getLyricsBySongId" || r.URL.Query().Get("id") != "s1" {
-			t.Errorf("asked %s", r.URL.Path)
-		}
-		w.WriteHeader(status)
-		io.WriteString(w, body)
-	}))
-	t.Cleanup(srv.Close)
-	c, err := New(Creds{Server: srv.URL, User: "u", Password: "pw"}, srv.Client())
-	if err != nil {
-		t.Fatal(err)
-	}
-	return c.Lyrics(context.Background(), "s1")
-}
-
-// Lyrics come as .lrc text: the synced entry when there is one, else the first, plain.
-func TestLyrics(t *testing.T) {
-	list := func(entries string) string {
-		return `{"subsonic-response":{"status":"ok","lyricsList":{"structuredLyrics":[` + entries + `]}}}`
-	}
-	plain := `{"lang":"und","synced":false,"line":[{"value":"One"},{"value":"Two\r\nhalves"}]}`
-	synced := `{"lang":"eng","offset":-100,"synced":true,"line":[{"start":0,"value":"It's bugging me"},{"start":62345,"value":"Grating me"},{"start":6000999,"value":"late"}]}`
-	for name, c := range map[string]struct{ body, want string }{
-		"synced": {list(plain + "," + synced), "[00:00.00]It's bugging me\n[01:02.34]Grating me\n[100:00.99]late\n"},
-		"plain":  {list(plain), "One\nTwo halves\n"},
-		"none":   {list(""), ""},
-		"absent": {`{"subsonic-response":{"status":"ok"}}`, ""},
-	} {
-		if got, err := lyricsOf(t, 200, c.body); err != nil || got != c.want {
-			t.Errorf("%s: %q, %v", name, got, err)
-		}
-	}
-	var ae *APIError
-	if _, err := lyricsOf(t, 200, `{"subsonic-response":{"status":"failed","error":{"code":70,"message":"no"}}}`); !errors.As(err, &ae) || ae.Code != 70 {
-		t.Errorf("code 70: %v", err)
-	}
-	if _, err := lyricsOf(t, 404, "404 page not found"); err == nil {
-		t.Error("404: no error")
-	}
-}
-
-// Lyrics longer than the firmware reads are cut at a whole line.
-func TestLyricsCut(t *testing.T) {
-	line := `{"value":"` + strings.Repeat("x", 999) + `"}`
-	got, err := lyricsOf(t, 200, `{"subsonic-response":{"status":"ok","lyricsList":{"structuredLyrics":[{"line":[`+
-		strings.Repeat(line+",", 99)+line+`]}]}}}`)
-	if err != nil || len(got) != 65000 || !strings.HasSuffix(got, "x\n") {
-		t.Fatalf("%d bytes, %v", len(got), err)
-	}
-}
-
 // A play is reported with scrobble: now playing (submission=false) or played, at a time in ms; a
 // zero time sends none, and the server takes its own.
 func TestScrobble(t *testing.T) {

@@ -244,7 +244,7 @@ func (d *daemon) reply(req q2spot.Request) q2spot.Reply {
 		return d.menu(req.Arg(0))
 	case "details":
 		return details(req.Arg(0))
-	case "settings", "defq", "streamq", "streamm", "direct", "report", "cachesz", "cacheclr":
+	case "settings", "defq", "streamq", "report", "cachesz", "cacheclr":
 		return d.settingsOp(req.Op)
 	case "onq2":
 		return d.onQ2(req.Arg(0))
@@ -613,16 +613,6 @@ func (d *daemon) settingsOp(op string) q2spot.Reply {
 			return d.settingErr(err)
 		}
 		return q2spot.Reply{Message: "Streaming Quality: " + qualityName(s.stream())}
-	case "streamm":
-		if s.StreamMode == "direct" {
-			s.StreamMode = ""
-		} else {
-			s.StreamMode = "direct"
-		}
-		if err := d.saveSettings(s); err != nil {
-			return d.settingErr(err)
-		}
-		return q2spot.Reply{Message: s.modeName()}
 	case "report":
 		s.NoReport = !s.NoReport
 		if err := d.saveSettings(s); err != nil {
@@ -632,25 +622,12 @@ func (d *daemon) settingsOp(op string) q2spot.Reply {
 			d.stream.plays.clear()
 		}
 		return q2spot.Reply{Message: s.reportName()}
-	case "direct":
-		// The firmware's player sends the sign-in with no certificate check, which the app can't
-		// change: Direct is turned on only from the page that says so.
-		turn := "Turn On Direct"
-		if s.StreamMode == "direct" {
-			turn = "Turn Off Direct"
-		}
-		return q2spot.Reply{Rows: []q2spot.Row{info("The Q2's own player streams the songs"),
-			info("It doesn't check the server's certificate"),
-			info("On Wi-Fi you don't trust, your sign-in can be read"), act("streamm", turn, "")}}
 	}
 	d.mu.Lock()
 	user := d.user
 	d.mu.Unlock()
 	rows := []q2spot.Row{act("defq", "Default Quality: "+qualityName(s.def()), ""),
 		act("streamq", "Streaming Quality: "+qualityName(s.stream()), "")}
-	if d.caps.URLs { // the firmware's own player can stream the server's URLs
-		rows = append(rows, list("direct", s.modeName(), "", ""))
-	}
 	if d.caps.Playlist { // without the firmware's playlist word nothing is kept
 		used := "" // not counted yet
 		switch n := d.stream.used.Load(); {
@@ -664,11 +641,7 @@ func (d *daemon) settingsOp(op string) q2spot.Reply {
 		rows = append(rows, act("cachesz", s.cacheName(), ""),
 			q2spot.Row{Kind: "action", URI: "cacheclr", Title: "Clear Cache", Subtitle: used})
 	}
-	report := act("report", s.reportName(), "")
-	if d.caps.URLs && s.StreamMode == "direct" && !s.NoReport { // the Q2's own player tells nothing back
-		report.Subtitle = "Not for lists played with Direct"
-	}
-	rows = append(rows, report)
+	rows = append(rows, act("report", s.reportName(), ""))
 	return q2spot.Reply{Rows: append(rows, list("account", "Account", user, ""),
 		info("Version "+strings.TrimPrefix(version, "q2-v")))}
 }

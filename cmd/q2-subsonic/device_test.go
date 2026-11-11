@@ -2335,9 +2335,9 @@ func TestSyncPageCountsPlaylists(t *testing.T) {
 
 // Report Plays is on until turned off in Settings, which is kept and forgets the plays not sent.
 func TestSettingsReportPlays(t *testing.T) {
-	d := newTestDaemon(t, &nav{albums: 1, songsPer: 1}, "playlist urls", true)
+	d := newTestDaemon(t, &nav{albums: 1, songsPer: 1}, "playlist", true)
 	rows := titles(d.do("settings"))
-	if len(rows) < 6 || rows[5] != "Report Plays: On" || !d.stream.plays.on() {
+	if len(rows) < 5 || rows[4] != "Report Plays: On" || !d.stream.plays.on() {
 		t.Fatalf("rows %q", rows)
 	}
 	d.stream.plays.queue = []*play{{id: "s1"}}
@@ -2352,18 +2352,6 @@ func TestSettingsReportPlays(t *testing.T) {
 	}
 	if r := d.do("report"); r.Message != "Report Plays: On" || !d.stream.plays.on() {
 		t.Fatalf("%+v", r)
-	}
-	// Direct lists report nothing, and the row says so while Direct is on.
-	if row, _ := find(d.do("settings"), "Report Plays: On"); row.Subtitle != "" {
-		t.Fatalf("Download First: %+v", row)
-	}
-	d.do("streamm")
-	if row, _ := find(d.do("settings"), "Report Plays: On"); row.Subtitle != "Not for lists played with Direct" {
-		t.Fatalf("Direct: %+v", row)
-	}
-	d.do("report")
-	if row, _ := find(d.do("settings"), "Report Plays: Off"); row.Subtitle != "" {
-		t.Fatalf("Direct, off: %+v", row)
 	}
 }
 

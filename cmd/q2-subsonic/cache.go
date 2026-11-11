@@ -16,7 +16,7 @@ import (
 	"github.com/andsuor/q2-subsonic/internal/subsonic"
 )
 
-// The stream cache: with the firmware's "playlist" word, Download First keeps what it fetched, at
+// The stream cache: with the firmware's "playlist" word, a stream keeps what it fetched, at
 //
 //	.subsonic/stream/<account>/<quality>/<x>/<Title> [<id>].<ext>
 //

@@ -41,13 +41,11 @@ const (
 
 var errSignedOut = errors.New("signed out")
 
-// settings is .subsonic/settings.json. StreamQuality "" follows DefaultQuality. StreamMode is ""
-// (download first) or "direct". NoReport turns Report Plays off. StreamCacheMB is the stream
+// settings is .subsonic/settings.json. StreamQuality "" follows DefaultQuality. NoReport turns Report Plays off. StreamCacheMB is the stream
 // cache's limit: 0 is 2 GB, -1 Off.
 type settings struct {
 	DefaultQuality string `json:"defaultQuality,omitempty"`
 	StreamQuality  string `json:"streamQuality,omitempty"`
-	StreamMode     string `json:"streamMode,omitempty"`
 	NoReport       bool   `json:"noReport,omitempty"`
 	StreamCacheMB  int    `json:"streamCacheMB,omitempty"`
 }
@@ -80,13 +78,6 @@ func (s settings) reportName() string {
 		return "Report Plays: Off"
 	}
 	return "Report Plays: On"
-}
-
-func (s settings) modeName() string {
-	if s.StreamMode == "direct" {
-		return "Streaming: Direct"
-	}
-	return "Streaming: Download First"
 }
 
 func (s settings) def() string {
@@ -288,8 +279,9 @@ func newDaemon(dir, card, tmp string) *daemon {
 	d.stream.log = lg
 	d.stream.quality = func() string { return d.settings().stream() }
 	d.stream.moving = d.runner.Moving
-	d.stream.urlsFile = filepath.Join(tmp, "q2-subsonic.urls") // the one path the firmware takes a URL queue at
-	d.stream.direct = func() bool { return d.settings().StreamMode == "direct" }
+	// An older build's Streaming: Direct left its URL queue here, which carries the sign-in.
+	os.Remove(filepath.Join(tmp, "q2-subsonic.urls"))
+	os.Remove(filepath.Join(tmp, "q2-subsonic.urls.tmp"))
 	d.stream.plays.send = src{d}.Scrobble
 	d.stream.plays.on = func() bool { return !d.settings().NoReport }
 	d.stream.plays.clock = func() time.Time {
@@ -439,13 +431,6 @@ func (s src) CoverURL(id string) string {
 		return c.CoverURL(id)
 	}
 	return ""
-}
-
-func (s src) Lyrics(ctx context.Context, id string) (string, error) {
-	if c := s.d.client(); c != nil {
-		return c.Lyrics(ctx, id)
-	}
-	return "", errSignedOut
 }
 
 func (s src) Scrobble(ctx context.Context, id string, at time.Time, submission bool) error {

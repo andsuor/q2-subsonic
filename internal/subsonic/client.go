@@ -549,49 +549,6 @@ func (c *Client) Scrobble(ctx context.Context, id string, at time.Time, submissi
 	return c.call(ctx, "scrobble", q, nil)
 }
 
-// lyricsMax is what the firmware reads of a song's lyrics file (LYRIC_TAG_MAX).
-const lyricsMax = 64 << 10
-
-// Lyrics is a song's lyrics as .lrc text (OpenSubsonic's getLyricsBySongId): the first synced
-// entry as "[mm:ss.xx]line" lines, else the first entry as plain lines; "" when the song has none.
-// A line break inside a line is a space, and text over lyricsMax is cut at a whole line. A server
-// without the call answers an error. ponytail: an entry's offset is not applied.
-func (c *Client) Lyrics(ctx context.Context, id string) (string, error) {
-	var r struct {
-		L struct {
-			S []struct {
-				Synced bool `json:"synced"`
-				Line   []struct {
-					Start int    `json:"start"` // ms
-					Value string `json:"value"`
-				} `json:"line"`
-			} `json:"structuredLyrics"`
-		} `json:"lyricsList"`
-	}
-	if err := c.call(ctx, "getLyricsBySongId", url.Values{"id": {id}}, &r); err != nil || len(r.L.S) == 0 {
-		return "", err
-	}
-	pick := r.L.S[0]
-	for _, s := range r.L.S {
-		if s.Synced {
-			pick = s
-			break
-		}
-	}
-	var b strings.Builder
-	for _, l := range pick.Line {
-		line := strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(l.Value)
-		if ms := max(l.Start, 0); pick.Synced {
-			line = fmt.Sprintf("[%02d:%02d.%02d]", ms/60000, ms/1000%60, ms%1000/10) + line
-		}
-		if b.Len()+len(line)+1 > lyricsMax {
-			break
-		}
-		b.WriteString(line + "\n")
-	}
-	return b.String(), nil
-}
-
 // MediaURL returns the download URL for "original", else a stream URL transcoded to mp3
 // (quality "mp3-320" or "mp3-128"). The URL embeds the auth token, so never log it unredacted.
 func (c *Client) MediaURL(id, quality string) string {
