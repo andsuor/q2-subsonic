@@ -59,6 +59,7 @@ type nav struct {
 	pageErr          int                                                     // the empty query fails with this Subsonic code
 	songReqs         atomic.Int32                                            // empty-query search3 calls served
 	holdSongs        chan struct{}                                           // the empty query's later pages wait for it
+	holdPlaylists    chan struct{}                                           // getPlaylist waits for it, but for pl1
 	lastScan         atomic.Value                                            // getScanStatus's lastScan, a string; unset, the call is not found (not Navidrome)
 	count            atomic.Int64                                            // getScanStatus's count
 	scanning         atomic.Bool                                             // getScanStatus's scanning
@@ -217,6 +218,13 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		ok("playlists", map[string]any{"playlist": pls})
 	case "getPlaylist":
 		kk, _ := strconv.Atoi(strings.TrimPrefix(q.Get("id"), "pl"))
+		if n.holdPlaylists != nil && kk > 1 {
+			select {
+			case <-n.holdPlaylists:
+			case <-r.Context().Done():
+				return
+			}
+		}
 		p := n.playlist(kk)
 		p["entry"] = n.songs(kk - 1)
 		if n.dup {
@@ -2289,6 +2297,10 @@ func TestEntireLibraryCacheNotWritten(t *testing.T) {
 			t.Errorf("%s: a cache was written", name)
 		}
 	}
+	// The limit itself, maxCacheSongs, is still held.
+	if _, d := libSongs(t, scanned(&nav{albums: maxCacheSongs / 500, songsPer: 500, paged: true})); !exists(filepath.Join(d.card, ".subsonic", "library.json")) {
+		t.Errorf("%d songs: no cache was written", maxCacheSongs)
+	}
 }
 
 // While it checks, the Sync page counts.
@@ -2304,6 +2316,20 @@ func TestSyncPageCounts(t *testing.T) {
 		return r.Message == "refresh" && r.Rows[0].Title == "Checking server…" && r.Rows[0].Subtitle == "500 of 1200 songs"
 	})
 	close(n.holdSongs)
+	d.preview(t)
+}
+
+// After the songs the Sync page counts the playlists it has read.
+func TestSyncPageCountsPlaylists(t *testing.T) {
+	n := &nav{albums: 3, songsPer: 2, playlists: 3, holdPlaylists: make(chan struct{})}
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", "library:all")
+	d.do("sync")
+	eventually(t, "the count", func() bool {
+		r := d.do("sync")
+		return r.Message == "refresh" && r.Rows[0].Title == "Checking server…" && r.Rows[0].Subtitle == "1 of 3 playlists"
+	})
+	close(n.holdPlaylists)
 	d.preview(t)
 }
 
@@ -2326,6 +2352,18 @@ func TestSettingsReportPlays(t *testing.T) {
 	}
 	if r := d.do("report"); r.Message != "Report Plays: On" || !d.stream.plays.on() {
 		t.Fatalf("%+v", r)
+	}
+	// Direct lists report nothing, and the row says so while Direct is on.
+	if row, _ := find(d.do("settings"), "Report Plays: On"); row.Subtitle != "" {
+		t.Fatalf("Download First: %+v", row)
+	}
+	d.do("streamm")
+	if row, _ := find(d.do("settings"), "Report Plays: On"); row.Subtitle != "Not for lists played with Direct" {
+		t.Fatalf("Direct: %+v", row)
+	}
+	d.do("report")
+	if row, _ := find(d.do("settings"), "Report Plays: Off"); row.Subtitle != "" {
+		t.Fatalf("Direct, off: %+v", row)
 	}
 }
 

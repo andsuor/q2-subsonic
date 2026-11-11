@@ -664,7 +664,11 @@ func (d *daemon) settingsOp(op string) q2spot.Reply {
 		rows = append(rows, act("cachesz", s.cacheName(), ""),
 			q2spot.Row{Kind: "action", URI: "cacheclr", Title: "Clear Cache", Subtitle: used})
 	}
-	rows = append(rows, act("report", s.reportName(), ""))
+	report := act("report", s.reportName(), "")
+	if d.caps.URLs && s.StreamMode == "direct" && !s.NoReport { // the Q2's own player tells nothing back
+		report.Subtitle = "Not for lists played with Direct"
+	}
+	rows = append(rows, report)
 	return q2spot.Reply{Rows: append(rows, list("account", "Account", user, ""),
 		info("Version "+strings.TrimPrefix(version, "q2-v")))}
 }
