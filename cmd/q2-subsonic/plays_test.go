@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -117,6 +118,17 @@ func TestPlaysLate(t *testing.T) {
 	late := 20*time.Hour - 10*time.Millisecond
 	p.now(song("a", 40), late)
 	r.want(t, "now a", fmt.Sprint("a@", 1000-late.Milliseconds()))
+}
+
+// A start seen later than the song takes to count has counted: the next song would cancel a wait.
+func TestPlaysLatePastTheRule(t *testing.T) {
+	p, r := newPlays(t)
+	p.unit = time.Hour
+	late := 130 * time.Hour
+	p.now(song("a", 200), late)
+	until(t, "the play", func() bool { // at once, so before or after "now a"
+		return slices.Contains(r.all(), fmt.Sprint("a@", 1000-late.Milliseconds()))
+	})
 }
 
 // Plays the server is away for wait, at most 20, and go oldest first with their own times after

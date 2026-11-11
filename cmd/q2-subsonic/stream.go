@@ -373,8 +373,13 @@ func (r *streamRun) run() {
 		idle = idleAfter
 	}
 	seen, since := "", time.Now() // .playing as read last, and since when
+	read := time.Now()            // when .playing was read last
 	for r.ctx.Err() == nil {
 		cur, now, at := r.current()
+		// A start seen now is no older than the last read, whatever the file's time says: the
+		// clock may have been set meanwhile.
+		late := min(time.Since(at), time.Since(read))
+		read = time.Now()
 		if now != seen {
 			seen, since = now, time.Now()
 		}
@@ -383,9 +388,12 @@ func (r *streamRun) run() {
 		// loop from seeing it for a while, which the file's time tells.
 		if !at.Equal(r.heard) {
 			if r.heard = at; now == r.jobs[cur].path {
-				r.s.plays.now(r.songs[cur], time.Since(at))
+				r.s.plays.now(r.songs[cur], late)
 			}
 		}
+		// Whether .playing names cur for this list: cur is also where it starts, before the
+		// firmware has played anything of it.
+		named := now == r.jobs[cur].path && !(now == r.stale && at.Equal(r.staleAt))
 		for i := r.from; i < cur-streamWindow; i++ {
 			if r.jobs[i].fetch {
 				library.Remove(r.s.root, r.jobs[i].path)
@@ -419,7 +427,7 @@ func (r *streamRun) run() {
 		// around it stay, as the firmware has them queued; those behind went above, and the rest go
 		// at the next Play or start-up (M26).
 		long := idle + time.Duration(r.songs[cur].Duration)*time.Second
-		if want < 0 && (cur == len(r.jobs)-1 || time.Since(since) >= long) {
+		if want < 0 && (named && cur == len(r.jobs)-1 || time.Since(since) >= long) {
 			return
 		}
 		if !fetched {

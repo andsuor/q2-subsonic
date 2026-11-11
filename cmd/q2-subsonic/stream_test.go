@@ -762,6 +762,38 @@ func TestStreamReportsLastSong(t *testing.T) {
 	r.want(t, "now s1", "s1@")
 }
 
+// A list started at its last song stays until the firmware has started it: .playing comes only
+// after the song is on the card and the firmware has seen .play.
+func TestStreamReportsListStartedAtLastSong(t *testing.T) {
+	for _, caps := range []fw.Caps{{}, {Playlist: true}} {
+		e := newEnv(t, caps)
+		r, list := e.report(40, songs(3, "flac"))
+		e.setPlaying(t, e.stream(0, "flac")) // an older list's
+		e.s.start(list, 2)
+		until(t, "song 2", func() bool { return exists(e.stream(2, "flac")) })
+		time.Sleep(30 * time.Millisecond)
+		e.setPlaying(t, e.stream(2, "flac"))
+		r.want(t, "now s2", "s2@")
+		until(t, "run ended", func() bool { return !e.s.active() })
+	}
+}
+
+// A .playing whose time is far from the clock's (the clock was set meanwhile) started no longer
+// ago than the loop last looked: the song is waited for, not counted at once.
+func TestStreamReportsNoPlayForAClockSet(t *testing.T) {
+	e := newEnv(t, fw.Caps{})
+	r, list := e.report(600, songs(2, "flac")) // counts after 300 ms
+	e.s.start(list, 0)
+	until(t, "song 0", func() bool { return exists(e.stream(0, "flac")) })
+	e.setPlaying(t, e.stream(0, "flac"))
+	old := time.Now().Add(-time.Hour)
+	os.Chtimes(e.playing, old, old)
+	r.want(t, "now s0")
+	time.Sleep(100 * time.Millisecond)
+	r.want(t, "now s0")
+	r.want(t, "now s0", "s0@")
+}
+
 // Another list pressed takes the song playing with it and keeps the plays not yet sent; a stop
 // (sign-out, the app's end) forgets those too.
 func TestStreamStartCancelsPlayStopClears(t *testing.T) {

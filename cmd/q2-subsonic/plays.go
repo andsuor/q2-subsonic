@@ -52,9 +52,7 @@ func (p *plays) now(sg subsonic.Song, late time.Duration) {
 	if sg.Duration > 0 {
 		wait = min(wait, time.Duration(sg.Duration)*p.unit/2)
 	}
-	if late < 0 || late > wait {
-		late = 0 // the clock was set meanwhile, or the start was seen too late to tell
-	}
+	late = max(late, 0) // past wait, the song has counted already: the timer fires at once
 	at := p.clock()
 	if !at.IsZero() {
 		at = at.Add(-late)
