@@ -2,13 +2,13 @@
 
 What changed in each release of q2-subsonic, the Subsonic app for Q2 Pod, newest first. Version X.Y is the release tag `q2-vX.Y`; Q2 Pod's App Store installs the latest one. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-A few features need Q2 Pod 1.5.9 or later. Each one says so, and what the app does on older Q2 Pod instead.
+A few features need a newer Q2 Pod. Each one says so, and what the app does on older Q2 Pod instead.
 
 ## [Unreleased]
 
 ### Added
 
-- **Discover**, a new row on the main page: **Shuffle All**, **Recently Added**, **Recently Played**, **Most Played**, **Random Albums**, **Starred** and **Genres**. A genre lists its albums and has its own **Shuffle**. Recently Played and Most Played show what the server user has played; plays on the Q2 are not counted yet.
+- **Discover**, a new tab of the first page (a row of its list on older Q2 Pod): **Shuffle All**, **Recently Added**, **Recently Played**, **Most Played**, **Random Albums**, **Starred** and **Genres**. A genre lists its albums and has its own **Shuffle**. Recently Played and Most Played show what the server user has played; plays on the Q2 are not counted yet.
 - An artist's page has **Play**, **Shuffle**, **Radio** (songs like the artist's) and **Top Songs**. On a server without Radio or Top Songs (Navidrome has both, through Last.fm) they say **Not available on this server**.
 - A long list no longer ends in **More…** after 500 rows. It ends in **Next page**, which shows the next part in its place, with **Previous page** to go back, and Back leaves the list at once. Requires Q2 Pod 1.7.3 or later; on older Q2 Pod long lists keep More…, as before.
 - **Artists** opens on the server's index (the letters A to Z on Navidrome) when you have more than 60 artists, each letter with its count. Requires Q2 Pod 1.7.3 or later; on older Q2 Pod, or a server that names no index, Artists stays one list.
@@ -16,6 +16,8 @@ A few features need Q2 Pod 1.5.9 or later. Each one says so, and what the app do
 
 ### Changed
 
+- The first page is now tabs: **Home** (Sync Entire Library, Sync, On This Q2 and Settings), **Discover**, **Playlists**, **Albums** and **Artists**. Swipe left or right to move between them; the title says which one you are on, such as Albums 4/5. A skipped or failed song is reported on Home. Requires Q2 Pod 1.7.3 or later; on older Q2 Pod the first page is one list, as before.
+- **Search** is a magnifying glass at the right of the title bar on every tab; tap it to search. Under **Theme: Classic**, which has no title bar, it is the first row of each tab. Requires Q2 Pod 1.7.3 or later; on older Q2 Pod Search stays a row in the list.
 - A song pressed in search results plays on through the songs found, instead of alone.
 - With **Sync Entire Library** on, the "Checking server…" step of Sync is faster. The app asks for the songs 500 at a time instead of album by album. When the server says its library hasn't changed since the last check, less than a day ago, only the playlists are checked again (Navidrome says so; the songs it found are kept in `.subsonic/library.json`, for a library of up to 20,000 songs). A server that can't do either is checked album by album, as before. **Check Again** always checks everything.
 - While it checks, the Sync page counts, such as `4500 of 10000 songs`, then `3 of 12 playlists`.

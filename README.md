@@ -31,7 +31,7 @@ Things to know:
 
 ## Use
 
-The list has **Sync Entire Library**, **Sync**, **On This Q2**, **Playlists**, **Albums**, **Artists**, **Discover**, **Search** and **Settings**. A list you opened is kept for a minute, so a change made on the server can take that long to show.
+On Q2 Pod 1.7.3 or later the first page is tabs: **Home** (**Sync Entire Library**, **Sync**, **On This Q2** and **Settings**), **Discover**, **Playlists**, **Albums** and **Artists**. Swipe left or right to move between them; the title says which one you are on, such as Albums 4/5. **Search** is the magnifying glass at the right of the title bar on every tab (under **Theme: Classic**, which has no title bar, the first row of each tab). On older Q2 Pod the first page is one list: **Sync Entire Library**, **Sync**, **On This Q2**, **Playlists**, **Albums**, **Artists**, **Discover**, **Search** and **Settings**. A list you opened is kept for a minute, so a change made on the server can take that long to show.
 
 **Long lists:** on Q2 Pod 1.7.3 or later a list shows 480 rows at a time, with **Next page** and **Previous page** at its ends, and **Artists** opens on the server's index (the letters A to Z, each with its count) when you have more than 60 artists. On Q2 Pod 1.7.6 or later **Albums** has a **Sort** row: **Recently Added**, **By Artist** or **By Year**, newest first; a server other than Navidrome may leave albums without a year out of By Year. Albums has no A to Z index of its own: use Artists, By Artist or Search. On older Q2 Pod a long list ends in **More…** after 500 rows, Artists is one list and Albums is A to Z only.
 

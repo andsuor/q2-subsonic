@@ -49,6 +49,11 @@ func nextQuality(q string) string {
 	return qualities[1]
 }
 
+// tabs are the first page's tabs served by their own op; Home is menu's.
+var tabs = map[string]bool{"discover": true, "playlists": true, "albums": true, "artists": true}
+
+var searchRow = q2spot.Row{Kind: "search", Title: "Search"}
+
 func info(title string) q2spot.Row { return q2spot.Row{Kind: "info", Title: title} }
 func act(op, title, ctx string) q2spot.Row {
 	return q2spot.Row{Kind: "action", URI: op, Title: title, Context: ctx}
@@ -156,10 +161,10 @@ func page(rows []q2spot.Row, cursor string) q2spot.Reply {
 	return r
 }
 
-// fit is how many of rows (at most 50) one reply carries with room for a Sync Now row: a row that
-// Encode left out for 64 KiB would never be shown, as the cursor would go on past it (M28).
+// fit is how many of rows (at most 50) one reply carries with room for the leading rows (withLead):
+// a row that Encode left out for 64 KiB would never be shown, as the cursor would go on past it (M28).
 func fit(rows []q2spot.Row) int {
-	// The longest message stands in for "pages" and the Sync Now row's bytes.
+	// The longest message stands in for "pages" and the leading rows' bytes.
 	r := q2spot.Reply{Message: strings.Repeat("x", q2spot.MaxMessage), Cursor: "9999999999", Rows: rows}
 	_, kept := r.Encode("99999999999999999999")
 	return min(len(rows), max(kept, 1))
@@ -225,9 +230,17 @@ func (d *daemon) reply(req q2spot.Request) q2spot.Reply {
 	d.mu.Lock()
 	d.lastReq = time.Now()
 	d.mu.Unlock()
+	// A tab of the first page (menu's sections) is menu with the tab's name: its list, led by
+	// Search. By op and argument alone, never by depth: More… and a page row ask for a tab's later
+	// rows as "menu <tab> <cursor>". Signed out, menu answers for every tab with the sign-in row.
+	tab := false
+	if req.Op == "menu" && d.caps.Sections && tabs[req.Arg(0)] && d.client() != nil {
+		d.signedIn()
+		req, tab = q2spot.Request{ID: req.ID, Op: req.Arg(0), Args: req.Args[1:]}, true
+	}
 	switch req.Op {
 	case "menu":
-		return d.menu()
+		return d.menu(req.Arg(0))
 	case "details":
 		return details(req.Arg(0))
 	case "settings", "defq", "streamq":
@@ -257,27 +270,31 @@ func (d *daemon) reply(req q2spot.Request) q2spot.Reply {
 	switch req.Op {
 	case "playlists", "artists", "albums":
 		key, cursor := keyed(req)
-		return d.withSyncNow(d.browse(ctx, cl, req.Op, key, cursor), cursor)
+		return d.withLead(d.browse(ctx, cl, req.Op, key, cursor), cursor, tab)
 	case "albumsort":
 		return q2spot.Reply{Rows: []q2spot.Row{list("albums", "Recently Added", "", "newest"),
 			list("albums", "By Artist", "", "artist"), list("albums", "By Year", "", "year")}}
 	case "artist", "album", "playlist":
-		return d.withSyncNow(d.itemPage(ctx, cl, req.Arg(0), req.Arg(1)), req.Arg(1))
+		return d.withLead(d.itemPage(ctx, cl, req.Arg(0), req.Arg(1)), req.Arg(1), false)
 	case "search":
-		return d.withSyncNow(d.search(ctx, cl, req.Arg(0), req.Arg(1)), req.Arg(1))
+		return d.withLead(d.search(ctx, cl, req.Arg(0), req.Arg(1)), req.Arg(1), false)
 	case "discover":
-		return d.discover()
+		r := d.discover()
+		if tab {
+			r.Rows = append([]q2spot.Row{searchRow}, r.Rows...)
+		}
+		return r
 	case "albumlist":
-		return d.withSyncNow(d.albumLists(ctx, cl, req.Arg(0), req.Arg(1)), req.Arg(1))
+		return d.withLead(d.albumLists(ctx, cl, req.Arg(0), req.Arg(1)), req.Arg(1), false)
 	case "starred":
-		return d.withSyncNow(d.starred(ctx, cl, req.Arg(0)), req.Arg(0))
+		return d.withLead(d.starred(ctx, cl, req.Arg(0)), req.Arg(0), false)
 	case "genres":
 		return d.genres(ctx, cl, req.Arg(0))
 	case "genre":
 		head := []q2spot.Row{act("shuffle", "Shuffle", "genre:"+req.Arg(0))}
-		return d.withSyncNow(d.albumList(ctx, cl, "byGenre", req.Arg(0), head, req.Arg(1)), req.Arg(1))
+		return d.withLead(d.albumList(ctx, cl, "byGenre", req.Arg(0), head, req.Arg(1)), req.Arg(1), false)
 	case "top":
-		return d.withSyncNow(d.top(ctx, cl, req.Arg(0), req.Arg(1)), req.Arg(1))
+		return d.withLead(d.top(ctx, cl, req.Arg(0), req.Arg(1)), req.Arg(1), false)
 	case "shuffle":
 		return d.shuffle(ctx, cl, req.Arg(0))
 	case "radio":
@@ -366,7 +383,12 @@ func details(ctx string) q2spot.Reply {
 // nothing). The 2 s refresh pauses while the QR page is on top, and the first request after such a
 // gap means it was left: the sign-in stops there, so nothing listens once the user has gone (M4).
 // The last failure stays as the row's subtitle (I24).
-func (d *daemon) menu() q2spot.Reply {
+//
+// On Q2 Pod with "sections" the signed-in root names the first page's tabs instead, each a row the
+// firmware asks as "menu <context>" and swipes between; sec is that context. Home is served here,
+// the others by their own ops (reply). A tab's first row, Search, is the title bar's glass where
+// the theme has a title bar.
+func (d *daemon) menu(sec string) q2spot.Reply {
 	now := time.Now()
 	d.mu.Lock()
 	gap := now.Sub(d.lastMenu)
@@ -384,10 +406,12 @@ func (d *daemon) menu() q2spot.Reply {
 		}
 		return q2spot.Reply{Message: "refresh", Rows: []q2spot.Row{row}}
 	}
-	if d.signin.active() {
-		d.signin.stop()
+	d.signedIn()
+	if d.caps.Sections && sec == "" {
+		return q2spot.Reply{Message: "sections", Rows: []q2spot.Row{list("menu", "Home", "", "home"),
+			list("menu", "Discover", "", "discover"), list("menu", "Playlists", "", "playlists"),
+			list("menu", "Albums", "", "albums"), list("menu", "Artists", "", "artists")}}
 	}
-	d.state.Write(nil) // the QR page's last words, once it is left
 	sel, serr := d.selection()
 	m := d.manifest()
 	var bytes int64
@@ -401,7 +425,10 @@ func (d *daemon) menu() q2spot.Reply {
 	rows := []q2spot.Row{d.libraryRow(sel), list("sync", "Sync", d.syncSubtitle(cl), ""),
 		list("onq2", "On This Q2", onq2, ""),
 		list("playlists", "Playlists", "", ""), list("albums", "Albums", "", ""), list("artists", "Artists", "", ""),
-		list("discover", "Discover", "", ""), q2spot.Row{Kind: "search", Title: "Search"}, list("settings", "Settings", "", "")}
+		list("discover", "Discover", "", ""), searchRow, list("settings", "Settings", "", "")}
+	if d.caps.Sections { // Home: the lists are tabs of their own
+		rows = []q2spot.Row{searchRow, rows[0], rows[1], rows[2], rows[8]}
+	}
 	// Last, so the rows above keep their places under the cursor (M33).
 	if e := d.stream.Err(); e != nil {
 		op, h, code := "stream", 0, 0
@@ -412,6 +439,15 @@ func (d *daemon) menu() q2spot.Reply {
 		rows = append(rows, info(e.Error()), list("details", "Details", "", detailsCtx(op, h, code, e.at, e.id)))
 	}
 	return q2spot.Reply{Message: "refresh", Rows: rows}
+}
+
+// signedIn tidies up after a sign-in, on the first signed-in page shown: the sign-in page stops and
+// the QR page's last words go.
+func (d *daemon) signedIn() {
+	if d.signin.active() {
+		d.signin.stop()
+	}
+	d.state.Write(nil)
 }
 
 func (d *daemon) syncSubtitle(cl *subsonic.Client) string {

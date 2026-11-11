@@ -44,7 +44,7 @@ func (v view) album(a subsonic.Album) q2spot.Row {
 }
 
 // albumList is one page of an album list the server pages (typ is getAlbumList2's type, genre
-// byGenre's genre): head, then the albums. The cursor counts rows, head included, as withSyncNow
+// byGenre's genre): head, then the albums. The cursor counts rows, head included, as withLead
 // and fit set it; one album more than a page is asked for, which says whether More… follows. With
 // "window" the reply is a window's (windowed).
 func (d *daemon) albumList(ctx context.Context, cl *subsonic.Client, typ, genre string, head []q2spot.Row, cursor string) q2spot.Reply {

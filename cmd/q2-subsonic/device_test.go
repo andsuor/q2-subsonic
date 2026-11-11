@@ -622,8 +622,8 @@ func TestDetailsRow(t *testing.T) {
 }
 
 func TestReplyWithin8s(t *testing.T) {
-	d := newTestDaemon(t, &nav{stall: true}, "library", true)
-	ops := [][]string{{"menu"}, {"playlists"}, {"albums"}, {"artists"}, {"artist", "artist:ar1"}, {"search", "x"},
+	d := newTestDaemon(t, &nav{stall: true}, "library sections", true)
+	ops := [][]string{{"menu"}, {"menu", "home"}, {"menu", "albums"}, {"playlists"}, {"albums"}, {"artists"}, {"artist", "artist:ar1"}, {"search", "x"},
 		{"playlist", "playlist:pl1"}, {"album", "album:al0"}, {"toggle", "album:al0"}, {"toggle", "song:al0.1 album:al0 1"},
 		{"play", "album:al0 0"}, {"onq2"}, {"settings"}, {"account"}, {"sync"}, {"library"}, {"details", "getAlbum|0|0|0|"},
 		{"discover"}, {"albumlist", "newest"}, {"albumlist", "random"}, {"starred"}, {"genres"}, {"genre", "Rock"}, {"shuffle", ""},
@@ -1646,9 +1646,9 @@ func TestPageCutsBySize(t *testing.T) {
 	if _, kept := r.Encode("4294967295"); kept != len(r.Rows) || r.Cursor != strconv.Itoa(len(r.Rows)) {
 		t.Fatalf("%d rows, %d sent, cursor %q", len(r.Rows), kept, r.Cursor)
 	}
-	r.Rows = append([]q2spot.Row{list("sync", "Sync Now", "999 waiting", "")}, r.Rows...)
+	r.Rows, r.Message = append([]q2spot.Row{searchRow, list("sync", "Sync Now", "999 waiting", "")}, r.Rows...), "pages"
 	if _, kept := r.Encode("4294967295"); kept != len(r.Rows) {
-		t.Fatalf("with Sync Now: %d of %d sent", kept, len(r.Rows))
+		t.Fatalf("with Search and Sync Now: %d of %d sent", kept, len(r.Rows))
 	}
 }
 

@@ -197,17 +197,28 @@ func (d *daemon) syncNowRow() (q2spot.Row, bool) {
 	return list("sync", "Sync Now", fmt.Sprintf("%d waiting", n), ""), true
 }
 
-// withSyncNow puts the Sync Now row first on a list's first page, pushing the last row to the next.
-func (d *daemon) withSyncNow(r q2spot.Reply, cursor string) q2spot.Reply {
-	row, ok := d.syncNowRow()
-	if !ok || cursor != "" || r.Status != "" {
+// withLead puts a list's leading rows before its own: Search when search (a tab of the first page,
+// where the firmware makes it the title bar's glass), then Sync Now when due. The rows they push
+// out go to the next page. Sync Now leads the first page only; Search every window's first reply
+// too, before its Previous page, as the firmware takes a leading Search to be in every window when
+// it picks the row Next page selects, and so the glass stays. fit left the bytes for both.
+func (d *daemon) withLead(r q2spot.Reply, cursor string, search bool) q2spot.Reply {
+	if r.Status != "" {
 		return r
 	}
-	if len(r.Rows) >= q2spot.MaxRows {
-		n := q2spot.MaxRows - 1
+	var lead []q2spot.Row
+	if search && (cursor == "" || len(r.Rows) > 0 && r.Rows[0].Kind == "page" && r.Rows[0].URI == "prev") {
+		lead = append(lead, searchRow)
+	}
+	if cursor == "" {
+		if row, ok := d.syncNowRow(); ok {
+			lead = append(lead, row)
+		}
+	}
+	if n := q2spot.MaxRows - len(lead); len(r.Rows) > n { // never a window's reply, which has the room
 		r.Rows, r.Cursor = r.Rows[:n], strconv.Itoa(n)
 	}
-	r.Rows = append([]q2spot.Row{row}, r.Rows...)
+	r.Rows = append(lead, r.Rows...)
 	return r
 }
 
