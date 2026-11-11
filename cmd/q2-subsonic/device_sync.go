@@ -404,7 +404,7 @@ func (d *daemon) failed(cursor string) q2spot.Reply {
 			rows = append(rows, list("details", f.Title, f.Msg, detailsCtx(f.Op, f.HTTP, f.Code, f.At, f.SongID)))
 		}
 	}
-	return page(rows, cursor)
+	return d.page(rows, cursor)
 }
 
 // removed lists what the previewed sync deletes.
@@ -422,7 +422,7 @@ func (d *daemon) removed(cursor string) q2spot.Reply {
 	if len(rows) == 0 {
 		rows = []q2spot.Row{info("Nothing to remove")}
 	}
-	return page(rows, cursor)
+	return d.page(rows, cursor)
 }
 
 func (d *daemon) syncAction(op string) q2spot.Reply {

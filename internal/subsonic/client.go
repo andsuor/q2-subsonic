@@ -339,7 +339,7 @@ func (c *Client) Albums(ctx context.Context, offset, size int) ([]Album, error) 
 }
 
 // AlbumList is one page of getAlbumList2: typ is the server's list type (newest, recent, frequent,
-// random, byGenre…), genre the genre byGenre lists.
+// random, byGenre…), genre the genre byGenre lists. byYear is every year, the newest first.
 func (c *Client) AlbumList(ctx context.Context, typ, genre string, offset, size int) ([]Album, error) {
 	var r struct {
 		L struct {
@@ -349,6 +349,10 @@ func (c *Client) AlbumList(ctx context.Context, typ, genre string, offset, size 
 	q := url.Values{"type": {typ}, "offset": {strconv.Itoa(offset)}, "size": {strconv.Itoa(size)}}
 	if genre != "" {
 		q.Set("genre", genre)
+	}
+	if typ == "byYear" { // both are required; from above to makes it descending
+		q.Set("fromYear", "9999")
+		q.Set("toYear", "0")
 	}
 	if err := c.call(ctx, "getAlbumList2", q, &r); err != nil {
 		return nil, err
@@ -436,6 +440,7 @@ func (c *Client) Artists(ctx context.Context) ([]Artist, error) {
 	var r struct {
 		Artists struct {
 			Index []struct {
+				Name   string       `json:"name"`
 				Artist []wireArtist `json:"artist"`
 			} `json:"index"`
 		} `json:"artists"`
@@ -445,7 +450,11 @@ func (c *Client) Artists(ctx context.Context) ([]Artist, error) {
 	}
 	var out []Artist
 	for _, ix := range r.Artists.Index {
-		out = append(out, artists(ix.Artist)...)
+		for _, w := range ix.Artist {
+			a := w.artist()
+			a.Index = ix.Name
+			out = append(out, a)
+		}
 	}
 	return out, nil
 }
@@ -460,7 +469,7 @@ func (c *Client) Artist(ctx context.Context, id string) (Artist, []Album, error)
 	if err := c.call(ctx, "getArtist", url.Values{"id": {id}}, &r); err != nil {
 		return Artist{}, nil, err
 	}
-	return Artist(r.Artist.wireArtist), albums(r.Artist.Album), nil
+	return r.Artist.artist(), albums(r.Artist.Album), nil
 }
 
 // Search runs search3, 50 of each kind starting at offset.

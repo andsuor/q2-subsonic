@@ -48,6 +48,7 @@ type nav struct {
 	mediaErr         int           // download and stream answer this Subsonic error code
 	dup              bool          // each playlist holds its first song twice, last too
 	artists          int           // getArtists lists this many more artists, ar2.., with no albums
+	groups           int           // getArtists spreads its artists over this many index groups, named A, B…
 	listErr          int           // getAlbumList2 fails with this code from offset 50 on
 	sameAlbums       bool          // getAlbumList2 ignores offset: every page is the first
 	holdAlbum        chan struct{} // getAlbum waits for it
@@ -215,7 +216,18 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		for i := 0; i < n.artists; i++ {
 			ars = append(ars, map[string]any{"id": fmt.Sprintf("ar%d", i+2), "name": fmt.Sprintf("Artist %05d", i+2), "albumCount": 1})
 		}
-		ok("artists", map[string]any{"index": []any{map[string]any{"artist": ars}}})
+		ix := []any{map[string]any{"artist": ars}}
+		if n.groups > 0 {
+			ix = nil
+			for g := 0; g < n.groups; g++ {
+				var in []any
+				for i := g; i < len(ars); i += n.groups {
+					in = append(in, ars[i])
+				}
+				ix = append(ix, map[string]any{"name": string(rune('A' + g)), "artist": in})
+			}
+		}
+		ok("artists", map[string]any{"index": ix})
 	case "getArtist":
 		ok("artist", map[string]any{"id": "ar1", "name": "Artist", "albumCount": 2, "album": []any{n.album(0), n.album(1)}})
 	case "getScanStatus":

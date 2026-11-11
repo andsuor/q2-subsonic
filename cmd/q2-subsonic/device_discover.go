@@ -45,12 +45,17 @@ func (v view) album(a subsonic.Album) q2spot.Row {
 
 // albumList is one page of an album list the server pages (typ is getAlbumList2's type, genre
 // byGenre's genre): head, then the albums. The cursor counts rows, head included, as withSyncNow
-// and fit set it; one album more than a page is asked for, which says whether More… follows.
+// and fit set it; one album more than a page is asked for, which says whether More… follows. With
+// "window" the reply is a window's (windowed).
 func (d *daemon) albumList(ctx context.Context, cl *subsonic.Client, typ, genre string, head []q2spot.Row, cursor string) q2spot.Reply {
 	cur, _ := strconv.Atoi(cursor)
-	off, room := 0, q2spot.MaxRows-len(head)
+	rows := q2spot.MaxRows
+	if d.caps.Window {
+		rows = winRoom(max(cur, 0))
+	}
+	off, room := 0, rows-len(head)
 	if cur > 0 {
-		off, room, head = max(cur-len(head), 0), q2spot.MaxRows, nil
+		off, room, head = max(cur-len(head), 0), rows, nil
 	}
 	al, err := cl.AlbumList(ctx, typ, genre, off, room+1)
 	if err != nil {
@@ -63,12 +68,18 @@ func (d *daemon) albumList(ctx context.Context, cl *subsonic.Client, typ, genre 
 	v := d.view()
 	r := q2spot.Reply{Rows: head}
 	for _, a := range al {
-		r.Rows = append(r.Rows, v.album(a))
+		row := v.album(a)
+		if typ == "byYear" && a.Year > 0 {
+			row.Subtitle = join(strconv.Itoa(a.Year), row.Subtitle)
+		}
+		r.Rows = append(r.Rows, row)
 	}
-	if n := fit(r.Rows); n < len(r.Rows) {
+	if d.caps.Window {
+		r = windowed(r.Rows, cur, max(cur, 0), more)
+	} else if n := fit(r.Rows); n < len(r.Rows) {
 		r.Rows, more = r.Rows[:n], true
 	}
-	if more {
+	if more && !d.caps.Window {
 		r.Cursor = strconv.Itoa(max(cur, 0) + len(r.Rows))
 	}
 	if len(al) == 0 && cur <= 0 {
@@ -108,7 +119,7 @@ func (d *daemon) albumLists(ctx context.Context, cl *subsonic.Client, typ, curso
 	if len(rows) == 0 {
 		rows = append(rows, info("No albums"))
 	}
-	return page(rows, cursor)
+	return d.page(rows, cursor)
 }
 
 // starredFound is what is starred, held for browseTTL only: a server may have thousands.
@@ -128,7 +139,7 @@ func (d *daemon) starred(ctx context.Context, cl *subsonic.Client, cursor string
 	if len(rows) == 0 {
 		rows = []q2spot.Row{{Kind: "info", Title: "Nothing starred", Subtitle: "Star music on the server to see it here"}}
 	}
-	return page(rows, cursor)
+	return d.page(rows, cursor)
 }
 
 // genres lists the server's genres by name; one opens its albums.
@@ -157,7 +168,7 @@ func (d *daemon) genres(ctx context.Context, cl *subsonic.Client, cursor string)
 	if len(rows) == 0 {
 		rows = []q2spot.Row{info("No genres")}
 	}
-	return page(rows, cursor)
+	return d.page(rows, cursor)
 }
 
 // top is an artist's Top Songs. getTopSongs takes the artist's name, so the artist is asked for
@@ -191,7 +202,7 @@ func (d *daemon) top(ctx context.Context, cl *subsonic.Client, arg, cursor strin
 	if len(rows) == 0 {
 		rows = []q2spot.Row{info("No top songs")}
 	}
-	return page(rows, cursor)
+	return d.page(rows, cursor)
 }
 
 // playNow streams songs from the first, or says there is nothing.

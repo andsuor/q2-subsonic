@@ -10,6 +10,9 @@ A few features need Q2 Pod 1.5.9 or later. Each one says so, and what the app do
 
 - **Discover**, a new row on the main page: **Shuffle All**, **Recently Added**, **Recently Played**, **Most Played**, **Random Albums**, **Starred** and **Genres**. A genre lists its albums and has its own **Shuffle**. Recently Played and Most Played show what the server user has played; plays on the Q2 are not counted yet.
 - An artist's page has **Play**, **Shuffle**, **Radio** (songs like the artist's) and **Top Songs**. On a server without Radio or Top Songs (Navidrome has both, through Last.fm) they say **Not available on this server**.
+- A long list no longer ends in **More…** after 500 rows. It ends in **Next page**, which shows the next part in its place, with **Previous page** to go back, and Back leaves the list at once. Requires Q2 Pod 1.7.3 or later; on older Q2 Pod long lists keep More…, as before.
+- **Artists** opens on the server's index (the letters A to Z on Navidrome) when you have more than 60 artists, each letter with its count. Requires Q2 Pod 1.7.3 or later; on older Q2 Pod, or a server that names no index, Artists stays one list.
+- **Albums** has a **Sort** row: **Recently Added**, **By Artist** or **By Year** (newest first). The order is not remembered: Albums opens A to Z. Requires Q2 Pod 1.7.6 or later; on older Q2 Pod Albums is A to Z only.
 
 ### Changed
 

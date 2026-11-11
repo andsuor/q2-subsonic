@@ -33,6 +33,8 @@ Things to know:
 
 The list has **Sync Entire Library**, **Sync**, **On This Q2**, **Playlists**, **Albums**, **Artists**, **Discover**, **Search** and **Settings**. A list you opened is kept for a minute, so a change made on the server can take that long to show.
 
+**Long lists:** on Q2 Pod 1.7.3 or later a list shows 480 rows at a time, with **Next page** and **Previous page** at its ends, and **Artists** opens on the server's index (the letters A to Z, each with its count) when you have more than 60 artists. On Q2 Pod 1.7.6 or later **Albums** has a **Sort** row: **Recently Added**, **By Artist** or **By Year**, newest first; a server other than Navidrome may leave albums without a year out of By Year. Albums has no A to Z index of its own: use Artists, By Artist or Search. On older Q2 Pod a long list ends in **More…** after 500 rows, Artists is one list and Albums is A to Z only.
+
 **Choosing what to sync:** hold **Play/Pause** on a playlist, album, artist or song to toggle it in Sync, or open it and press **Add to Sync** / **Remove from Sync**. The Q2 answers `Added to Sync · N songs`, `Removed from Sync` or, for a song already covered by something bigger, `Included via <name>`. **On This Q2** lists what you picked, with its status and size on the card; hold Play/Pause there to take one out.
 
 **Quality** is per item, with a default in **Settings → Default Quality**: **Original** (the default), **MP3 320** or **MP3 128**. Change it with the **Quality** row inside a chosen item; Entire Library's and a single song's are in **On This Q2**. An original the Q2 can't play (WavPack, Musepack) syncs as MP3 320. AAC is not offered: Navidrome's AAC transcode can't carry tags.

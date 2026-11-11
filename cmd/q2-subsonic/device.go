@@ -22,6 +22,7 @@ import (
 // The Q2's Navidrome page over Q2SPOT/1 (q2-pod patch/addon.c draws it). A list row's URI is the op it
 // opens and its Context the argument; an action row sends URI with Context and toasts the reply's
 // message; a held Play/Pause sends the row's Position ("toggle") with its Context ("kind:id").
+// Albums and Artists take a key before the cursor: an order (newest, artist, year) or "i:<index group>".
 // Item pages take "kind:id" too, since one Context serves both press and hold. A song row's Context
 // is "song:<id> <list key> <index>": toggle reads the first field, play the rest. The list key is
 // the page's "kind:id", or "starred:", or "top:<artist id>" or "q:" (search) for a list kept in
@@ -78,6 +79,68 @@ func size(b int64) string {
 		return fmt.Sprintf("%.1f GB", float64(b)/1e9)
 	}
 	return fmt.Sprintf("%d MB", (b+5e5)/1e6)
+}
+
+// A long list on Q2 Pod with the "window" word is shown a window at a time: winRows rows, which the
+// firmware loads itself in its 10 replies of winReply rows (room in its 50 for Sync Now or Previous
+// page, and Next page), then a Next page row instead of More…. Cursors stay row offsets, so a
+// window's first is a multiple of winRows. Artists opens on its index groups past indexOver artists.
+const (
+	winReply  = 48
+	winRows   = 10 * winReply
+	indexOver = 60
+)
+
+// winRoom is how many rows the reply from row offset off carries: winReply, or up to its window's end.
+func winRoom(off int) int { return min(winReply, winRows-off%winRows) }
+
+// windowed is a window's reply: rows are the list's from row offset off on, at most winRoom(off) of
+// them, and more says whether the list goes on after them. asked is the cursor as it came, before
+// any clamp to the list's length: a window past a list that shrank keeps its Previous page. The
+// page rows have no Position: a held Play/Pause would send it as an op.
+func windowed(rows []q2spot.Row, asked, off int, more bool) q2spot.Reply {
+	var r q2spot.Reply
+	if asked > 0 && asked%winRows == 0 {
+		prev := ""
+		if asked > winRows {
+			prev = strconv.Itoa(asked - winRows)
+		}
+		r.Rows = []q2spot.Row{{Kind: "page", URI: "prev", Title: "Previous page", Context: prev}}
+	}
+	head := len(r.Rows)
+	r.Rows = append(r.Rows, rows...)
+	if n := max(fit(r.Rows), min(head+1, len(r.Rows))); n < len(r.Rows) {
+		r.Rows, more = r.Rows[:n], true
+	}
+	switch end := off + len(r.Rows) - head; {
+	case !more:
+	case end%winRows == 0:
+		r.Rows = append(r.Rows, q2spot.Row{Kind: "page", URI: "next", Title: "Next page", Context: strconv.Itoa(end)})
+	default:
+		r.Cursor = strconv.Itoa(end)
+	}
+	return r
+}
+
+// page is rows from cursor on: a window's reply on Q2 Pod with "window", the plain page otherwise.
+func (d *daemon) page(rows []q2spot.Row, cursor string) q2spot.Reply {
+	if !d.caps.Window {
+		return page(rows, cursor)
+	}
+	asked, _ := strconv.Atoi(cursor)
+	off := max(0, min(asked, len(rows)))
+	end := min(off+winRoom(off), len(rows))
+	return windowed(rows[off:end], asked, off, end < len(rows))
+}
+
+// keyed splits the arguments of a list with variants, "[key] [cursor]": an all-digit first argument
+// is the cursor of the plain list.
+func keyed(req q2spot.Request) (key, cursor string) {
+	a := req.Arg(0)
+	if _, err := strconv.ParseUint(a, 10, 31); a == "" || err == nil {
+		return "", a
+	}
+	return a, req.Arg(1)
 }
 
 // page is rows from cursor (an offset) on, as many as one reply carries (fit), with the cursor of
@@ -193,7 +256,11 @@ func (d *daemon) reply(req q2spot.Request) q2spot.Reply {
 	defer cancel()
 	switch req.Op {
 	case "playlists", "artists", "albums":
-		return d.withSyncNow(d.browse(ctx, cl, req.Op, req.Arg(0)), req.Arg(0))
+		key, cursor := keyed(req)
+		return d.withSyncNow(d.browse(ctx, cl, req.Op, key, cursor), cursor)
+	case "albumsort":
+		return q2spot.Reply{Rows: []q2spot.Row{list("albums", "Recently Added", "", "newest"),
+			list("albums", "By Artist", "", "artist"), list("albums", "By Year", "", "year")}}
 	case "artist", "album", "playlist":
 		return d.withSyncNow(d.itemPage(ctx, cl, req.Arg(0), req.Arg(1)), req.Arg(1))
 	case "search":
@@ -453,7 +520,7 @@ func (d *daemon) onQ2(cursor string) q2spot.Reply {
 			rows = append(rows, quality)
 		}
 	}
-	return page(rows, cursor)
+	return d.page(rows, cursor)
 }
 
 var settingsMu sync.Mutex

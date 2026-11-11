@@ -752,3 +752,15 @@ func TestUnsupported(t *testing.T) {
 		t.Fatal("not an API error")
 	}
 }
+
+// Artists keeps the name of the server's index group each artist is in.
+func TestArtistsIndex(t *testing.T) {
+	c := serveJSON(t, `{"subsonic-response":{"status":"ok","artists":{"index":[
+		{"name":"A","artist":[{"id":"1","name":"Abba","albumCount":2}]},
+		{"name":"#","artist":[{"id":"2","name":"10cc","albumCount":1}]}]}}}`)
+	ars, err := c.Artists(context.Background())
+	want := []Artist{{ID: "1", Name: "Abba", AlbumCount: 2, Index: "A"}, {ID: "2", Name: "10cc", AlbumCount: 1, Index: "#"}}
+	if err != nil || !slices.Equal(ars, want) {
+		t.Fatalf("%+v, %v", ars, err)
+	}
+}

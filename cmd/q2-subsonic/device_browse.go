@@ -211,9 +211,24 @@ func (d *daemon) withSyncNow(r q2spot.Reply, cursor string) q2spot.Reply {
 	return r
 }
 
-func (d *daemon) browse(ctx context.Context, cl *subsonic.Client, op, cursor string) q2spot.Reply {
+// albumOrders are Albums' other orders, by their key: getAlbumList2's type.
+var albumOrders = map[string]string{"": "alphabeticalByName", "newest": "newest", "artist": "alphabeticalByArtist", "year": "byYear"}
+
+// browse is Playlists, Albums or Artists. key is Albums' order (the Sort row's page offers them) or
+// one of Artists' index groups, "i:<name>".
+func (d *daemon) browse(ctx context.Context, cl *subsonic.Client, op, key, cursor string) q2spot.Reply {
 	if op == "albums" {
-		return d.albumList(ctx, cl, "alphabeticalByName", "", nil, cursor)
+		typ, ok := albumOrders[key]
+		if !ok {
+			return q2spot.Fail(q2spot.Bad, "Bad request")
+		}
+		var head []q2spot.Row
+		// With windows only: without them a reply is a full 50 albums, and every firmware that has
+		// "sort" has "window". A chevron row: the title bar's icon needs a Search row before it.
+		if key == "" && d.caps.Sort && d.caps.Window {
+			head = []q2spot.Row{{Kind: "sort", URI: "albumsort", Title: "Sort"}}
+		}
+		return d.albumList(ctx, cl, typ, "", head, cursor)
 	}
 	v := d.view()
 	var rows []q2spot.Row
@@ -234,14 +249,48 @@ func (d *daemon) browse(ctx context.Context, cl *subsonic.Client, op, cursor str
 		if err != nil {
 			return d.listErr(err, cursor)
 		}
+		group, in := strings.CutPrefix(key, "i:")
+		if letters := d.letters(ars); !in && letters != nil {
+			return d.page(letters, cursor)
+		}
 		for _, a := range ars {
-			rows = append(rows, v.item(selection.KindArtist, a.ID, a.Name, plural(a.AlbumCount, "album"), 0))
+			if !in || a.Index == group {
+				rows = append(rows, v.item(selection.KindArtist, a.ID, a.Name, plural(a.AlbumCount, "album"), 0))
+			}
 		}
 		if len(rows) == 0 {
 			rows = []q2spot.Row{info("No artists")}
 		}
 	}
-	return page(rows, cursor)
+	return d.page(rows, cursor)
+}
+
+// letters is Artists as the server's index groups (A, B…), a row each with its count, when there
+// are many artists and the firmware has "window"; nil for the one flat list: few artists, a server
+// with one group or unnamed ones, or a name too long for a row's context. The same answer for
+// every cursor, so a list is never one kind on its first reply and the other on a later one.
+func (d *daemon) letters(ars []subsonic.Artist) []q2spot.Row {
+	if !d.caps.Window || len(ars) <= indexOver {
+		return nil
+	}
+	var names []string
+	n := map[string]int{}
+	for _, a := range ars {
+		if a.Index == "" || len(q2spot.Escape(a.Index)) > maxGenre {
+			return nil
+		}
+		if n[a.Index]++; n[a.Index] == 1 {
+			names = append(names, a.Index)
+		}
+	}
+	if len(names) < 2 {
+		return nil
+	}
+	rows := make([]q2spot.Row, len(names))
+	for i, name := range names {
+		rows[i] = list("artists", name, plural(n[name], "artist"), "i:"+name)
+	}
+	return rows
 }
 
 // itemData is an album's or playlist's songs, or an artist's albums.
@@ -328,7 +377,7 @@ func (d *daemon) itemPage(ctx context.Context, cl *subsonic.Client, arg, cursor 
 		}
 		rows = append(rows, v.item(selection.KindAlbum, a.ID, a.Name, year, a.SongCount))
 	}
-	return page(rows, cursor)
+	return d.page(rows, cursor)
 }
 
 // found is artists, albums and songs: a search's answer, or what is starred.
@@ -371,7 +420,7 @@ func (d *daemon) search(ctx context.Context, cl *subsonic.Client, term, cursor s
 	if len(rows) == 0 {
 		rows = []q2spot.Row{info("No results")}
 	}
-	return page(rows, cursor)
+	return d.page(rows, cursor)
 }
 
 // getAlbum is cl.Album, with the album's artist for every song when its songs disagree on their

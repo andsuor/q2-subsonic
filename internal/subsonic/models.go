@@ -17,6 +17,7 @@ type Album struct {
 type Artist struct {
 	ID, Name   string
 	AlbumCount int
+	Index      string // the name of the server's index group it is listed in (getArtists only)
 }
 
 type Playlist struct {
@@ -90,10 +91,14 @@ type wireArtist struct {
 	AlbumCount int    `json:"albumCount"`
 }
 
+func (w wireArtist) artist() Artist {
+	return Artist{ID: w.ID, Name: w.Name, AlbumCount: w.AlbumCount}
+}
+
 func artists(ws []wireArtist) []Artist {
 	out := make([]Artist, len(ws))
 	for i, w := range ws {
-		out[i] = Artist(w)
+		out[i] = w.artist()
 	}
 	return out
 }
