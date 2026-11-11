@@ -171,6 +171,7 @@ type daemon struct {
 	signin         *signin
 	runner         *syncer.Runner
 	stream         *streamer
+	art            *artCache
 	newClient      func(subsonic.Creds) (*subsonic.Client, error)
 	free           func(path string) int64
 	answerIn       time.Duration
@@ -243,6 +244,7 @@ func newDaemon(dir, card, tmp string) *daemon {
 	d.stream.quality = func() string { return d.settings().stream() }
 	d.stream.moving = d.runner.Moving
 	d.stream.clean() // a stream an earlier run left (M26)
+	d.art = newArtCache(d, filepath.Join(tmp, "q2-subsonic.art"))
 	d.state.Write(nil)
 	d.migrateErr, d.migrateAt = library.Migrate(card, lg.Printf), time.Now()
 	d.logCrash()
@@ -315,6 +317,7 @@ func (d *daemon) signOut() {
 	d.dropPreview()
 	d.playSeq++ // a play still waiting for playMu is dropped
 	d.mu.Unlock()
+	d.art.clear() // after the client is gone: a fetch that had it stores nothing
 	d.spawn(d.runner.Cancel)
 	d.spawn(func() { // under playMu, so a start already running finishes first and is then stopped
 		d.playMu.Lock()
@@ -457,6 +460,7 @@ func (d *daemon) close(sock string) {
 	d.signin.stop()
 	d.stream.stop()
 	d.runner.Pause()
+	d.art.remove()
 	d.state.remove()
 	os.Remove(sock)
 }

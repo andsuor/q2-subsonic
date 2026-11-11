@@ -152,13 +152,16 @@ func TestMediaURL(t *testing.T) {
 	if !strings.Contains(c.CoverURL("mf-s1"), "/rest/getCoverArt?") {
 		t.Fatal("cover")
 	}
+	if u := c.CoverURLSize("al-1", 64); !strings.Contains(u, "/rest/getCoverArt?") || !strings.Contains(u, "id=al-1") || !strings.Contains(u, "size=64") {
+		t.Fatal(u)
+	}
 }
 
 func TestListings(t *testing.T) {
 	ctx := context.Background()
 	var q url.Values
 	_, c := serve(t, "playlists.json", &q)
-	if pl, err := c.Playlists(ctx); err != nil || len(pl) != 2 || pl[1].SongCount != 10 {
+	if pl, err := c.Playlists(ctx); err != nil || len(pl) != 2 || pl[1].SongCount != 10 || pl[0].CoverArt != "" || pl[1].CoverArt != "pl-p2_0" {
 		t.Fatal(pl, err)
 	}
 	_, c = serve(t, "albumlist.json", &q)

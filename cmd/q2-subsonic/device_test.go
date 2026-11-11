@@ -35,37 +35,39 @@ import (
 type nav struct {
 	albumArtist      string // the albums' own artist, when not "Artist"
 	albums, songsPer int
-	stall            bool          // every request hangs until the client gives up
-	errCode          int           // every API call fails with this Subsonic code
-	block            chan struct{} // downloads wait for it
-	failID           string        // getAlbum fails for this album only
-	failCode         int           // the Subsonic code failID fails with; 0 means 70, "Album not found"
-	albumReqs        atomic.Int32  // getAlbum calls served
-	playlists        int           // playlists pl1..plN ("Mix", "Mix 2"…); 0 means 1. pl<k> holds al<k-1>'s songs
-	empty            bool          // every list reply is empty
-	lastRange        atomic.Value  // the Range header of the latest download, a string
-	various          bool          // albums are compilations: album artist "Various Artists", song j by "Artist j"
-	mediaErr         int           // download and stream answer this Subsonic error code
-	dup              bool          // each playlist holds its first song twice, last too
-	artists          int           // getArtists lists this many more artists, ar2.., with no albums
-	groups           int           // getArtists spreads its artists over this many index groups, named A, B…
-	listErr          int           // getAlbumList2 fails with this code from offset 50 on
-	sameAlbums       bool          // getAlbumList2 ignores offset: every page is the first
-	holdAlbum        chan struct{} // getAlbum waits for it
-	albumGaveUp      atomic.Int32  // getAlbum requests the client cancelled while waiting
-	paged            bool          // search3 answers the empty query ("") with every song, newest first, in pages
-	pageSame         bool          // the empty query ignores songOffset: every page is the first
-	pageEmptyAt      int           // the page at this offset is ok and empty, as Navidrome answers a failed search
-	pageErr          int           // the empty query fails with this Subsonic code
-	songReqs         atomic.Int32  // empty-query search3 calls served
-	holdSongs        chan struct{} // the empty query's later pages wait for it
-	lastScan         atomic.Value  // getScanStatus's lastScan, a string; unset, the call is not found (not Navidrome)
-	count            atomic.Int64  // getScanStatus's count
-	scanning         atomic.Bool   // getScanStatus's scanning
-	scanMoves        bool          // lastScan is another at every call
-	scanReqs         atomic.Int32  // getScanStatus calls served
-	noLastfm         bool          // getTopSongs and getSimilarSongs2 are not implemented (HTTP 501)
-	simCode          int           // getSimilarSongs2 fails with this Subsonic code
+	stall            bool                                                    // every request hangs until the client gives up
+	errCode          int                                                     // every API call fails with this Subsonic code
+	block            chan struct{}                                           // downloads wait for it
+	failID           string                                                  // getAlbum fails for this album only
+	failCode         int                                                     // the Subsonic code failID fails with; 0 means 70, "Album not found"
+	albumReqs        atomic.Int32                                            // getAlbum calls served
+	playlists        int                                                     // playlists pl1..plN ("Mix", "Mix 2"…); 0 means 1. pl<k> holds al<k-1>'s songs
+	empty            bool                                                    // every list reply is empty
+	lastRange        atomic.Value                                            // the Range header of the latest download, a string
+	various          bool                                                    // albums are compilations: album artist "Various Artists", song j by "Artist j"
+	mediaErr         int                                                     // download and stream answer this Subsonic error code
+	dup              bool                                                    // each playlist holds its first song twice, last too
+	artists          int                                                     // getArtists lists this many more artists, ar2.., with no albums
+	groups           int                                                     // getArtists spreads its artists over this many index groups, named A, B…
+	listErr          int                                                     // getAlbumList2 fails with this code from offset 50 on
+	sameAlbums       bool                                                    // getAlbumList2 ignores offset: every page is the first
+	holdAlbum        chan struct{}                                           // getAlbum waits for it
+	albumGaveUp      atomic.Int32                                            // getAlbum requests the client cancelled while waiting
+	paged            bool                                                    // search3 answers the empty query ("") with every song, newest first, in pages
+	pageSame         bool                                                    // the empty query ignores songOffset: every page is the first
+	pageEmptyAt      int                                                     // the page at this offset is ok and empty, as Navidrome answers a failed search
+	pageErr          int                                                     // the empty query fails with this Subsonic code
+	songReqs         atomic.Int32                                            // empty-query search3 calls served
+	holdSongs        chan struct{}                                           // the empty query's later pages wait for it
+	lastScan         atomic.Value                                            // getScanStatus's lastScan, a string; unset, the call is not found (not Navidrome)
+	count            atomic.Int64                                            // getScanStatus's count
+	scanning         atomic.Bool                                             // getScanStatus's scanning
+	scanMoves        bool                                                    // lastScan is another at every call
+	scanReqs         atomic.Int32                                            // getScanStatus calls served
+	noLastfm         bool                                                    // getTopSongs and getSimilarSongs2 are not implemented (HTTP 501)
+	simCode          int                                                     // getSimilarSongs2 fails with this Subsonic code
+	art              bool                                                    // albums and playlists name a cover: their own id
+	cover            func(id string, w http.ResponseWriter, r *http.Request) // getCoverArt's answer; nil is a 64 px JPEG
 	reqMu            sync.Mutex
 	reqN             map[string]int        // requests served, by endpoint
 	lastQ            map[string]url.Values // the latest request's query, by endpoint
@@ -98,7 +100,11 @@ func (n *nav) album(i int) map[string]any {
 	if n.various {
 		artist = "Various Artists"
 	}
-	return map[string]any{"id": fmt.Sprintf("al%d", i), "name": fmt.Sprintf("Album %03d", i), "artist": artist, "year": 2020, "songCount": n.songsPer}
+	a := map[string]any{"id": fmt.Sprintf("al%d", i), "name": fmt.Sprintf("Album %03d", i), "artist": artist, "year": 2020, "songCount": n.songsPer}
+	if n.art {
+		a["coverArt"] = a["id"]
+	}
+	return a
 }
 
 func (n *nav) playlist(k int) map[string]any {
@@ -110,7 +116,11 @@ func (n *nav) playlist(k int) map[string]any {
 	if n.dup {
 		count++
 	}
-	return map[string]any{"id": fmt.Sprintf("pl%d", k), "name": name, "songCount": count}
+	p := map[string]any{"id": fmt.Sprintf("pl%d", k), "name": name, "songCount": count}
+	if n.art {
+		p["coverArt"] = p["id"]
+	}
+	return p
 }
 
 func (n *nav) songs(al int) []map[string]any {
@@ -308,6 +318,12 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		a, _ := strconv.Atoi(al)
 		k, _ := strconv.Atoi(j)
 		ok("song", n.song(a, k))
+	case "getCoverArt":
+		if n.cover != nil {
+			n.cover(q.Get("id"), w, r)
+			return
+		}
+		w.Write(picture("jpeg", 64, 64))
 	case "download", "stream":
 		if n.mediaErr != 0 {
 			w.Header().Set("Content-Type", "application/json")

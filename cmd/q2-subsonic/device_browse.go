@@ -245,6 +245,7 @@ func (d *daemon) browse(ctx context.Context, cl *subsonic.Client, op, key, curso
 	}
 	v := d.view()
 	var rows []q2spot.Row
+	covers := map[string]string{}
 	switch op {
 	case "playlists":
 		pls, err := cached(d, cl, op, func() ([]subsonic.Playlist, error) { return cl.Playlists(ctx) })
@@ -253,6 +254,7 @@ func (d *daemon) browse(ctx context.Context, cl *subsonic.Client, op, key, curso
 		}
 		for _, p := range pls {
 			rows = append(rows, v.item(selection.KindPlaylist, p.ID, p.Name, plural(p.SongCount, "song"), p.SongCount))
+			covers[rows[len(rows)-1].Context] = p.CoverArt
 		}
 		if len(rows) == 0 {
 			rows = []q2spot.Row{{Kind: "info", Title: "No playlists", Subtitle: "Playlists must be public on the server to show here"}}
@@ -275,7 +277,7 @@ func (d *daemon) browse(ctx context.Context, cl *subsonic.Client, op, key, curso
 			rows = []q2spot.Row{info("No artists")}
 		}
 	}
-	return d.page(rows, cursor)
+	return d.withArt(d.page(rows, cursor), covers, cursor)
 }
 
 // letters is Artists as the server's index groups (A, B…), a row each with its count, when there
@@ -383,14 +385,16 @@ func (d *daemon) itemPage(ctx context.Context, cl *subsonic.Client, arg, cursor 
 		rows = append(rows, act("play", "Play", key+" 0"), act("shuffle", "Shuffle", key), act("radio", "Radio", key),
 			list("top", "Top Songs", "", key))
 	}
+	covers := map[string]string{}
 	for _, a := range albums {
 		year := ""
 		if a.Year > 0 {
 			year = strconv.Itoa(a.Year)
 		}
 		rows = append(rows, v.item(selection.KindAlbum, a.ID, a.Name, year, a.SongCount))
+		covers[rows[len(rows)-1].Context] = a.CoverArt
 	}
-	return d.page(rows, cursor)
+	return d.withArt(d.page(rows, cursor), covers, cursor)
 }
 
 // found is artists, albums and songs: a search's answer, or what is starred.

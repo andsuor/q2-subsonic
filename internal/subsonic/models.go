@@ -23,6 +23,7 @@ type Artist struct {
 type Playlist struct {
 	ID, Name  string
 	SongCount int
+	CoverArt  string
 }
 
 type Genre struct {

@@ -304,6 +304,7 @@ func (c *Client) Playlists(ctx context.Context) ([]Playlist, error) {
 				ID        string `json:"id"`
 				Name      string `json:"name"`
 				SongCount int    `json:"songCount"`
+				CoverArt  string `json:"coverArt"`
 			} `json:"playlist"`
 		} `json:"playlists"`
 	}
@@ -324,6 +325,7 @@ func (c *Client) Playlist(ctx context.Context, id string) (Playlist, []Song, err
 			ID        string     `json:"id"`
 			Name      string     `json:"name"`
 			SongCount int        `json:"songCount"`
+			CoverArt  string     `json:"coverArt"`
 			Entry     []wireSong `json:"entry"`
 		} `json:"playlist"`
 	}
@@ -331,7 +333,7 @@ func (c *Client) Playlist(ctx context.Context, id string) (Playlist, []Song, err
 		return Playlist{}, nil, err
 	}
 	p := r.Playlist
-	return Playlist{p.ID, p.Name, p.SongCount}, songs(p.Entry), nil
+	return Playlist{p.ID, p.Name, p.SongCount, p.CoverArt}, songs(p.Entry), nil
 }
 
 func (c *Client) Albums(ctx context.Context, offset, size int) ([]Album, error) {
@@ -559,6 +561,11 @@ func (c *Client) PlayURL(id, quality string) string {
 
 func (c *Client) CoverURL(id string) string {
 	return c.endpoint("getCoverArt", url.Values{"id": {id}})
+}
+
+// CoverURLSize is CoverURL for a cover scaled by the server to px a side at most.
+func (c *Client) CoverURLSize(id string, px int) string {
+	return c.endpoint("getCoverArt", url.Values{"id": {id}, "size": {strconv.Itoa(px)}})
 }
 
 // Get fetches u, resuming at byte from when from > 0. The caller closes the body. A Subsonic error

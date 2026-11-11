@@ -2,7 +2,7 @@
 """Run launcher.sh (the card's run) on the host with a fake app: after a failure it restarts, waiting
 5 s and doubling; an exit of 0 ends the loop and tidies /tmp; a second run while it runs starts
 nothing; a TERM to the loop's pid stops the app and tidies,
-and an app that ignores it is killed 2 s later.
+and an app that ignores it is killed 2 s later, the covers it left in /tmp removed.
 Usage: test_launcher.py"""
 import os
 import pathlib
@@ -86,10 +86,11 @@ with tempfile.TemporaryDirectory(prefix='q2-launcher-') as d:  # stopped in a cr
 with tempfile.TemporaryDirectory(prefix='q2-launcher-') as d:  # an app that ignores TERM is killed
     tmp = pathlib.Path(d)
     card, t, env = rig(tmp, 'echo start >> "$Q2_TEST/starts"\n'
+                            'mkdir -p "$Q2_T/q2-%s.art" && touch "$Q2_T/q2-%s.art/0000002a.jpg"\n'
                             'trap "" TERM\n'
-                            'while :; do /bin/sleep 0.05; done\n')
+                            'while :; do /bin/sleep 0.05; done\n' % (app, app))
     subprocess.run(['/bin/sh', str(card/'run')], env=env, check=True, timeout=10)
-    wait(lambda: lines(tmp/'starts') == ['start'], 'the app')
+    wait(lambda: lines(tmp/'starts') == ['start'] and (t/f'q2-{app}.art'/'0000002a.jpg').exists(), 'the app')
     loop = int((t/f'q2-{app}').read_text())
     os.kill(loop, signal.SIGTERM)
     wait(lambda: not list(t.iterdir()), 'the KILL to tidy', secs=3)
@@ -103,4 +104,4 @@ with tempfile.TemporaryDirectory(prefix='q2-launcher-') as d:  # a TERM in the b
     os.kill(int((t/f'q2-{app}').read_text()), signal.SIGTERM)
     wait(lambda: not (t/f'q2-{app}').exists(), 'the TERM in the backoff', secs=1)
     subprocess.run(['pkill', '-f', f'{tmp}/bin/sleep'])
-print(f'Launcher (q2-{app}): restarts with backoff, keeps a crash for the next start, exit 0, one at a time, TERM passed and KILL after 2 s.')
+print(f'Launcher (q2-{app}): restarts with backoff, keeps a crash for the next start, exit 0, one at a time, TERM passed and KILL after 2 s, the covers gone.')

@@ -13,6 +13,7 @@ A few features need a newer Q2 Pod. Each one says so, and what the app does on o
 - A long list no longer ends in **More…** after 500 rows. It ends in **Next page**, which shows the next part in its place, with **Previous page** to go back, and Back leaves the list at once. Requires Q2 Pod 1.7.3 or later; on older Q2 Pod long lists keep More…, as before.
 - **Artists** opens on the server's index (the letters A to Z on Navidrome) when you have more than 60 artists, each letter with its count. Requires Q2 Pod 1.7.3 or later; on older Q2 Pod, or a server that names no index, Artists stays one list.
 - **Albums** has a **Sort** row: **Recently Added**, **By Artist** or **By Year** (newest first). The order is not remembered: Albums opens A to Z. Requires Q2 Pod 1.7.6 or later; on older Q2 Pod Albums is A to Z only.
+- **Albums**, **Playlists**, an artist's albums, Discover's album lists and a genre's albums show each one's cover beside its row. The list opens at once and its covers appear a few seconds later; in a long list, covers past the first rows appear the next time you open it. Covers come slower while a sync runs. Requires Q2 Pod 1.7.3 or later; on older Q2 Pod the lists look as before. A server that sends no cover, or one in WebP, leaves the rows plain.
 
 ### Changed
 

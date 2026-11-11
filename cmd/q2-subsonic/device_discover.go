@@ -67,8 +67,10 @@ func (d *daemon) albumList(ctx context.Context, cl *subsonic.Client, typ, genre 
 	}
 	v := d.view()
 	r := q2spot.Reply{Rows: head}
+	covers := map[string]string{}
 	for _, a := range al {
 		row := v.album(a)
+		covers[row.Context] = a.CoverArt
 		if typ == "byYear" && a.Year > 0 {
 			row.Subtitle = join(strconv.Itoa(a.Year), row.Subtitle)
 		}
@@ -85,7 +87,7 @@ func (d *daemon) albumList(ctx context.Context, cl *subsonic.Client, typ, genre 
 	if len(al) == 0 && cur <= 0 {
 		r.Rows = append(r.Rows, info("No albums"))
 	}
-	return r
+	return d.withArt(r, covers, cursor)
 }
 
 // albumLists is one of Discover's album lists. Random Albums is one page, drawn once and kept until
@@ -113,13 +115,15 @@ func (d *daemon) albumLists(ctx context.Context, cl *subsonic.Client, typ, curso
 	}
 	v := d.view()
 	rows := []q2spot.Row{}
+	covers := map[string]string{}
 	for _, a := range al {
 		rows = append(rows, v.album(a))
+		covers[rows[len(rows)-1].Context] = a.CoverArt
 	}
 	if len(rows) == 0 {
 		rows = append(rows, info("No albums"))
 	}
-	return d.page(rows, cursor)
+	return d.withArt(d.page(rows, cursor), covers, cursor)
 }
 
 // starredFound is what is starred, held for browseTTL only: a server may have thousands.
