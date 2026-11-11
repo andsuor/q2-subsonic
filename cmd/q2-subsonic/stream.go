@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -238,6 +239,7 @@ type job struct {
 	fails   int       // failed tries
 	next    time.Time // no try before
 	landed  bool      // fetched once in this run: the firmware may have passed it
+	away    bool      // the server was lost at it: tried on until it answers or the list is left
 }
 
 // synced reports whether e's file can play from the card: it is there, and no sync is about to
@@ -328,7 +330,8 @@ type streamRun struct {
 	songs     []subsonic.Song
 	jobs      []job
 	from      int
-	last      int // the index .playing named last: a song in the list twice is found after it (M25)
+	quietBy   time.Time // when no song has started for the idle time: a lost server is waited for until then
+	last      int       // the index .playing named last: a song in the list twice is found after it (M25)
 	seq       int64
 	announced bool
 	stale     string    // .playing at start: ignored until it is written again
@@ -375,6 +378,14 @@ func gone(err error) bool {
 	return errors.As(err, &ae) && (ae.Code == 70 || ae.HTTP == 410)
 }
 
+// lost reports whether err is the server out of reach, which may pass. A card that can't be
+// written reads as a net.Error too (an errno is one), and waiting mends none of those.
+func lost(err error) bool {
+	var pe *fs.PathError
+	var le *os.LinkError
+	return errors.Is(syncer.StopReason(err), syncer.ErrOffline) && !errors.As(err, &pe) && !errors.As(err, &le)
+}
+
 // failed counts a failed try of song i and reports whether the run goes on, and whether the song
 // was skipped. A song is tried once a backoff entry (in a playlist, once when it is gone). Then,
 // in a playlist, a song the server can't send (gone, a transcode that fails, an error for a body)
@@ -391,6 +402,14 @@ func (r *streamRun) failed(i int, err error) (goOn, skipped bool) {
 		return true, false
 	}
 	e := &streamErr{title: sg.Title, id: sg.ID, at: time.Now(), err: err}
+	// The server is lost (Wi-Fi dropped, the Q2 slept while paused): the songs already fetched
+	// play on, so the song is tried on at the backoff's last pace until the server answers. It
+	// ends only when no song has started for the idle time: the list was left.
+	if lost(err) && time.Now().Before(r.quietBy) {
+		j.away, j.next = true, time.Now().Add(s.backoff[len(s.backoff)-1])
+		s.setErr(e)
+		return true, false
+	}
 	if r.queue == "" || j.landed || syncer.StopReason(err) != nil || r.skips >= 2 {
 		s.setErr(e)
 		return false, false
@@ -489,10 +508,16 @@ func (r *streamRun) run() {
 				break
 			}
 		}
-		r.s.xfer.Store(want >= 0)
+		// Waiting for a lost server is no transfer: it must not keep the Q2 from standby.
+		r.s.xfer.Store(want >= 0 && !r.jobs[want].away)
+		r.quietBy = since.Add(idle + time.Duration(r.songs[cur].Duration)*time.Second)
 		fetched := false
 		if want >= 0 && !time.Now().Before(r.jobs[want].next) { // else backing off
 			if err := r.fetch(r.songs[want], r.jobs[want]); err == nil {
+				if r.jobs[want].away { // the server is back
+					r.jobs[want].away = false
+					r.s.setErr(nil)
+				}
 				fetched, r.skips, r.jobs[want].landed = true, 0, true
 			} else if r.ctx.Err() != nil {
 				return
@@ -512,7 +537,8 @@ func (r *streamRun) run() {
 		long := idle + time.Duration(r.songs[cur].Duration)*time.Second
 		// A list left or paused no longer holds its songs to come in the cache (.playing can't tell
 		// the two apart): a clear, a sign-out or a sync may take them.
-		if want < 0 && (named && cur == len(r.jobs)-1 || time.Since(since) >= long) {
+		away := want >= 0 && r.jobs[want].away // a lost server ends the run in failed, once it is quiet
+		if (want < 0 || away) && time.Since(since) >= long || want < 0 && named && cur == len(r.jobs)-1 {
 			r.protect(max(r.from, cur-streamWindow), cur+streamWindow+1)
 			return
 		}

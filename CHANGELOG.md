@@ -31,6 +31,7 @@ A few features need a newer Q2 Pod. Each one says so, and what the app does on o
 
 ### Fixed
 
+- A streamed list no longer ends when Wi-Fi drops for a while. The songs already fetched play on, the app keeps trying the next one, and the list goes on when the server answers again. Before, the list ended about 40 seconds after the server was lost, even if Wi-Fi came back. It still ends if no song has started for 30 minutes.
 - An internal error while answering one page no longer ends the app, and with it a running sync or stream. The page says "Something went wrong" with Retry; the error goes to `.subsonic/log.txt`.
 - **Default Quality** and **Streaming Quality** say "Couldn't save the setting" when the card can't be written, instead of showing a quality that wasn't saved.
 

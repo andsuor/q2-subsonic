@@ -519,8 +519,34 @@ func TestStreamSkipsSongItsServerLacks(t *testing.T) {
 	}
 }
 
-// Losing the server, a proxy's answer that it is down, or a refusal for the account fails every
-// song alike: the run ends at the song, as before, and the queue is left as it was.
+// Wi-Fi that drops in the middle of a list comes back: the song is tried on, past the backoff's
+// last entry, while the songs already fetched play, and the list goes on once the server answers.
+func TestStreamWaitsOutALostServer(t *testing.T) {
+	e := newEnv(t, fw.Caps{Playlist: true})
+	e.s.backoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+	var back atomic.Bool
+	lost := errFor(&subsonic.APIError{Op: "stream", Msg: "network is unreachable"}, "s1")
+	e.src.err = func(u string) error {
+		if back.Load() {
+			return nil
+		}
+		return lost(u)
+	}
+	e.s.start(songs(4, "flac"), 0)
+	until(t, "tried past the backoff", func() bool { return e.src.tries("s1") > 5 })
+	if !e.s.active() || e.s.Err() == nil || e.s.busy() {
+		t.Fatalf("active %v, err %v, busy %v: it waits, says so, and holds the Q2 awake for nothing", e.s.active(), e.s.Err(), e.s.busy())
+	}
+	back.Store(true)
+	until(t, "the list goes on", func() bool { return exists(e.stream(1, "flac")) && exists(e.stream(2, "flac")) })
+	if e.s.Err() != nil {
+		t.Fatalf("err %v after the server came back", e.s.Err())
+	}
+}
+
+// A refusal for the account fails every song alike and ends the run at the song at once; a lost
+// server or a proxy's answer that it is down ends it there too, once no song has started for the
+// idle time (the list was left, or ran out of fetched songs long ago). The queue is left as it was.
 func TestStreamConnectionLossEnds(t *testing.T) {
 	for name, err := range map[string]error{
 		"offline":   &subsonic.APIError{Op: "stream", Msg: "connection refused"},
@@ -531,6 +557,7 @@ func TestStreamConnectionLossEnds(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			e := newEnv(t, fw.Caps{Playlist: true})
 			e.s.backoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+			e.s.idle = 50 * time.Millisecond
 			e.src.err = errFor(err, "s1")
 			e.s.start(songs(4, "flac"), 0)
 			_, before := e.queue(t)
