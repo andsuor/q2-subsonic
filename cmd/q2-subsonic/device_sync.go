@@ -658,11 +658,15 @@ func there(paths []string) []string {
 }
 
 // syncDone is the runner's OnDone: with cap library, a sync that changed anything asks the firmware
-// to scan and import, whether or not the Sync page is open.
+// to scan and import, whether or not the Sync page is open. Every finished sync is recorded as the
+// last one (lastSynced).
 func (d *daemon) syncDone(p plan.Plan) {
 	d.mu.Lock()
 	d.lastReq = time.Now() // the summary and Failed Songs stay as long as after a press (I15)
 	d.mu.Unlock()
+	if err := library.WriteOwned(d.card, d.syncedPath(), []byte(time.Now().Format(time.RFC3339))); err != nil {
+		d.log.Printf("sync: last synced: %v", err)
+	}
 	if !d.caps.Library || !changes(p) {
 		return
 	}

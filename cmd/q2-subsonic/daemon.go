@@ -463,6 +463,8 @@ func (d *daemon) manifest() *library.Manifest {
 	return d.man
 }
 
+func (d *daemon) syncedPath() string { return filepath.Join(d.card, ".subsonic", "synced") }
+
 func (d *daemon) selPath() string { return filepath.Join(d.dir, "selection.json") }
 
 func (d *daemon) selection() (selection.Set, error) { return selection.Load(d.selPath()) }

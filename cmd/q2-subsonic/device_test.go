@@ -2373,3 +2373,41 @@ func TestDaemonReportsPlay(t *testing.T) {
 		t.Fatalf("%d scrobbles, the last %v", n.reqs("scrobble"), q)
 	}
 }
+
+// "Last synced" is when the last sync finished, not when a check last rewrote the manifest; a card
+// synced by an older build, with no record of it, shows the manifest's time as before.
+func TestLastSynced(t *testing.T) {
+	n := &nav{albums: 1, songsPer: 2}
+	d := newTestDaemon(t, n, "", true)
+	if at := d.lastSynced(); !at.IsZero() {
+		t.Fatalf("never synced: %v", at)
+	}
+	d.do("toggle", "playlist:pl1")
+	d.syncOK(t)
+	rec, man := filepath.Join(d.card, ".subsonic", "synced"), filepath.Join(d.card, ".subsonic", "manifest.json")
+	if at := d.lastSynced(); time.Since(at) > time.Minute || !exists(rec) {
+		t.Fatalf("after a sync: %v", at)
+	}
+	// A check that rewrites the manifest (the album now holds the playlist's songs) starts no run.
+	then := time.Now().Add(-26 * time.Hour).Truncate(time.Second)
+	os.WriteFile(rec, []byte(then.Format(time.RFC3339)), 0o644)
+	os.Chtimes(man, then, then)
+	d.do("toggle", "album:al0")
+	d.do("toggle", "playlist:pl1")
+	d.do("check")
+	d.preview(t)
+	if st, _ := os.Stat(man); st.ModTime().Equal(then) {
+		t.Fatal("the check didn't rewrite the manifest")
+	}
+	if at := d.lastSynced(); !at.Equal(then) {
+		t.Errorf("after a check: %v, want %v", at, then)
+	}
+	d.do("start")
+	eventually(t, "the sync to finish", func() bool { return d.runner.Snapshot().State == "done" && time.Since(d.lastSynced()) < time.Minute })
+	// An older build's card: no record.
+	os.Remove(rec)
+	os.Chtimes(man, then, then)
+	if at := d.lastSynced(); !at.Equal(then) {
+		t.Errorf("no record: %v, want the manifest's %v", at, then)
+	}
+}

@@ -476,11 +476,7 @@ func (d *daemon) syncSubtitle(cl *subsonic.Client) string {
 	pinged, err, host := d.pinged, d.pingErr, d.host
 	d.mu.Unlock()
 	last := "Not synced yet"
-	d.manifest()
-	d.mu.Lock()
-	at := d.manAt
-	d.mu.Unlock()
-	if !at.IsZero() {
+	if at := d.lastSynced(); !at.IsZero() {
 		last = "Last synced " + when(at, time.Now())
 	}
 	switch {
@@ -492,6 +488,20 @@ func (d *daemon) syncSubtitle(cl *subsonic.Client) string {
 		return "Not connected · " + subsonic.Message(err, host)
 	}
 	return "Connected · " + last
+}
+
+// lastSynced is when the last sync finished, as syncDone recorded it. A card synced by an older
+// build has no record: then it is the manifest's time, which a check moves too.
+func (d *daemon) lastSynced() time.Time {
+	if b, err := os.ReadFile(d.syncedPath()); err == nil {
+		if t, err := time.Parse(time.RFC3339, strings.TrimSpace(string(b))); err == nil {
+			return t.Local()
+		}
+	}
+	d.manifest()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.manAt
 }
 
 func when(t, now time.Time) string {
