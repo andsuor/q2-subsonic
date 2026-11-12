@@ -541,6 +541,11 @@ func (d *daemon) tick() {
 	d.wasBusy = busy
 	d.cache = slices.DeleteFunc(d.cache, func(e cacheEntry) bool { return time.Since(e.at) >= d.browseTTL })
 	d.mu.Unlock()
+	if !d.runner.CardMounted() { // pulled: what comes back may have lost songs, or be another card
+		d.mu.Lock()
+		d.cardWalked = false
+		d.mu.Unlock()
+	}
 	d.state.setHold(busy || d.signin.active() || d.stream.busy())
 	if d.caps.Library {
 		d.mu.Lock()

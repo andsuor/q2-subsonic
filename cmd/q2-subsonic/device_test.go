@@ -1884,6 +1884,28 @@ func TestCardWalkedOncePerStart(t *testing.T) {
 	}
 }
 
+// A card pulled and put back (the app runs from /tmp and outlives it) may have lost songs on a
+// PC meanwhile: the card seen gone means the next check walks it again.
+func TestCardWalkedAgainAfterCardAway(t *testing.T) {
+	d := newTestDaemon(t, &nav{albums: 2, songsPer: 2}, "", true)
+	d.do("toggle", "album:al0")
+	d.syncOK(t)
+	d.do("check")
+	d.preview(t) // walked
+	for _, e := range d.manifest().Songs {
+		os.Remove(e.Path)
+		break
+	}
+	mounted := d.runner.CardMounted
+	d.runner.CardMounted = func() bool { return false }
+	d.tick() // the card is out
+	d.runner.CardMounted = mounted
+	d.do("toggle", "album:al1") // a new preview, no Check Again
+	if d.preview(t); len(d.manifest().Songs) != 1 {
+		t.Fatal("the card came back and was not walked")
+	}
+}
+
 // A playlist change that moves no song still syncs: a new one whose songs are on the card, and one
 // taken out whose songs stay (I10).
 func TestPlaylistOnlyChangeSyncs(t *testing.T) {
