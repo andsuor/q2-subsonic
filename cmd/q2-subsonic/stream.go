@@ -397,10 +397,19 @@ func (r *streamRun) failed(i int, err error) (goOn, skipped bool) {
 	// play on, so the song is tried on at the backoff's last pace until the server answers. It
 	// ends only when no song has started for the idle time: the list was left. A server that
 	// answers the ping is not lost: the failure is the song's own, for the rules below.
-	if lost(err) && time.Now().Before(r.quietBy) && r.serverLost() {
-		j.away, j.next = true, time.Now().Add(s.backoff[len(s.backoff)-1])
-		s.setErr(e)
-		return true, false
+	if lost(err) && time.Now().Before(r.quietBy) {
+		if r.serverLost() {
+			j.away, j.next = true, time.Now().Add(s.backoff[len(s.backoff)-1])
+			s.setErr(e)
+			return true, false
+		}
+		// The server came back while this try was failing: the try was the outage's, not the
+		// song's. It starts over with its tries, and a song that is bad too ends as any other.
+		if j.away {
+			j.away, j.fails, j.next = false, 0, time.Time{}
+			s.setErr(nil)
+			return true, false
+		}
 	}
 	if r.queue == "" || j.landed || syncer.StopReason(err) != nil || r.skips >= 2 {
 		s.setErr(e)
