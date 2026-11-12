@@ -6,6 +6,10 @@ A few features need a newer Q2 Pod. Each one says so, and what the app does on o
 
 ## [Unreleased]
 
+### Fixed
+
+- A song whose file changed on the server without a tag the app names it by (a genre, comment or cover edit, or a re-rip) is downloaded again once. Before, every sync offered to replace it and never did.
+
 ## [0.6] - 2026-11-12
 
 ### Added

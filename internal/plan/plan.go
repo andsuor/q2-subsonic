@@ -77,8 +77,8 @@ func estimate(s subsonic.Song, q string) int64 {
 	return s.Size
 }
 
-// resized reports whether an original's server file changed size since it was synced (a re-rip).
-func resized(e *library.Entry, w *Want) bool {
+// Resized reports whether an original's server file changed size since it was synced (a re-rip).
+func Resized(e *library.Entry, w *Want) bool {
 	return w.Quality == "original" && e.SrcSize > 0 && w.Song.Size > 0 && e.SrcSize != w.Song.Size
 }
 
@@ -133,7 +133,7 @@ func Compute(sel selection.Set, resolved map[string][]subsonic.Song, playlistNam
 	// unchanged: the song stays as it is on the card.
 	unchanged := func(e *library.Entry, w *Want) bool {
 		return e.Quality == w.Quality && e.Meta == library.MetaKey(w.Song, w.Quality) && !library.StaleName(root, e.Path) &&
-			!resized(e, w)
+			!Resized(e, w)
 	}
 	// Every song owns its current path, case-folded (the card is FAT/exFAT: case variants are one
 	// file), for this whole sync: nothing new lands on a file that a rename, a replace or the removals
@@ -168,7 +168,7 @@ func Compute(sel selection.Set, resolved map[string][]subsonic.Song, playlistNam
 		case e == nil:
 			p.Add = append(p.Add, *w)
 			p.NeedBytes += w.Bytes
-		case e.Quality != w.Quality || !strings.EqualFold(filepath.Ext(e.Path), filepath.Ext(path)) || resized(e, w):
+		case e.Quality != w.Quality || !strings.EqualFold(filepath.Ext(e.Path), filepath.Ext(path)) || Resized(e, w):
 			// a new format or a re-rip is fetched again, never renamed
 			p.Replace = append(p.Replace, *w)
 			p.NeedBytes += w.Bytes - e.Size

@@ -546,7 +546,8 @@ func (j *job) downloads() error {
 	wants := append(append([]plan.Want(nil), j.p.Add...), j.p.Replace...)
 	have := func(w plan.Want) bool { // fetched by a run before this one
 		e := j.m.Songs[w.Song.ID]
-		return e != nil && e.Path == w.Path && e.Quality == w.Quality && e.Meta == library.MetaKey(w.Song, w.Quality)
+		return e != nil && e.Path == w.Path && e.Quality == w.Quality && e.Meta == library.MetaKey(w.Song, w.Quality) &&
+			!plan.Resized(e, &w)
 	}
 	// room[i] is the most the card must still take from want i on: a replace's old file goes once
 	// the new one is there, so songs that shrink free nothing for the ones fetched before them.

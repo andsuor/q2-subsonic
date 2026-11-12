@@ -1553,3 +1553,29 @@ func TestDropMissingChecksTheCard(t *testing.T) {
 		t.Errorf("%+v", m.Songs)
 	}
 }
+
+// A re-rip (an original whose server size changed, same tags and path) is fetched again and its
+// new size recorded; before, the run took it for one fetched already and the plan offered it
+// as a replace on every sync.
+func TestRunRefetchesReRip(t *testing.T) {
+	_, r, root := setup(t)
+	a := want(root, "a", "original")
+	a.Song.Size = 5000
+	os.MkdirAll(filepath.Dir(a.Path), 0o755)
+	os.WriteFile(a.Path, []byte("old"), 0o644)
+	m := &library.Manifest{Songs: map[string]*library.Entry{"a": {ID: "a", Path: a.Path, Quality: "original", Size: 3,
+		SrcSize: 4000, Items: a.Items, Meta: library.MetaKey(a.Song, "original")}}}
+	if err := m.Save(root, root+"/.subsonic/manifest.json"); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Start(plan.Plan{Replace: []plan.Want{a}}); err != nil {
+		t.Fatal(err)
+	}
+	if s := wait(t, r); s.State != "done" || s.Failed != 0 {
+		t.Fatalf("%+v", s)
+	}
+	sameFile(t, a.Path, "a")
+	if e := manifest(t, root).Songs["a"]; e.SrcSize != 5000 {
+		t.Fatalf("%+v", e)
+	}
+}
