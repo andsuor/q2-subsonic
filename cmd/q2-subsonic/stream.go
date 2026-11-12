@@ -29,7 +29,11 @@ const streamWindow = 2 // songs fetched ahead of, and kept behind, the one playi
 type streamSource interface {
 	PlayURL(id, quality string) string
 	Get(ctx context.Context, u string, from int64) (*http.Response, error)
+	Ping(ctx context.Context) error
 }
+
+// pingIn is how long the server has to answer the ping that tells a lost server from one bad song.
+const pingIn = 10 * time.Second
 
 // streamer plays a list by fetching songs a couple ahead of .playing into the hidden stream
 // folder and telling the firmware what to play through .play. Streamed files never go in the manifest.
@@ -364,13 +368,22 @@ func lost(err error) bool {
 	return errors.Is(syncer.StopReason(err), syncer.ErrOffline) && !errors.As(err, &pe) && !errors.As(err, &le)
 }
 
+// serverLost asks the server itself with a ping: one song's own stall, cut body or proxy error reads
+// as a lost server too, and waiting mends none of those. An answer of any kind is a server there.
+func (r *streamRun) serverLost() bool {
+	ctx, cancel := context.WithTimeout(r.ctx, pingIn)
+	defer cancel()
+	return lost(r.s.src.Ping(ctx))
+}
+
 // failed counts a failed try of song i and reports whether the run goes on, and whether the song
 // was skipped. A song is tried once a backoff entry (in a playlist, once when it is gone). Then,
 // in a playlist, a song the server can't send (gone, a transcode that fails, an error for a body)
-// is dropped from the list and the queue file, and the firmware plays on past it. Losing the
-// server, a refusal for the account, a card that can't be written (StopReason: an errno is a
-// net.Error), a third song in a row, or a song that landed before (the firmware may have passed
-// its line, which must stay) ends the run at it, the queue waiting there.
+// is dropped from the list and the queue file, and the firmware plays on past it. A lost server
+// is waited for. A song that fails as a lost server would while the server answers a ping, a
+// refusal for the account, a card that can't be written (StopReason: an errno is a net.Error), a
+// third song in a row, or a song that landed before (the firmware may have passed its line, which
+// must stay) ends the run at it, the queue waiting there.
 func (r *streamRun) failed(i int, err error) (goOn, skipped bool) {
 	j, sg, s := &r.jobs[i], r.songs[i], r.s
 	j.fails++
@@ -382,8 +395,9 @@ func (r *streamRun) failed(i int, err error) (goOn, skipped bool) {
 	e := &streamErr{title: sg.Title, id: sg.ID, at: time.Now(), err: err}
 	// The server is lost (Wi-Fi dropped, the Q2 slept while paused): the songs already fetched
 	// play on, so the song is tried on at the backoff's last pace until the server answers. It
-	// ends only when no song has started for the idle time: the list was left.
-	if lost(err) && time.Now().Before(r.quietBy) {
+	// ends only when no song has started for the idle time: the list was left. A server that
+	// answers the ping is not lost: the failure is the song's own, for the rules below.
+	if lost(err) && time.Now().Before(r.quietBy) && r.serverLost() {
 		j.away, j.next = true, time.Now().Add(s.backoff[len(s.backoff)-1])
 		s.setErr(e)
 		return true, false

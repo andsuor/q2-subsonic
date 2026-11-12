@@ -28,6 +28,14 @@ type fakeSrc struct {
 	fail  func(u string) bool
 	err   func(u string) error              // optional: the error Get answers u with (nil: none)
 	body  func(u string) (io.Reader, int64) // optional: the answer's body and its Content-Length (-1: none sent)
+	ping  func() error                      // optional: Ping's answer (nil: the server answers)
+}
+
+func (f *fakeSrc) Ping(context.Context) error {
+	if f.ping != nil {
+		return f.ping()
+	}
+	return nil
 }
 
 func (f *fakeSrc) MediaURL(id, q string) string { return "u:" + id + ":" + q }
@@ -514,6 +522,7 @@ func TestStreamWaitsOutALostServer(t *testing.T) {
 		}
 		return lost(u)
 	}
+	e.src.ping = func() error { return e.src.err("p:s1:") } // the server itself is out of reach
 	e.s.start(songs(4, "flac"), 0)
 	until(t, "tried past the backoff", func() bool { return e.src.tries("s1") > 5 })
 	if !e.s.active() || e.s.Err() == nil || e.s.busy() {
@@ -541,6 +550,7 @@ func TestStreamConnectionLossEnds(t *testing.T) {
 			e.s.backoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
 			e.s.idle = 50 * time.Millisecond
 			e.src.err = errFor(err, "s1")
+			e.src.ping = func() error { return err }
 			e.s.start(songs(4, "flac"), 0)
 			_, before := e.queue(t)
 			until(t, "ended", func() bool { return !e.s.active() })
@@ -549,6 +559,37 @@ func TestStreamConnectionLossEnds(t *testing.T) {
 			}
 			if e.s.Err() == nil || e.s.Err().Error() != "Couldn't stream T1" || exists(e.stream(2, "flac")) {
 				t.Fatalf("err %v", e.s.Err())
+			}
+		})
+	}
+}
+
+// One song whose own transfer fails as a lost server would (it stalls, its body is cut, a proxy
+// answers 502 for it) while the server answers a ping is that song's own: the run ends at it after
+// the backoff, as before a lost server was waited for, and not after the idle time.
+func TestStreamOneBadSongIsNotALostServer(t *testing.T) {
+	for name, err := range map[string]error{
+		"stalled":   &subsonic.APIError{Op: "stream", Msg: "no data for 30s"},
+		"cut body":  io.ErrUnexpectedEOF,
+		"proxy 502": &subsonic.APIError{Op: "stream", HTTP: 502, Msg: "Bad Gateway"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := newEnv(t, fw.Caps{Playlist: true})
+			e.s.backoff = []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond}
+			e.src.err = errFor(err, "s1")
+			var pings atomic.Int32
+			e.src.ping = func() error { pings.Add(1); return nil }
+			e.s.start(songs(4, "flac"), 0)
+			_, before := e.queue(t)
+			until(t, "ended", func() bool { return !e.s.active() })
+			if _, after := e.queue(t); after != before {
+				t.Fatalf("queue %q, was %q", after, before)
+			}
+			if e.s.Err() == nil || e.s.Err().Error() != "Couldn't stream T1" || exists(e.stream(2, "flac")) {
+				t.Fatalf("err %v", e.s.Err())
+			}
+			if n := e.src.tries("s1"); n != 3 || pings.Load() != 1 {
+				t.Fatalf("%d tries, %d pings, want 3 and 1", n, pings.Load())
 			}
 		})
 	}

@@ -441,6 +441,13 @@ func (s src) Scrobble(ctx context.Context, id string, at time.Time, submission b
 	return errSignedOut
 }
 
+func (s src) Ping(ctx context.Context) error {
+	if c := s.d.client(); c != nil {
+		return c.Ping(ctx)
+	}
+	return errSignedOut
+}
+
 func (s src) Get(ctx context.Context, u string, from int64) (*http.Response, error) {
 	if c := s.d.client(); c != nil {
 		return c.Get(ctx, u, from)
