@@ -6,6 +6,8 @@ A few features need a newer Q2 Pod. Each one says so, and what the app does on o
 
 ## [Unreleased]
 
+## [0.7] - 2026-11-12
+
 ### Fixed
 
 - A song whose file changed on the server without a tag the app names it by (a genre, comment or cover edit, or a re-rip) is downloaded again once. Before, every sync offered to replace it and never did.
@@ -104,7 +106,8 @@ First release. It needs Q2 Pod with card apps and a Subsonic or OpenSubsonic ser
 - Passwords, tokens, API keys and a `user:password@` in the server address never reach `log.txt` or the Account page.
 - The app changes only `Subsonic/`, the playlist files it wrote and `.subsonic/`, and deletes only what a sync put there, after the downloads have finished.
 
-[Unreleased]: https://github.com/andsuor/q2-subsonic/compare/q2-v0.6...HEAD
+[Unreleased]: https://github.com/andsuor/q2-subsonic/compare/q2-v0.7...HEAD
+[0.7]: https://github.com/andsuor/q2-subsonic/compare/q2-v0.6...q2-v0.7
 [0.6]: https://github.com/andsuor/q2-subsonic/compare/q2-v0.5...q2-v0.6
 [0.5]: https://github.com/andsuor/q2-subsonic/compare/q2-v0.4...q2-v0.5
 [0.4]: https://github.com/andsuor/q2-subsonic/compare/q2-v0.3...q2-v0.4
