@@ -6,6 +6,8 @@ A few features need a newer Q2 Pod. Each one says so, and what the app does on o
 
 ## [Unreleased]
 
+## [0.6] - 2026-11-12
+
 ### Added
 
 - **Discover**, a new tab of the first page (a row of its list on older Q2 Pod): **Shuffle All**, **Recently Added**, **Recently Played**, **Most Played**, **Random Albums**, **Starred** and **Genres**. A genre lists its albums and has its own **Shuffle**. Recently Played and Most Played show what the server user has played, songs played from the app included (see Report Plays below).
@@ -98,7 +100,8 @@ First release. It needs Q2 Pod with card apps and a Subsonic or OpenSubsonic ser
 - Passwords, tokens, API keys and a `user:password@` in the server address never reach `log.txt` or the Account page.
 - The app changes only `Subsonic/`, the playlist files it wrote and `.subsonic/`, and deletes only what a sync put there, after the downloads have finished.
 
-[Unreleased]: https://github.com/andsuor/q2-subsonic/compare/q2-v0.5...HEAD
+[Unreleased]: https://github.com/andsuor/q2-subsonic/compare/q2-v0.6...HEAD
+[0.6]: https://github.com/andsuor/q2-subsonic/compare/q2-v0.5...q2-v0.6
 [0.5]: https://github.com/andsuor/q2-subsonic/compare/q2-v0.4...q2-v0.5
 [0.4]: https://github.com/andsuor/q2-subsonic/compare/q2-v0.3...q2-v0.4
 [0.3]: https://github.com/andsuor/q2-subsonic/compare/q2-v0.2...q2-v0.3
