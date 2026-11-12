@@ -37,6 +37,7 @@ type nav struct {
 	albumArtist      string // the albums' own artist, when not "Artist"
 	albums, songsPer int
 	stall            bool                                                    // every request hangs until the client gives up
+	trickle          bool                                                    // every request is answered a byte now and then, for ever
 	errCode          int                                                     // every API call fails with this Subsonic code
 	block            chan struct{}                                           // downloads wait for it
 	failID           string                                                  // getAlbum fails for this album only
@@ -142,6 +143,14 @@ func (n *nav) songs(al int) []map[string]any {
 func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if n.stall {
 		<-r.Context().Done()
+		return
+	}
+	if n.trickle {
+		for r.Context().Err() == nil {
+			w.Write([]byte(" "))
+			w.(http.Flusher).Flush()
+			time.Sleep(20 * time.Millisecond)
+		}
 		return
 	}
 	q := r.URL.Query()
@@ -722,6 +731,34 @@ func TestPreviewFailsFastWithoutRace(t *testing.T) {
 	}
 	if _, ok := find(r, "Start Sync"); ok {
 		t.Fatal("a failed preview offers Start Sync")
+	}
+}
+
+// A server that trickles its answer, a byte now and then, never trips the idle time: each request
+// of the check has its own limit, and the check fails with its error rows instead of checking for
+// ever; opening Sync again tries again.
+func TestPreviewTrickleFails(t *testing.T) {
+	old := checkCallMax
+	checkCallMax = 300 * time.Millisecond
+	t.Cleanup(func() { checkCallMax = old })
+	for item, it := range map[string]selection.Item{
+		"album":   {Kind: selection.KindAlbum, ID: "al0", Name: "x", Quality: "original"},
+		"library": {Kind: selection.KindLibrary, ID: "all", Quality: "original"},
+	} {
+		d := newTestDaemon(t, &nav{albums: 2, songsPer: 2, trickle: true}, "", true)
+		sel := selection.Set{Version: 1}
+		sel.Toggle(it)
+		sel.Save(filepath.Join(d.dir, "selection.json"))
+		r := d.preview(t)
+		if r.Rows[0].Title != "The server stopped sending" {
+			t.Errorf("%s: rows %q", item, titles(r))
+		}
+		if _, ok := find(r, "Details"); !ok {
+			t.Errorf("%s: no Details in %q", item, titles(r))
+		}
+		if r := d.do("sync"); r.Message != "refresh" {
+			t.Errorf("%s: Sync again doesn't check again: %q", item, titles(r))
+		}
 	}
 }
 

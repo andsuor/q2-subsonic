@@ -40,6 +40,16 @@ type Client struct {
 	// Log, when set, receives one redacted line per request.
 	Log  *applog.Log
 	idle time.Duration // a body Read that waits longer fails; 0 is idleAfter
+	max  time.Duration // an API call that takes longer, headers and body, fails; 0 is no limit
+}
+
+// Within returns a client whose API calls (not Get's downloads) each fail with ErrStalled after d.
+// The idle time alone starts again at every byte, so a server that trickles could hold a call for
+// ever.
+func (c *Client) Within(d time.Duration) *Client {
+	k := *c
+	k.max = d
+	return &k
 }
 
 // New refuses anything but an https server address.
@@ -170,13 +180,28 @@ func (b *idleBody) Close() error {
 
 // call performs one API request and decodes the subsonic-response object into out (when not nil).
 func (c *Client) call(ctx context.Context, op string, q url.Values, out any) error {
+	late := func() bool { return false }
+	if c.max > 0 {
+		parent := ctx
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.max)
+		defer cancel()
+		late = func() bool { return ctx.Err() == context.DeadlineExceeded && parent.Err() == nil }
+	}
+	slow := &APIError{Op: op, Msg: fmt.Sprintf("no answer in %v", c.max), kind: ErrStalled}
 	resp, err := c.do(ctx, op, c.endpoint(op, q), 0)
 	if err != nil {
+		if late() {
+			return slow
+		}
 		return err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if err != nil {
+		if late() {
+			return slow
+		}
 		var ae *APIError
 		if errors.As(err, &ae) {
 			return err

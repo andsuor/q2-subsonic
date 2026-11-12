@@ -33,6 +33,9 @@ import (
 
 const planMargin = 16 << 20 // plan.Compute's headroom on top of what a sync needs
 
+// checkCallMax is the longest one request of a check may take, headers and body. var for tests.
+var checkCallMax = 2 * time.Minute
+
 // working is the Sync page's note once the server has answered and the rest is the Q2's own work.
 const working = "Working out the changes…"
 
@@ -81,8 +84,9 @@ func (d *daemon) syncPage(cl *subsonic.Client) q2spot.Reply {
 	p := d.preview
 	if p == nil || p.gen != d.gen || p.done && time.Since(p.at) > previewTTL {
 		d.dropPreview()
-		// No ceiling: a large library takes as long as it takes. A request that gets no answer
-		// ends it (the client's 15 s for headers, 30 s for a silent body), or dropPreview.
+		// No ceiling on the whole: a large library takes as long as it takes. A request that gets
+		// no answer ends it (the client's 15 s for headers, 30 s for a silent body, checkCallMax
+		// for one that trickles), or dropPreview.
 		ctx, cancel := context.WithCancel(context.Background())
 		p = &preview{gen: d.gen, at: time.Now(), cancel: cancel, full: d.fullCheck}
 		d.preview, d.fullCheck = p, false
@@ -167,6 +171,7 @@ func (d *daemon) migrate() q2spot.Reply {
 func (d *daemon) computePreview(ctx context.Context, cl *subsonic.Client, p *preview) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	cl = cl.Within(checkCallMax) // every request of the check, songsOf's and resolveLibrary's too
 	start := time.Now()
 	lapAt := start
 	lap := func() time.Duration { // since the lap before
