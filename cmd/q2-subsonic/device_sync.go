@@ -874,7 +874,7 @@ func (d *daemon) resolveLibrary(ctx context.Context, cl *subsonic.Client, sem ch
 	note(working) // the last count would stand through the cache's write and the plan
 	if !reuse && lastScan != "" && len(c.Songs) <= maxCacheSongs {
 		now, known := libNow()
-		if ls, n := status(); known && ls == lastScan && n == count {
+		if ls, n := status(); known && ls == lastScan && n == count && ctx.Err() == nil { // not after Sign Out
 			t := time.Now()
 			b, _ := json.Marshal(libCache{libCacheFmt, account, lastScan, count, now, c.Albums, c.Songs})
 			if err := library.WriteOwned(d.card, file, b); err != nil {

@@ -11,6 +11,7 @@ import (
 
 	"github.com/andsuor/q2-subsonic/internal/creds"
 	"github.com/andsuor/q2-subsonic/internal/fw"
+	"github.com/andsuor/q2-subsonic/internal/library"
 	"github.com/andsuor/q2-subsonic/internal/plan"
 	"github.com/andsuor/q2-subsonic/internal/subsonic"
 )
@@ -460,6 +461,24 @@ func TestSignOutClearsCache(t *testing.T) {
 	d.bg.Wait()
 	if exists(a) || !exists(b) {
 		t.Fatalf("after Sign Out: a %v b %v", exists(a), exists(b))
+	}
+}
+
+// Sign Out takes the account's library listing off the card. When the card was last synced stays,
+// as the manifest and the songs it is about do.
+func TestSignOutRemovesLibraryCache(t *testing.T) {
+	d := newTestDaemon(t, &nav{}, "", true)
+	d.bg.Wait()
+	lib, synced := filepath.Join(d.card, ".subsonic", "library.json"), d.syncedPath()
+	for _, f := range []string{lib, synced} {
+		if err := library.WriteOwned(d.card, f, []byte("x")); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d.signOut()
+	d.bg.Wait()
+	if exists(lib) || !exists(synced) {
+		t.Fatalf("after Sign Out: library.json %v, synced %v", exists(lib), exists(synced))
 	}
 }
 

@@ -33,6 +33,7 @@ A few features need a newer Q2 Pod. Each one says so, and what the app does on o
 
 - A streamed list no longer ends when Wi-Fi drops for a while. The songs already fetched play on, the app keeps trying the next one, and the list goes on when the server answers again. Before, the list ended about 40 seconds after the server was lost, even if Wi-Fi came back. It still ends if no song has started for 30 minutes. One song that fails on its own while the server still answers is not waited for: the list stops at it, as before.
 - An internal error while answering one page no longer ends the app, and with it a running sync or stream. The page says "Something went wrong" with Retry; the error goes to `.subsonic/log.txt`.
+- **Sign Out** removes the list of the server's songs that Sync keeps on the card (`.subsonic/library.json`). The songs you synced stay, as before.
 - **Default Quality** and **Streaming Quality** say "Couldn't save the setting" when the card can't be written, instead of showing a quality that wasn't saved.
 - Sync's **Last synced** is when the last sync finished. Before, a check of the server could move it, though nothing was synced. On a card synced with an older version it is right from the next sync on.
 - Albums and artists show **On Q2**, or how many of their songs are on the Q2, as soon as the app starts. Before, Albums and Recently Added showed nothing for them until Sync had checked the server. Songs synced with an older version show it again after the next check.

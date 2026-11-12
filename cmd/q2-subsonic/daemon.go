@@ -400,6 +400,10 @@ func (d *daemon) signOut() {
 	d.dropPreview()
 	d.playSeq++ // a play still waiting for playMu is dropped
 	d.mu.Unlock()
+	// The account's whole library listing; the preview that could write it again is dropped above.
+	if err := library.Remove(d.card, filepath.Join(d.card, ".subsonic", "library.json")); err != nil {
+		d.log.Printf("sign out: library cache: %v", err)
+	}
 	d.art.clear() // after the client is gone: a fetch that had it stores nothing
 	d.spawn(d.runner.Cancel)
 	d.spawn(func() { // under playMu, so a start already running finishes first and is then stopped
