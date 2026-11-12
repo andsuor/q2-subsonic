@@ -893,7 +893,8 @@ func (d *daemon) resolveLibrary(ctx context.Context, cl *subsonic.Client, sem ch
 // librarySongs is a full check: every album listed (500 a page), then its songs. The songs are
 // asked for 500 at a time (Client.Songs) and grouped by album; an album whose group has exactly the
 // songs its listing counts uses the group, in getAlbum's order and with its album-artist rule, and
-// every other album is fetched with getAlbum, as before. So a server that gives nothing for the
+// every other album is fetched with getAlbum, as before, and so is an album whose group lacks a
+// song that is on the card. So a server that gives nothing for the
 // empty query, ignores the offset or loses a page is checked album by album for what is short, and
 // a page that fails is not the check's failure: getAlbum decides. It returns the songs and the
 // number of albums.
@@ -960,12 +961,22 @@ func (d *daemon) librarySongs(ctx context.Context, cl *subsonic.Client, slot fun
 		}
 		off += len(page)
 	}
+	// The pages may add songs, never take a synced one away by themselves: an album whose group
+	// lacks a song the manifest has on the card for it is asked for too (a server whose count and
+	// pages are both short of a song would else have it removed from the card). No request when
+	// nothing is missing. A song synced before album ids were recorded can't be matched.
+	short := map[string]bool{}
+	for id, e := range d.manifest().Songs { // the loaded one: read again only when the file changed
+		if e.Album != "" && !short[e.Album] && !slices.ContainsFunc(groups[e.Album], func(s subsonic.Song) bool { return s.ID == id }) {
+			short[e.Album] = true
+		}
+	}
 	albumSongs := make([][]subsonic.Song, len(albums))
 	var need []int // the albums the pages didn't give whole
 	have := 0
 	for i, a := range albums {
 		g := groups[a.ID]
-		if a.SongCount == 0 || len(g) != a.SongCount {
+		if a.SongCount == 0 || len(g) != a.SongCount || short[a.ID] {
 			need = append(need, i)
 			continue
 		}

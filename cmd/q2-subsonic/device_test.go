@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -60,6 +61,8 @@ type nav struct {
 	pageEmptyAt      int                                                     // the page at this offset is ok and empty, as Navidrome answers a failed search
 	pageErr          int                                                     // the empty query fails with this Subsonic code
 	songReqs         atomic.Int32                                            // empty-query search3 calls served
+	omit             atomic.Value                                            // a song id, a string: the empty query leaves it out, and its album's listing counts one song less
+	omitAlbum        atomic.Bool                                             // getAlbum leaves omit out too: the song is gone
 	holdSongs        chan struct{}                                           // the empty query's later pages wait for it
 	holdPlaylists    chan struct{}                                           // getPlaylist waits for it, but for pl1
 	lastScan         atomic.Value                                            // getScanStatus's lastScan, a string; unset, the call is not found (not Navidrome)
@@ -110,6 +113,9 @@ func (n *nav) album(i int) map[string]any {
 		artist = "Various Artists"
 	}
 	a := map[string]any{"id": fmt.Sprintf("al%d", i), "name": fmt.Sprintf("Album %03d", i), "artist": artist, "year": 2020, "songCount": n.songsPer}
+	if o, _ := n.omit.Load().(string); strings.HasPrefix(o, a["id"].(string)+".") {
+		a["songCount"] = n.songsPer - 1
+	}
 	if n.art {
 		a["coverArt"] = a["id"]
 	}
@@ -218,7 +224,11 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a := n.album(albumOf(q.Get("id")))
-		a["song"] = n.songs(albumOf(q.Get("id")))
+		so := n.songs(albumOf(q.Get("id")))
+		if o, _ := n.omit.Load().(string); n.omitAlbum.Load() {
+			so = slices.DeleteFunc(so, func(s map[string]any) bool { return s["id"] == o })
+		}
+		a["song"] = so
 		ok("album", a)
 	case "getPlaylists":
 		var pls []any
@@ -304,6 +314,9 @@ func (n *nav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			var so []map[string]any // not in album order, as Navidrome's are in the order they were added
 			for k := off; k < n.albums*n.songsPer && k < off+size; k++ {
 				so = append(so, n.song(n.albums-1-k/n.songsPer, n.songsPer-1-k%n.songsPer))
+			}
+			if o, _ := n.omit.Load().(string); o != "" {
+				so = slices.DeleteFunc(so, func(s map[string]any) bool { return s["id"] == o })
 			}
 			ok("searchResult3", map[string]any{"song": so})
 			return
@@ -2194,6 +2207,33 @@ func TestEntireLibraryPagesDegrade(t *testing.T) {
 	} else if _, ok := find(r, "Start Sync"); ok {
 		t.Errorf("a failed check offers Start Sync: %q", titles(r))
 	}
+}
+
+// The pages may add songs but never take a synced one away by themselves: an album whose page
+// group lacks a song the manifest has on the card for it is asked for with getAlbum, whose answer
+// decides. Nothing missing costs no request.
+func TestEntireLibraryPagesNeverDropASyncedSong(t *testing.T) {
+	n := &nav{albums: 3, songsPer: 2, paged: true}
+	d := newTestDaemon(t, n, "", true)
+	d.do("toggle", "library:all")
+	d.syncOK(t)
+	check := func(what, want string, albums int32) {
+		t.Helper()
+		before := n.albumReqs.Load()
+		d.do("check")
+		r := d.preview(t)
+		if _, ok := find(r, want); !ok {
+			t.Errorf("%s: preview %q, want %q", what, titles(r), want)
+		}
+		if got := n.albumReqs.Load() - before; got != albums {
+			t.Errorf("%s: %d getAlbum calls, want %d", what, got, albums)
+		}
+	}
+	check("nothing missing", "Everything is up to date", 0)
+	n.omit.Store("al1.0") // the pages and the album's count lose a song the album still has
+	check("left out of the pages", "Everything is up to date", 1)
+	n.omitAlbum.Store(true) // the song is gone from the server
+	check("gone", "−1 song", 1)
 }
 
 // A compilation from the pages stays one folder, as from getAlbum (M41).
